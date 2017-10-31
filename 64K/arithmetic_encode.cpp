@@ -7,14 +7,14 @@
 
 static const unsigned VAL_RANGE = 1u << 16;
 
-static void prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], double* pEntropy)
+static void prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], double* pInfo)
 {
   // calculated statistics of appearance
   unsigned stat[256]={0};
   for (unsigned i = 0; i < srclen; ++i)
     ++stat[src[i]];
 
-  if (pEntropy) {
+  if (pInfo) {
     // calculate source entropy
     double entropy = 0;
     for (unsigned c = 0; c < 256; ++c) {
@@ -22,7 +22,7 @@ static void prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], do
       if (cnt)
         entropy += log2(double(srclen)/cnt)*cnt;
     }
-    *pEntropy = entropy;
+    pInfo[0] = entropy;
   }
 
   // sort statistics in ascending order
@@ -70,6 +70,7 @@ static void prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], do
 
 static unsigned insert_bits(uint8_t* dst, unsigned i, uint32_t val, int nbits)
 {
+  // printf("<< %2d %05x\n", nbits, val);
   int di = i / 8;
   int ri = i % 8;
   if (ri != 0) {
@@ -109,12 +110,13 @@ static int insert_zeros(uint8_t* dst, unsigned i, unsigned runlen)
 }
 
 // return the number of stored octets
-static int store_model(uint8_t* dst, const uint16_t c2low[257])
+static int store_model(uint8_t* dst, const uint16_t c2low[257], double* pInfo)
 {
   unsigned zero_run = 0;
   unsigned i = 0;
   for (unsigned c = 0; c < 256; ++c) {
     unsigned range = (uint32_t(c2low[c+1]) - uint32_t(c2low[c])) & (VAL_RANGE-1);
+    // printf("%3u %04x\n", c, range);
     if (range == 0) {
       ++zero_run;
       if (zero_run == 33) {
@@ -131,6 +133,9 @@ static int store_model(uint8_t* dst, const uint16_t c2low[257])
   }
   if (zero_run)
     i = insert_zeros(dst, i, zero_run);
+  
+  if (pInfo)
+    pInfo[1] = i;
   return (i + 7) / 8;
 }
 
@@ -183,14 +188,16 @@ static void encode(std::vector<uint8_t>* dst, const uint8_t* src, unsigned srcle
 }
 
 
-void arithmetic_encode(std::vector<uint8_t>* dst, const uint8_t* src, int srclen, double* pEntropy)
+void arithmetic_encode(std::vector<uint8_t>* dst, const uint8_t* src, int srclen, double* pInfo)
 {
   uint16_t c2low[257];
-  prepare(src, srclen, c2low, pEntropy);
+  prepare(src, srclen, c2low, pInfo);
   size_t sz0 = dst->size();
   dst->resize(sz0 + 640);
-  unsigned modellen = store_model(&dst->at(sz0), c2low);
+  unsigned modellen = store_model(&dst->at(sz0), c2low, pInfo);
   // printf("ml=%u\n", modellen);
   dst->resize(sz0 + modellen);
   encode(dst, src, srclen, c2low);
+  if (pInfo)
+    pInfo[2] = (dst->size()-sz0-modellen)*8.0;
 }

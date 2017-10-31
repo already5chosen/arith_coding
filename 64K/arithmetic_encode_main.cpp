@@ -40,11 +40,11 @@ int main(int argz, char** argv)
         }
         if (tilelen > 0) {
           dst.clear();
-          double entropy;
-          arithmetic_encode(&dst, inptile, tilelen, vFlag ? &entropy : 0);
+          double info[8];
+          arithmetic_encode(&dst, inptile, tilelen, vFlag ? info : 0);
           size_t ressz = dst.size();
           if (vFlag)
-            printf("%7u -> %7u. Entropy %.4f\n", unsigned(tilelen), unsigned(ressz), entropy/8);
+            printf("%7u -> %7u. Model %.3f. Coded %.3f. Entropy %.3f\n", unsigned(tilelen), unsigned(ressz), info[1]/8, info[2]/8, info[0]/8);
           uint8_t hdr[6];
           hdr[0] = uint8_t(tilelen >> 0);
           hdr[1] = uint8_t(tilelen >> 8);
