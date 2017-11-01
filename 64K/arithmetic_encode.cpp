@@ -7,7 +7,7 @@
 
 static const unsigned VAL_RANGE = 1u << 16;
 
-static void prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], double* pInfo)
+static int prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], double* pInfo)
 {
   // calculated statistics of appearance
   unsigned stat[256]={0};
@@ -60,12 +60,15 @@ static void prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], do
 
   // c2low -> cumulative sums of ranges
   unsigned lo = 0;
+  unsigned maxC = 255;
   for (unsigned c = 0; c < 256; ++c) {
     unsigned range = c2low[c];
     c2low[c] = lo;
     lo += range;
+    if (range > 0)
+      maxC = c;
   }
-  c2low[256] = 0;
+  return maxC;
 }
 
 static unsigned insert_bits(uint8_t* dst, unsigned i, uint32_t val, int nbits)
@@ -103,6 +106,10 @@ static int insert_number(uint8_t* dst, unsigned i, unsigned val)
 }
 static int insert_zeros(uint8_t* dst, unsigned i, unsigned runlen)
 {
+  while (runlen > 33) {
+    i = insert_bits(dst, i, (33-2)*8 + 7, 8);
+    runlen -= 33;
+  }
   if (runlen == 1)
     return insert_bits(dst, i, 0*2 + 0, 8);
   else
@@ -110,19 +117,16 @@ static int insert_zeros(uint8_t* dst, unsigned i, unsigned runlen)
 }
 
 // return the number of stored octets
-static int store_model(uint8_t* dst, const uint16_t c2low[257], double* pInfo)
+static int store_model(uint8_t* dst, const uint16_t c2low[256], unsigned maxC, double* pInfo)
 {
+  dst[0] = maxC;
   unsigned zero_run = 0;
-  unsigned i = 0;
-  for (unsigned c = 0; c < 256; ++c) {
-    unsigned range = (uint32_t(c2low[c+1]) - uint32_t(c2low[c])) & (VAL_RANGE-1);
+  unsigned i = 8;
+  for (unsigned c = 0; c < maxC; ++c) {
+    unsigned range = c2low[c+1] - c2low[c];
     // printf("%3u %04x\n", c, range);
     if (range == 0) {
       ++zero_run;
-      if (zero_run == 33) {
-        i = insert_zeros(dst, i, zero_run);
-        zero_run = 0;
-      }
     } else {
       if (zero_run) {
         i = insert_zeros(dst, i, zero_run);
@@ -133,13 +137,16 @@ static int store_model(uint8_t* dst, const uint16_t c2low[257], double* pInfo)
   }
   if (zero_run)
     i = insert_zeros(dst, i, zero_run);
-  
+
+  // last non-zero range
+  i = insert_number(dst, i, VAL_RANGE-c2low[maxC]);
+
   if (pInfo)
     pInfo[1] = i;
   return (i + 7) / 8;
 }
 
-static void encode(std::vector<uint8_t>* dst, const uint8_t* src, unsigned srclen, const uint16_t c2low[257])
+static void encode(std::vector<uint8_t>* dst, const uint8_t* src, unsigned srclen, const uint16_t c2low[257], int maxC)
 {
   uint64_t VAL_MSK  = uint64_t(-1) >> 16;
   uint64_t MSK31_0  = (uint64_t(1) << 32)-(uint64_t(1) << 0);
@@ -157,12 +164,9 @@ static void encode(std::vector<uint8_t>* dst, const uint8_t* src, unsigned srcle
     range += 1;
 
     int c = src[i];
-    uint32_t cLo = c2low[c+0];
-    uint32_t cHi = c2low[c+1];
-    if (cHi==0)
-      cHi = VAL_RANGE;
-    hi = lo + ((range * cHi)>>16) - 1;
-    lo = lo + ((range * cLo)>>16);
+    if (c < maxC)
+      hi = lo + ((range * c2low[c+1])>>16) - 1;
+    lo   = lo + ((range * c2low[c+0])>>16);
 
     while (((lo ^ hi) >> 40)==0) {
       // lo and hi have the same upper octet
@@ -191,13 +195,13 @@ static void encode(std::vector<uint8_t>* dst, const uint8_t* src, unsigned srcle
 void arithmetic_encode(std::vector<uint8_t>* dst, const uint8_t* src, int srclen, double* pInfo)
 {
   uint16_t c2low[257];
-  prepare(src, srclen, c2low, pInfo);
+  unsigned maxC = prepare(src, srclen, c2low, pInfo);
   size_t sz0 = dst->size();
   dst->resize(sz0 + 640);
-  unsigned modellen = store_model(&dst->at(sz0), c2low, pInfo);
+  unsigned modellen = store_model(&dst->at(sz0), c2low, maxC, pInfo);
   // printf("ml=%u\n", modellen);
   dst->resize(sz0 + modellen);
-  encode(dst, src, srclen, c2low);
+  encode(dst, src, srclen, c2low, maxC);
   if (pInfo)
     pInfo[2] = (dst->size()-sz0-modellen)*8.0;
 }

@@ -69,15 +69,18 @@ int main(int argz, char** argv)
         int info[8];
         int declen = arithmetic_decode(&dst.at(0), tilelen, &src.at(0), codelen, vFlag ? info : 0);
         if (size_t(declen) != tilelen) {
-          fprintf(stderr, "%s: %s invalid.", argv[0], inpfilename);
-          if (vFlag)
-            fprintf(stderr, declen < 0 ? " Decoder parsing failure." : " Uncompressed section is shorter than specified in tile header.");
-          fprintf(stderr, "\n");
+          fprintf(stderr, "%s: %s invalid.\n", argv[0], inpfilename);
+          if (vFlag) {
+            if (declen < 0)
+              fprintf(stderr, "Decoder parsing failure. Error %d.\n", declen);
+            else
+              fprintf(stderr, "Uncompressed section is shorter than specified in tile header. %d < %d.\n", declen, int(tilelen));
+          }
           break;
         }
 
         if (vFlag)
-          printf("%7u -> %7u. Model %d. Coded %d.\n", unsigned(codelen), unsigned(tilelen), info[0], info[1]);
+          printf("%7u -> %7u. Model %.3f. Coded %d.\n", unsigned(codelen), unsigned(tilelen), info[0]/8.0, info[1]);
         size_t wrlen = fwrite(&dst.at(0), 1, tilelen, fpout);
         if (wrlen != tilelen) {
           perror(outfilename);

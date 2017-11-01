@@ -12,12 +12,13 @@ static const unsigned VAL_RANGE = 1u << 16;
 //   on succes the # of processed source octets,
 //   on parsing error negative error code
 //static
-int load_ranges(uint16_t* ranges, const uint8_t* src, unsigned srclen)
+int load_ranges(uint16_t* ranges, const uint8_t* src, unsigned srclen, int* pInfo)
 {
+  unsigned maxC = src[0];
   unsigned c = 0;
-  unsigned i = 0;
+  unsigned i = 8;
   uint32_t sum = 0;
-  while (c < 256) {
+  while (c <= maxC) {
     unsigned di0 = (i+0) / 8;
     unsigned di1 = (i+7) / 8;
     unsigned ri = i % 8;
@@ -63,8 +64,10 @@ int load_ranges(uint16_t* ranges, const uint8_t* src, unsigned srclen)
       i += 8;
     }
     sum += range;
-    if (runlen + c > 256)
+    if (runlen + c > maxC+1) {
+      // printf("%u: %u + %u > %u\n", i, runlen, c, maxC);
       return -4; // parsing error
+    }
     do {
       // printf("%3u %04x\n", c, range);
       ranges[c] = range;
@@ -73,9 +76,15 @@ int load_ranges(uint16_t* ranges, const uint8_t* src, unsigned srclen)
     } while (runlen > 0);
   }
 
-  // printf("sum = %u (%05x) %d\n", sum, sum, (i + 7) / 8);
+  // printf("sum = %u (%05x) %.3f %u\n", sum, sum, i / 8.0, maxC);
   if (sum < VAL_RANGE-1 || sum > VAL_RANGE)
     return -5; // parsing error
+
+  for (; c < 256; ++c)
+    ranges[c] = 0;
+
+  if (pInfo)
+    pInfo[0] = i;
 
   return (i + 7) / 8; // success
 }
@@ -85,7 +94,7 @@ namespace {
 struct arithmetic_decode_model_t {
   uint16_t m_c2low[257];
 
-  int  load_and_prepare(const uint8_t* src, unsigned srclen);
+  int  load_and_prepare(const uint8_t* src, unsigned srclen, int* pInfo);
   int  decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen);
 private:
   uint8_t  m_range2c[512];
@@ -114,9 +123,9 @@ private:
 };
 
 
-int arithmetic_decode_model_t::load_and_prepare(const uint8_t* src, unsigned srclen)
+int arithmetic_decode_model_t::load_and_prepare(const uint8_t* src, unsigned srclen, int* pInfo)
 {
-  int ret = load_ranges(m_c2low, src, srclen);
+  int ret = load_ranges(m_c2low, src, srclen, pInfo);
   if (ret >= 0)
     prepare();
   return ret;
@@ -150,12 +159,10 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
 int arithmetic_decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen, int* pInfo)
 {
   arithmetic_decode_model_t model;
-  int modellen = model.load_and_prepare(&src[0], srclen);
+  int modellen = model.load_and_prepare(&src[0], srclen, pInfo);
   if (modellen >= 0) {
-    if (pInfo) {
-      pInfo[0] = modellen;
+    if (pInfo)
       pInfo[1] = srclen-modellen;
-    }
     int textlen = model.decode(dst, dstlen, &src[modellen], srclen-modellen);
     return textlen;
   }
