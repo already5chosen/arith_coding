@@ -1,5 +1,7 @@
 #include <cstdint>
-#include <cstdio>
+// #include <cstdio>
+// #include <cmath>
+// #include <cctype>
 
 #include "arithmetic_decode.h"
 
@@ -98,10 +100,14 @@ struct arithmetic_decode_model_t {
   int  decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen);
 private:
   uint8_t  m_range2c[512];
+  unsigned m_maxC;
+
   void prepare();
-  int val2c(unsigned val) {
-    unsigned c = m_range2c[val>>7]; // c is the biggest character for which m_c2low[c] <= (val/128)*128
-    for (;m_c2low[c+1] < val && m_c2low[c+1] != 0;++c) ;
+  int val2c(uint64_t value, uint64_t range) {
+    unsigned ri = (value*512)/range;
+    unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c] <= (val/128)*128
+    while (((m_c2low[c+1]*range) >> 16) <= value && c < m_maxC)
+      ++c;
     return c;
   }
 
@@ -133,24 +139,103 @@ int arithmetic_decode_model_t::load_and_prepare(const uint8_t* src, unsigned src
 
 void arithmetic_decode_model_t::prepare()
 {
-  // cummulative sum
+  // m_c2low -> cumulative sums of ranges
+  unsigned maxC = 255;
   unsigned lo = 0;
+  unsigned invI = 0;
   for (int c = 0; c < 256; ++c) {
     unsigned range = m_c2low[c];
     m_c2low[c] = lo;
-    unsigned hi = lo + range;
-    // build inverse index m_range2c
-    for (unsigned i = (lo >> 7); i < (hi >> 7); ++i)
-      m_range2c[i] = c;
-    lo = hi;
+    // printf("%3d : %04x\n", c, lo);
+    if (range != 0) {
+      // build inverse index m_range2c
+      maxC = c;
+      lo += range;
+      for (; invI <= ((lo-1) >> 7); ++invI) {
+        m_range2c[invI] = maxC;
+        // printf("%04x => %3d\n", invI << 7, maxC);
+      }
+    }
   }
-  m_c2low[256] = lo;
-  for (int i = lo >> 7; i < 512; ++i)
-    m_range2c[i] = 255;
+  for (; invI < 512; ++invI) {
+    m_range2c[invI] = maxC;
+    // printf("%04x => %3d\n", invI << 7, maxC);
+  }
+  m_maxC = maxC;
 }
 
 int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen)
 {
+  uint64_t VAL_MSK  = uint64_t(-1) >> 16;
+  uint64_t MSK31_0  = (uint64_t(1) << 32)-(uint64_t(1) << 0);
+  uint64_t MSK47_40 = (uint64_t(1) << 48)-(uint64_t(1) << 40);
+  uint64_t lo = 0;
+  uint64_t hi = VAL_MSK;
+  if (srclen < 2)
+    return -6;
+  uint64_t value = 0;
+  for (int k = 0; k < 6; ++k) {
+    value += uint64_t(*src) << ((5-k)*8);
+    src++;
+    srclen--;
+    if (srclen == 0)
+      break;
+  }
+
+  for (int i = 0; ; ) {
+    uint64_t range;
+    // keep decoder in sync with encoder (a)
+    while ((range = hi - lo) < (1u << 28)) {
+      // sqweeze out bits[39..32]
+      lo = (lo & MSK47_40) | ((lo & MSK31_0) << 8);
+      hi = (hi & MSK47_40) | ((hi & MSK31_0) << 8);
+      value = (value & MSK47_40) | ((value & MSK31_0) << 8);
+      if (srclen > 0)
+        value += *src++;
+      --srclen;
+      if (srclen < -4)
+        return i;
+      if (value < lo || value > hi) return -101; // should not happen
+    }
+    range += 1;
+
+    unsigned c = val2c(value - lo, range);
+    // if (i % 1000 < 10 || i > dstlen - 20000) {
+      // printf(": %6d [%012llx %012llx] %012llx %012llx. %08x c=%3d '%c' [%04x..%04x) => [%012llx %012llx]\n"
+       // , i, lo, hi, value, range
+       // , unsigned(round(double(value - lo)*0x100000000/range))
+       // , c, isprint(c) ? c : '.', m_c2low[c+0], m_c2low[c+1]
+       // , lo + ((range * m_c2low[c+0])>>16)
+       // , (c < m_maxC) ? lo + ((range * m_c2low[c+1])>>16) - 1 : hi);
+      // fflush(stdout);
+    // }
+    dst[i] = c;
+    ++i;
+    if (i == dstlen)
+      break; // success
+
+    // keep decoder in sync with encoder (b)
+    if (c < m_maxC)
+      hi = lo + ((range * m_c2low[c+1])>>16) - 1;
+    lo   = lo + ((range * m_c2low[c+0])>>16);
+
+    if (value < lo || value > hi) return -102; // should not happen
+
+    while (((lo ^ hi) >> 40)==0) {
+      // lo and hi have the same upper octet
+      if (((lo ^ value) >> 40)!=0)
+        return -7;
+      lo = (lo << 8) & VAL_MSK;
+      hi = (hi << 8) & VAL_MSK;
+      value = (value << 8) & VAL_MSK;
+      if (srclen > 0)
+        value += *src++;
+      --srclen;
+      if (srclen < -4)
+        return i;
+      if (value < lo || value > hi) return -103; // should not happen
+    }
+  }
   return dstlen;
 }
 

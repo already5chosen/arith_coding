@@ -160,6 +160,7 @@ static void encode(std::vector<uint8_t>* dst, const uint8_t* src, unsigned srcle
       // sqweeze out bits[39..32]
       lo = (lo & MSK47_40) | ((lo & MSK31_0) << 8);
       hi = (hi & MSK47_40) | ((hi & MSK31_0) << 8);
+      ++pending_bytes;
     }
     range += 1;
 
@@ -181,7 +182,7 @@ static void encode(std::vector<uint8_t>* dst, const uint8_t* src, unsigned srcle
     }
   }
   // put out last octets, at least 2
-  lo = (lo+hi)>>32;
+  lo = (lo+hi)>>33;
   dst->push_back(uint8_t(lo>>8));
   while (pending_bytes) {
     uint8_t pending_byte = 0-((lo>>7) & 1);
