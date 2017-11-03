@@ -41,28 +41,55 @@ int main(int argz, char** argv)
         if (tilelen > 0) {
           dst.clear();
           double info[8];
-          arithmetic_encode(&dst, inptile, tilelen, vFlag ? info : 0);
-          size_t ressz = dst.size();
+          int ressz = arithmetic_encode(&dst, inptile, tilelen, vFlag ? info : 0);
           if (vFlag)
-            printf("%7u -> %7u. Model %.3f. Coded %.3f. Entropy %.3f\n", unsigned(tilelen), unsigned(ressz), info[1]/8, info[2]/8, info[0]/8);
+            printf("%7u -> %7u. Model %.3f. Coded %.3f. Entropy %.3f (%.3f)\n"
+              ,unsigned(tilelen)
+              ,ressz < 0 ? 0 : (ressz == 0 ? unsigned(tilelen) : unsigned(ressz))
+              ,info[1]/8
+              ,info[2]/8
+              ,info[0]/8
+              ,info[3]/8
+              );
           uint8_t hdr[6];
           hdr[0] = uint8_t(tilelen >> 0);
           hdr[1] = uint8_t(tilelen >> 8);
           hdr[2] = uint8_t(tilelen >> 16);
-          hdr[3] = uint8_t(ressz >> 0);
-          hdr[4] = uint8_t(ressz >> 8);
-          hdr[5] = uint8_t(ressz >> 16);
+          uint8_t* pRes = 0;
+          if (ressz > 0) {
+            // normal compression
+            hdr[3] = uint8_t(ressz >> 0);
+            hdr[4] = uint8_t(ressz >> 8);
+            hdr[5] = uint8_t(ressz >> 16);
+            pRes = &dst.at(0);
+          } else {
+            // special cases
+            if (ressz == 0) {
+              // not compressible
+              hdr[3] = 0;
+              hdr[4] = 0;
+              pRes   = inptile;
+              ressz  = tilelen;
+            } else {
+              // input cosists of repetition of the same character
+              hdr[3] = 1;
+              hdr[4] = inptile[0];
+            }
+            hdr[5] = 255;
+          }
           size_t wrlen = fwrite(hdr, 1, 6, fpout);
           if (wrlen != 6) {
             perror(outfilename);
             ret = 1;
             break;
           }
-          wrlen = fwrite(&dst.at(0), 1, ressz, fpout);
-          if (wrlen != ressz) {
-            perror(outfilename);
-            ret = 1;
-            break;
+          if (pRes) {
+            wrlen = fwrite(pRes, 1, ressz, fpout);
+            if (wrlen != size_t(ressz)) {
+              perror(outfilename);
+              ret = 1;
+              break;
+            }
           }
         }
       }

@@ -7,7 +7,10 @@
 
 static const unsigned VAL_RANGE = 1u << 16;
 
-static int prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], double* pInfo)
+// return value:
+// -1  - source cosists of repetition of the same character
+// >=0 - maxC = the character with the biggest numeric value that appears in the source at least once
+static int prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], double* pQuantizedEntropy, double* pInfo)
 {
   // calculated statistics of appearance
   unsigned stat[256]={0};
@@ -23,6 +26,7 @@ static int prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], dou
         entropy += log2(double(srclen)/cnt)*cnt;
     }
     pInfo[0] = entropy;
+    pInfo[3] = 0;
   }
 
   // sort statistics in ascending order
@@ -39,24 +43,38 @@ static int prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], dou
   }
   std::sort(&statAndC[0], &statAndC[256]);
 
+  if (statAndC[254].cnt==0)
+    return -1; // source cosists of repetition of the same character
+
   // translate counts to ranges and store in c2low
   unsigned i = 0;
   while (statAndC[i].cnt == 0) {
     c2low[statAndC[i].c] = 0;
     ++i;
   }
+
   unsigned remRange = VAL_RANGE;
   for ( ; srclen > 0; ++i) {
     unsigned cnt = statAndC[i].cnt;
     unsigned range = (uint64_t(cnt)*(remRange*2) + srclen)/(srclen*2);
     if (range == 0)
       range = 1;
-    else if (range == VAL_RANGE)
-      range = VAL_RANGE-1;
+    // here range < VAL_RANGE, because we already handled the case of repetition of the same character
     c2low[statAndC[i].c] = range;
     remRange -= range;
     srclen   -= cnt;
   }
+
+  // calculate entropy after quanization
+  double entropy = 0;
+  for (unsigned c = 0; c < 256; ++c) {
+    unsigned cnt = stat[c];
+    if (cnt)
+      entropy += log2(double(VAL_RANGE)/c2low[c])*cnt;
+  }
+  *pQuantizedEntropy = entropy;
+  if (pInfo)
+    pInfo[3] = entropy;
 
   // c2low -> cumulative sums of ranges
   unsigned lo = 0;
@@ -192,17 +210,36 @@ static void encode(std::vector<uint8_t>* dst, const uint8_t* src, unsigned srcle
   dst->push_back(uint8_t(lo));
 }
 
-
-void arithmetic_encode(std::vector<uint8_t>* dst, const uint8_t* src, int srclen, double* pInfo)
+// return value:
+// -1 - source cosists of repetition of the same character
+//  0 - not compressible, because all input characters have approximately equal probability or because input is too short
+// >0 - the length of compressed buffer
+int arithmetic_encode(std::vector<uint8_t>* dst, const uint8_t* src, int srclen, double* pInfo)
 {
   uint16_t c2low[257];
-  unsigned maxC = prepare(src, srclen, c2low, pInfo);
+  double quantizedEntropy;
+  int maxC = prepare(src, srclen, c2low, &quantizedEntropy, pInfo);
+
+  if (maxC == -1)
+    return -1; // source cosists of repetition of the same character
+
   size_t sz0 = dst->size();
   dst->resize(sz0 + 640);
   unsigned modellen = store_model(&dst->at(sz0), c2low, maxC, pInfo);
+
+  if (quantizedEntropy/8 + modellen >= srclen)
+    return 0; // not compressible
+
   // printf("ml=%u\n", modellen);
   dst->resize(sz0 + modellen);
   encode(dst, src, srclen, c2low, maxC);
+  int dstlen = dst->size()-sz0;
+
+  if (dstlen >= srclen)
+    return 0; // not compressible
+
   if (pInfo)
-    pInfo[2] = (dst->size()-sz0-modellen)*8.0;
+    pInfo[2] = (dstlen-modellen)*8.0;
+
+  return dst->size()-sz0;
 }

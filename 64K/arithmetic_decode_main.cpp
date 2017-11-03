@@ -50,43 +50,90 @@ int main(int argz, char** argv)
           break;
         }
 
-        if (codelen < 1 || codelen > MAX_CODE_SIZE) {
-          fprintf(stderr, "%s: %s invalid.%s\n", argv[0], inpfilename, vFlag ? " Illegal code section length.": "");
-          break;
-        }
-
-        src.resize(codelen);
-        size_t inplen = fread(&src.at(0), 1, codelen, fpinp);
-        if (inplen < codelen) {
-          if (feof(fpinp))
-            fprintf(stderr, "%s: %s invalid.%s\n", argv[0], inpfilename, vFlag ? " Code section is shorter than specified in tile header.": "");
-          else
-            perror(inpfilename);
-          break;
-        }
-
-        dst.resize(tilelen);
-        int info[8];
-        int declen = arithmetic_decode(&dst.at(0), tilelen, &src.at(0), codelen, vFlag ? info : 0);
-        if (size_t(declen) != tilelen) {
-          fprintf(stderr, "%s: %s invalid.\n", argv[0], inpfilename);
-          if (vFlag) {
-            if (declen < 0)
-              fprintf(stderr, "Decoder parsing failure. Error %d.\n", declen);
-            else
-              fprintf(stderr, "Uncompressed section is shorter than specified in tile header. %d < %d.\n", declen, int(tilelen));
+        if (hdr[5] == 255) {
+          // special cases
+          switch (hdr[3]) {
+            case 0:
+              // not compressible
+              codelen = tilelen;
+              break;
+            case 1:
+              // input cosists of repetition of the same character
+              codelen = 0;
+              break;
+            default:
+              fprintf(stderr, "%s: %s invalid.%s\n", argv[0], inpfilename, vFlag ? " Illegal escape sequence in section header.": "");
+              goto end_loop;
           }
-          break;
+        } else {
+          if (codelen < 1 || codelen > MAX_CODE_SIZE) {
+            fprintf(stderr, "%s: %s invalid.%s\n", argv[0], inpfilename, vFlag ? " Illegal code section length.": "");
+            break;
+          }
+        }
+
+        if (codelen != 0) {
+          src.resize(codelen);
+          size_t inplen = fread(&src.at(0), 1, codelen, fpinp);
+          if (inplen < codelen) {
+            if (feof(fpinp))
+              fprintf(stderr, "%s: %s invalid.%s\n", argv[0], inpfilename, vFlag ? " Code section is shorter than specified in tile header.": "");
+            else
+              perror(inpfilename);
+            break;
+          }
+        }
+
+        int info[8];
+        uint8_t *pDst = 0;
+        if (hdr[5] == 255) {
+          // special cases
+          switch (hdr[3]) {
+            case 0:
+              // not compressible
+              pDst    = &src.at(0);
+              info[0] = 0;
+              info[1] = codelen;
+              break;
+            case 1:
+              // input cosists of repetition of the same character
+              dst.resize(tilelen);
+              pDst = &dst.at(0);
+              memset(pDst, hdr[4], tilelen);
+              info[0] = 8;
+              info[1] = 1;
+              break;
+            default:
+              break;
+          }
+        } else {
+          dst.resize(tilelen);
+          pDst = &dst.at(0);
+          int declen = arithmetic_decode(pDst, tilelen, &src.at(0), codelen, vFlag ? info : 0);
+          if (size_t(declen) != tilelen) {
+            fprintf(stderr, "%s: %s invalid.\n", argv[0], inpfilename);
+            if (vFlag) {
+              if (declen < 0)
+                fprintf(stderr, "Decoder parsing failure. Error %d.\n", declen);
+              else
+                fprintf(stderr, "Uncompressed section is shorter than specified in tile header. %d < %d.\n", declen, int(tilelen));
+            }
+            break;
+          }
         }
 
         if (vFlag)
           printf("%7u -> %7u. Model %.3f. Coded %d.\n", unsigned(codelen), unsigned(tilelen), info[0]/8.0, info[1]);
-        size_t wrlen = fwrite(&dst.at(0), 1, tilelen, fpout);
-        if (wrlen != tilelen) {
-          perror(outfilename);
-          break;
+
+        if (pDst) {
+          size_t wrlen = fwrite(pDst, 1, tilelen, fpout);
+          if (wrlen != tilelen) {
+            perror(outfilename);
+            break;
+          }
         }
       }
+      end_loop:
       fclose(fpout);
       if (ret != 0)
         remove(outfilename);
