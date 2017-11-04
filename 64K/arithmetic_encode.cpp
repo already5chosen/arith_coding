@@ -164,7 +164,7 @@ static int store_model(uint8_t* dst, const uint16_t c2low[256], unsigned maxC, d
   return (i + 7) / 8;
 }
 
-static void encode(std::vector<uint8_t>* dst, const uint8_t* src, unsigned srclen, const uint16_t c2low[257], int maxC)
+static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint16_t c2low[257], int maxC)
 {
   uint64_t VAL_MSK  = uint64_t(-1) >> 16;
   uint64_t MSK31_0  = (uint64_t(1) << 32)-(uint64_t(1) << 0);
@@ -172,6 +172,7 @@ static void encode(std::vector<uint8_t>* dst, const uint8_t* src, unsigned srcle
   uint64_t lo = 0;
   uint64_t hi = VAL_MSK;
   int pending_bytes = 0;
+  uint8_t* dst0 = dst;
   for (unsigned i = 0; i < srclen; ++i) {
     uint64_t range;
     while ((range = hi - lo) < (1u << 28)) {
@@ -189,18 +190,19 @@ static void encode(std::vector<uint8_t>* dst, const uint8_t* src, unsigned srcle
 
     while (((lo ^ hi) >> 40)==0) {
       // lo and hi have the same upper octet
-      dst->push_back(uint8_t(lo>>40));
+      *dst++ = uint8_t(lo>>40);
       lo = (lo << 8) & VAL_MSK;
       hi = (hi << 8) & VAL_MSK;
       while (pending_bytes) {
         uint8_t pending_byte = 0-((lo>>47) & 1);
-        dst->push_back(pending_byte);
+        *dst++ = pending_byte;
         --pending_bytes;
       }
     }
   }
   // put out last octet
-  dst->push_back(uint8_t(hi>>40));
+  *dst++ = uint8_t(hi>>40);
+  return dst - dst0;
 }
 
 // return value:
@@ -220,19 +222,21 @@ int arithmetic_encode(std::vector<uint8_t>* dst, const uint8_t* src, int srclen,
   dst->resize(sz0 + 640);
   unsigned modellen = store_model(&dst->at(sz0), c2low, maxC, pInfo);
 
-  if (quantizedEntropy/8 + modellen >= srclen)
+  if ((quantizedEntropy+7)/8 + modellen >= srclen)
     return 0; // not compressible
 
   // printf("ml=%u\n", modellen);
-  dst->resize(sz0 + modellen);
-  encode(dst, src, srclen, c2low, maxC);
-  int dstlen = dst->size()-sz0;
-
-  if (dstlen >= srclen)
-    return 0; // not compressible
+  dst->resize(sz0 + modellen + int(quantizedEntropy/8)+64);
+  int dstlen = encode(&dst->at(sz0+modellen), src, srclen, c2low, maxC);
 
   if (pInfo)
-    pInfo[2] = (dstlen-modellen)*8.0;
+    pInfo[2] = dstlen*8.0;
 
-  return dst->size()-sz0;
+  int reslen = modellen + dstlen;
+
+  if (reslen >= srclen)
+    return 0; // not compressible
+
+  dst->resize(sz0 + reslen);
+  return reslen;
 }
