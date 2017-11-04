@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include <x86intrin.h>
 
 #include "arithmetic_encode.h"
 
@@ -41,15 +42,19 @@ int main(int argz, char** argv)
         if (tilelen > 0) {
           dst.clear();
           double info[8];
+          uint64_t t0 = __rdtsc();
           int ressz = arithmetic_encode(&dst, inptile, tilelen, vFlag ? info : 0);
+          uint64_t t1 = __rdtsc();
           if (vFlag)
-            printf("%7u -> %7u. Model %.3f. Coded %.3f. Entropy %.3f (%.3f)\n"
+            printf("%7u -> %7u. Model %.3f. Coded %.3f. Entropy %.3f (%.3f). %.0f clocks. %.1f clocks/char\n"
               ,unsigned(tilelen)
               ,ressz < 0 ? 0 : (ressz == 0 ? unsigned(tilelen) : unsigned(ressz))
               ,info[1]/8
               ,info[2]/8
               ,info[0]/8
               ,info[3]/8
+              ,double(t1-t0)
+              ,double(t1-t0)/tilelen
               );
           uint8_t hdr[6];
           hdr[0] = uint8_t(tilelen >> 0);

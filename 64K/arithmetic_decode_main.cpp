@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include <x86intrin.h>
 
 #include "arithmetic_decode.h"
 
@@ -86,6 +87,7 @@ int main(int argz, char** argv)
 
         int info[8];
         uint8_t *pDst = 0;
+        uint64_t t0 = __rdtsc();
         if (hdr[5] == 255) {
           // special cases
           switch (hdr[3]) {
@@ -121,9 +123,17 @@ int main(int argz, char** argv)
             break;
           }
         }
+        uint64_t t1 = __rdtsc();
 
         if (vFlag)
-          printf("%7u -> %7u. Model %.3f. Coded %d.\n", unsigned(codelen), unsigned(tilelen), info[0]/8.0, info[1]);
+          printf("%7u -> %7u. Model %.3f. Coded %d. %.0f clocks. %.1f clocks/char\n"
+            ,unsigned(codelen)
+            ,unsigned(tilelen)
+            ,info[0]/8.0
+            ,info[1]
+            ,double(t1-t0)
+            ,double(t1-t0)/tilelen
+            );
 
         if (pDst) {
           size_t wrlen = fwrite(pDst, 1, tilelen, fpout);
