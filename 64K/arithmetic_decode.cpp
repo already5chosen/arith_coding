@@ -99,15 +99,17 @@ struct arithmetic_decode_model_t {
   int  load_and_prepare(const uint8_t* src, unsigned srclen, int* pInfo);
   int  decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen);
 private:
-  uint8_t  m_range2c[512];
+  uint8_t  m_range2c[513];
   unsigned m_maxC;
 
   void prepare();
   int val2c(uint64_t value, uint64_t range) {
     unsigned ri = (value*512)/range;
     unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c] <= (val/128)*128
-    while (((m_c2low[c+1]*range) >> 16) <= value && c < m_maxC)
-      ++c;
+    if (c != m_range2c[ri+1]) {
+      while (((m_c2low[c+1]*range) >> 16) <= value && c < m_maxC)
+        ++c;
+    }
     return c;
   }
 
@@ -157,7 +159,7 @@ void arithmetic_decode_model_t::prepare()
       }
     }
   }
-  for (; invI < 512; ++invI) {
+  for (; invI < 513; ++invI) {
     m_range2c[invI] = maxC;
     // printf("%04x => %3d\n", invI << 7, maxC);
   }
