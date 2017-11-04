@@ -193,7 +193,7 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
       if (srclen > 0)
         value += *src++;
       --srclen;
-      if (srclen < -4)
+      if (srclen < -5)
         return i;
       if (value < lo || value > hi) return -101; // should not happen
     }
@@ -231,7 +231,7 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
       if (srclen > 0)
         value += *src++;
       --srclen;
-      if (srclen < -4)
+      if (srclen < -5)
         return i;
       if (value < lo || value > hi) return -103; // should not happen
     }
