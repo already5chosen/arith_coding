@@ -59,7 +59,7 @@ int main(int argz, char** argv)
               codelen = tilelen;
               break;
             case 1:
-              // input cosists of repetition of the same character
+              // input consists of repetition of the same character
               codelen = 0;
               break;
             default:
@@ -98,7 +98,7 @@ int main(int argz, char** argv)
               info[1] = codelen;
               break;
             case 1:
-              // input cosists of repetition of the same character
+              // input consists of repetition of the same character
               dst.resize(tilelen);
               pDst = &dst.at(0);
               memset(pDst, hdr[4], tilelen);
@@ -126,7 +126,7 @@ int main(int argz, char** argv)
         uint64_t t1 = __rdtsc();
 
         if (vFlag)
-          printf("%7u -> %7u. Model %.3f. Coded %d. %.0f clocks. %.1f clocks/char\n"
+          printf("%7u -> %7u. Model %7.3f. Coded %6d. %8.0f clocks. %4.1f clocks/char\n"
             ,unsigned(codelen)
             ,unsigned(tilelen)
             ,info[0]/8.0

@@ -8,7 +8,7 @@
 static const unsigned VAL_RANGE = 1u << 16;
 
 // return value:
-// -1  - source cosists of repetition of the same character
+// -1  - source consists of repetition of the same character
 // >=0 - maxC = the character with the biggest numeric value that appears in the source at least once
 static int prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], double* pQuantizedEntropy, double* pInfo)
 {
@@ -44,7 +44,7 @@ static int prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], dou
   std::sort(&statAndC[0], &statAndC[256]);
 
   if (statAndC[254].cnt==0)
-    return -1; // source cosists of repetition of the same character
+    return -1; // source consists of repetition of the same character
 
   // translate counts to ranges and store in c2low
   unsigned i = 0;
@@ -206,7 +206,7 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
 }
 
 // return value:
-// -1 - source cosists of repetition of the same character
+// -1 - source consists of repetition of the same character
 //  0 - not compressible, because all input characters have approximately equal probability or because input is too short
 // >0 - the length of compressed buffer
 int arithmetic_encode(std::vector<uint8_t>* dst, const uint8_t* src, int srclen, double* pInfo)
@@ -216,7 +216,7 @@ int arithmetic_encode(std::vector<uint8_t>* dst, const uint8_t* src, int srclen,
   int maxC = prepare(src, srclen, c2low, &quantizedEntropy, pInfo);
 
   if (maxC == -1)
-    return -1; // source cosists of repetition of the same character
+    return -1; // source consists of repetition of the same character
 
   size_t sz0 = dst->size();
   dst->resize(sz0 + 640);

@@ -46,7 +46,7 @@ int main(int argz, char** argv)
           int ressz = arithmetic_encode(&dst, inptile, tilelen, vFlag ? info : 0);
           uint64_t t1 = __rdtsc();
           if (vFlag)
-            printf("%7u -> %7u. Model %.3f. Coded %.3f. Entropy %.3f (%.3f). %.0f clocks. %.1f clocks/char\n"
+            printf("%7u -> %7u. Model %7.3f. Coded %10.0f. Entropy %10.3f (%10.3f). %8.0f clocks. %4.1f clocks/char\n"
               ,unsigned(tilelen)
               ,ressz < 0 ? 0 : (ressz == 0 ? unsigned(tilelen) : unsigned(ressz))
               ,info[1]/8
@@ -76,7 +76,7 @@ int main(int argz, char** argv)
               pRes   = inptile;
               ressz  = tilelen;
             } else {
-              // input cosists of repetition of the same character
+              // input consists of repetition of the same character
               hdr[3] = 1;
               hdr[4] = inptile[0];
             }
