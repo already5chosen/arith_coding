@@ -107,8 +107,6 @@ int load_ranges(uint16_t* ranges, const uint8_t* src, int srclen, int* pInfo)
         uint32_t td  = val1 - val0 + 1;
         den *= td;
         uint32_t tc  = (deltaV*den - cnt*td*(range+1))/(cnt1*(range+1)); // floor
-        while ((cnt*td + cnt1*(tc+1))*(range+1)/den <= deltaV)
-          tc += 1;
         val  = val0 + tc;
         sum += val;
         uint32_t l_num = cnt*td + cnt1*tc;         // up to 2^24-1
@@ -260,7 +258,7 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     uint64_t range;
     // keep decoder in sync with encoder (a)
     while ((range = hi - lo) < (1u << 28)) {
-      // sqweeze out bits[39..32]
+      // squeeze out bits[39..32]
       lo = (lo & MSK47_40) | ((lo & MSK31_0) << 8);
       hi = (hi & MSK47_40) | ((hi & MSK31_0) << 8);
       value = (value & MSK47_40) | ((value & MSK31_0) << 8);

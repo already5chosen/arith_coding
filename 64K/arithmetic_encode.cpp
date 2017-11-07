@@ -153,15 +153,15 @@ static int store_model(uint8_t* dst, const uint16_t c2low[256], unsigned maxC, d
     int pending_bytes = 0;
     unsigned nc = maxC + 1;
     for (unsigned c = 0; c < nc; ++c) {
-      // prevent range from becaming too small
+      // prevent range from becoming too small
       while (range < (uint64_t(1) << 20)) {
-        // sqweeze out all ones in bits[31..24]
+        // squeeze out all ones in bits[39..32]
         lo = (lo & MSK39_32) | ((lo & MSK23_0) << 8);
         range = (range << 8) | 255;
         ++pending_bytes;
       }
 
-      uint32_t val  = c2range[c];
+      uint32_t val = c2range[c];
       // printf("%3u lo=%010llx ra=%010llx <= %04x\n", c, lo, range, val);
       int ix = 0;
       uint32_t val0 = 0;
@@ -239,7 +239,7 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
   for (unsigned i = 0; i < srclen; ++i) {
     uint64_t range;
     while ((range = hi - lo) < (1u << 28)) {
-      // sqweeze out bits[39..32]
+      // squeeze out bits[39..32]
       lo = (lo & MSK47_40) | ((lo & MSK31_0) << 8);
       hi = (hi & MSK47_40) | ((hi & MSK31_0) << 8);
       ++pending_bytes;
