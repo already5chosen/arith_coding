@@ -14,81 +14,153 @@ static const unsigned VAL_RANGE = 1u << 16;
 //   on succes the # of processed source octets,
 //   on parsing error negative error code
 //static
-int load_ranges(uint16_t* ranges, const uint8_t* src, unsigned srclen, int* pInfo)
+int load_ranges(uint16_t* ranges, const uint8_t* src, int srclen, int* pInfo)
 {
-  unsigned maxC = src[0];
-  unsigned c = 0;
-  unsigned i = 8;
+  const uint8_t* p    = src;
+  const uint8_t* endp = p+srclen;
+  if (endp-p < 1) return -1;
+  int nZeros  = *p++;
+  int nRanges = 256 - nZeros;
+  unsigned maxC;
   uint32_t sum = 0;
-  while (c <= maxC) {
-    unsigned di0 = (i+0) / 8;
-    unsigned di1 = (i+7) / 8;
-    unsigned ri = i % 8;
-    if (di1 >= srclen)
-      return -1; // parsing error
+  if (nRanges < 8) {
+    // first variant of encoder - for small number of ranges
+    // Arithmetic encode could have been used here too, but the savings are too small
+    if (endp-p < nRanges*3) return -2;
 
-    unsigned b0 = src[di0];
-    unsigned bx = src[di1];
-    uint32_t val = (bx * 256u + b0) >> ri;
-    uint32_t range  = 0;
-    unsigned runlen = 1;
-    // printf(">> %02x\n", val);
-    if ((val & 1)==0) {
-      // '0'   - 7-bit range or single zero, 8 bits toatal
-      range = (val >> 1) & 127;
-      i += 8;
-    } else if ((val & 3)==1) {
-      // '01'  - 9-bit range, 11 bits toatal
-      di1 = (i+10) / 8;
-      if (di1 >= srclen)
-        return -2; // parsing error
-
-      unsigned b1 = src[di0+1];
-      bx = src[di1];
-      val = ((bx*256u+b1)*256u+b0) >> ri;
-      range = ((val >> 2) & 511) + 128;
-      i += 11;
-    } else if ((val & 7)==3) {
-      // '011' - 16-bit range, 19 bits toatal
-      di1 = (i+18) / 8;
-      if (di1 >= srclen)
-        return -3; // parsing error
-
-      unsigned b1 = src[di0+1];
-      unsigned b2 = src[di0+2];
-      bx = src[di1];
-      val = (((bx*256u+b2)*256u+b1)*256u+b0) >> ri;
-      range = ((val >> 3) & 0xFFFF) + 128;
-      i += 19;
-    } else {
-      // '111' - 5-bit zero run (length 2 to 33), 8 bits toatal
-      runlen = ((val >> 3) & 31) + 2;
-      i += 8;
+    unsigned zc = 0;
+    for (int i = 0; i < nRanges; ++i, p += 3) {
+      maxC = p[0];
+      unsigned range = p[2]*256 + p[1];
+      for (; zc < maxC; ++zc)
+        ranges[zc] = 0;
+      ranges[maxC] = range;
+      zc = maxC + 1;
+      sum += range;
     }
-    sum += range;
-    if (runlen + c > maxC+1) {
-      // printf("%u: %u + %u > %u\n", i, runlen, c, maxC);
-      return -4; // parsing error
+  } else {
+    // main variant of encoder
+    if (endp-p < 4*2+1+5) return -3;
+    struct enc_rec_t {
+      uint32_t cnt;
+      uint32_t val;
+    } enc_tab[5];
+
+    enc_tab[0].cnt = *p++;
+    enc_tab[0].val = 1;
+    maxC = enc_tab[0].cnt + nRanges - 1;
+    uint32_t prevCnt = 0;
+    for (int i = 1; i < 5; ++i, p += 2) {
+      uint32_t cnt = (i*nRanges)/4;
+      enc_tab[i].cnt = cnt-prevCnt;
+      enc_tab[i].val = p[1]*256 + p[0];
+      prevCnt = cnt;
     }
-    do {
-      // printf("%3u %04x\n", c, range);
-      ranges[c] = range;
-      ++c;
-      --runlen;
-    } while (runlen > 0);
+    for (int i = 2; i < 5; ++i) {
+      if (enc_tab[i].val < enc_tab[i-1].val)
+        return -4;
+    }
+    // for (int i = 0; i < 5; ++i)
+      // printf(" %u:%u", enc_tab[i].cnt, enc_tab[i].val);
+    // printf("\n");
+
+    const uint64_t MSK23_0  = (uint64_t(1) << 24)-(uint64_t(1) << 0);
+    const uint64_t MSK31_0  = (uint64_t(1) << 32)-(uint64_t(1) << 0);
+    const uint64_t MSK39_32 = (uint64_t(1) << 40)-(uint64_t(1) << 32);
+    uint64_t lo    = 0;                  // 40 bits
+    uint64_t range = uint64_t(-1) >> 24; // in fact, range-1
+    unsigned nc = maxC + 1;
+
+    uint64_t value = 0;  // 40 bits
+    for (int i = 0; i < 5; ++i)
+      value = (value << 8) | p[i];
+    p += 5;
+
+    int srcI = p - src;
+    for (unsigned c = 0; c < nc; ++c) {
+      // prevent range from becaming too small
+      while (range < (uint64_t(1) << 20)) {
+        // sqweeze out all ones in bits[31..24]
+        lo = (lo & MSK39_32) | ((lo & MSK23_0) << 8);
+        range = (range << 8) | 255;
+        value = (value & MSK39_32) | ((value & MSK23_0) << 8);
+        value |= (srcI < srclen) ? src[srcI] : 0;
+        ++srcI;
+        if (value < lo || value > lo + range) return -201; // should not happen
+      }
+
+      // printf("%3u lo=%010llx ra=%010llx va=%010llx\n", c, lo, range, value); fflush(stdout);
+      uint64_t deltaV = value - lo;
+      // course search
+      uint32_t cnt = 0;
+      int ix;
+      for (ix = 0; deltaV*(nc-c) >= (cnt+enc_tab[ix].cnt)*(range+1) ; ++ix)
+        cnt += enc_tab[ix].cnt;
+      uint32_t cnt1 = enc_tab[ix].cnt;
+      enc_tab[ix].cnt -= 1;
+      uint32_t den = nc-c;
+      uint32_t val = 0;
+      if (ix != 0) {
+        // fine search
+        uint32_t val0 = enc_tab[ix-1].val;
+        uint32_t val1 = enc_tab[ix].val;
+        uint32_t td  = val1 - val0 + 1;
+        den *= td;
+        uint32_t tc  = (deltaV*den - cnt*td*(range+1))/(cnt1*(range+1)); // floor
+        while ((cnt*td + cnt1*(tc+1))*(range+1)/den <= deltaV)
+          tc += 1;
+        val  = val0 + tc;
+        sum += val;
+        uint32_t l_num = cnt*td + cnt1*tc;         // up to 2^24-1
+        lo   += ((range+1) * l_num + den - 1)/den; // ceil
+      }
+      ranges[c] = val;
+      uint32_t r_num = cnt1;                // up to 255
+      range = ((range+1) * r_num)/den - 1;  // floor
+      // printf("%3u*lo=%010llx ra=%010llx => %04x\n", c, lo, range, val); fflush(stdout);
+
+      uint64_t hi = lo + range;
+      uint64_t dbits = lo ^ hi;
+      while ((dbits >> 32)==0) {
+        // lo and hi have 8 common MS bits
+        lo    = (lo & MSK31_0) << 8;
+        range = (range << 8) | 255;
+        value = (value & MSK31_0) << 8;
+        value |= (srcI < srclen) ? src[srcI] : 0;
+        ++srcI;
+        if (srcI > srclen+4) return -5;
+        if (value < lo || value > lo + range) return -202; // should not happen
+        dbits <<= 8;
+      }
+    }
+
+    srcI -= (5-1);
+    // Imitate encoder's logic for last octets in order to find out
+    // an exact length of encoded stream.
+    uint64_t lastOctet = ((lo + range) >> 32)-1;
+    while (lastOctet == (lo>>32)) {
+      lastOctet = 255;
+      ++srcI;
+      lo = (lo & MSK31_0) << 8;
+    }
+    if (srcI > srclen) return -6;
+    p = &src[srcI];
   }
 
-  // printf("sum = %u (%05x) %.3f %u\n", sum, sum, i / 8.0, maxC);
-  if (sum < VAL_RANGE-1 || sum > VAL_RANGE)
-    return -5; // parsing error
+  // for (unsigned c = 0; c <= maxC; ++c)
+    // printf("%3u: %04x\n", c, ranges[c]);
+  // printf("%d\n", int(p - src));
+  if (sum != VAL_RANGE)
+    return -7; // parsing error
 
-  for (; c < 256; ++c)
+  for (unsigned c = maxC+1; c < 256; ++c)
     ranges[c] = 0;
 
+  int len = p - src;
   if (pInfo)
-    pInfo[0] = i;
+    pInfo[0] = len*8;
 
-  return (i + 7) / 8; // success
+  return len; // success
 }
 
 namespace {
@@ -96,7 +168,7 @@ namespace {
 struct arithmetic_decode_model_t {
   uint16_t m_c2low[257];
 
-  int  load_and_prepare(const uint8_t* src, unsigned srclen, int* pInfo);
+  int  load_and_prepare(const uint8_t* src, int srclen, int* pInfo);
   int  decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen);
 private:
   uint8_t  m_range2c[513];
@@ -131,7 +203,7 @@ private:
 };
 
 
-int arithmetic_decode_model_t::load_and_prepare(const uint8_t* src, unsigned srclen, int* pInfo)
+int arithmetic_decode_model_t::load_and_prepare(const uint8_t* src, int srclen, int* pInfo)
 {
   int ret = load_ranges(m_c2low, src, srclen, pInfo);
   if (ret >= 0)
@@ -174,7 +246,7 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
   uint64_t lo = 0;
   uint64_t hi = VAL_MSK;
   if (srclen < 2)
-    return -6;
+    return -11;
   uint64_t value = 0;
   for (int k = 0; k < 6; ++k) {
     value += uint64_t(*src) << ((5-k)*8);
@@ -226,7 +298,7 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     while (((lo ^ hi) >> 40)==0) {
       // lo and hi have the same upper octet
       if (((lo ^ value) >> 40)!=0)
-        return -7;
+        return -12;
       lo = (lo << 8) & VAL_MSK;
       hi = (hi << 8) & VAL_MSK;
       value = (value << 8) & VAL_MSK;
