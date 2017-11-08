@@ -1,4 +1,3 @@
-#include <algorithm>
 //#include <cstdio>
 #include <cmath>
 
@@ -17,10 +16,22 @@ static int prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], dou
   for (unsigned i = 0; i < srclen; ++i)
     ++stat[src[i]];
 
+  // find maximal frequency and highest-numbered character that occurred at least once
+  unsigned maxC = 255;
+  unsigned maxCnt = 0;
+  for (unsigned c = 0; c < 256; ++c) {
+    unsigned cnt = stat[c];
+    if (cnt != 0) {
+      maxC = c;
+      if (maxCnt < cnt)
+        maxCnt = cnt;
+    }
+  }
+
   if (pInfo) {
     // calculate source entropy
     double entropy = 0;
-    for (unsigned c = 0; c < 256; ++c) {
+    for (unsigned c = 0; c <= maxC; ++c) {
       unsigned cnt = stat[c];
       if (cnt)
         entropy += log2(double(srclen)/cnt)*cnt;
@@ -29,45 +40,47 @@ static int prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], dou
     pInfo[3] = 0;
   }
 
-  // sort statistics in ascending order
-  struct stat_and_c_t {
-    unsigned cnt, c;
-    bool operator< (const stat_and_c_t& b) const {
-      return cnt < b.cnt;
-    }
-  };
-  stat_and_c_t statAndC[256];
-  for (unsigned c = 0; c < 256; ++c) {
-    statAndC[c].cnt = stat[c];
-    statAndC[c].c   = c;
-  }
-  std::sort(&statAndC[0], &statAndC[256]);
-
-  if (statAndC[254].cnt==0)
+  if (maxCnt==srclen)
     return -1; // source consists of repetition of the same character
 
   // translate counts to ranges and store in c2low
-  unsigned i = 0;
-  while (statAndC[i].cnt == 0) {
-    c2low[statAndC[i].c] = 0;
-    ++i;
-  }
-
+  // 1st pass - translate characters with counts that are significantly lower than maxCnt
+  unsigned thr = maxCnt - maxCnt/8;
+  unsigned remCnt   = srclen;
   unsigned remRange = VAL_RANGE;
-  for ( ; srclen > 0; ++i) {
-    unsigned cnt = statAndC[i].cnt;
-    unsigned range = (uint64_t(cnt)*(remRange*2) + srclen)/(srclen*2);
-    if (range == 0)
-      range = 1;
-    // here range < VAL_RANGE, because we already handled the case of repetition of the same character
-    c2low[statAndC[i].c] = range;
-    remRange -= range;
-    srclen   -= cnt;
+  for (unsigned c = 0; c <= maxC; ++c) {
+    unsigned cnt = stat[c];
+    if (cnt < thr) {
+      unsigned range = 0;
+      if (cnt != 0) {
+        // calculate range from full statistics
+        range = (uint64_t(cnt)*(VAL_RANGE*2) + srclen)/(srclen*2);
+        if (range == 0)
+          range = 1;
+        remCnt   -= cnt;
+        remRange -= range;
+      }
+      c2low[c] = range;
+    }
+  }
+  // 2nd pass - translate characters with higher counts
+  for (unsigned c = 0; remCnt != 0; ++c) {
+    unsigned cnt = stat[c];
+    if (cnt >= thr) {
+      // Calculate range from the remaining range and count
+      // It is non-ideal, but this way we distribute the worst rounding errors
+      // relatively evenly among higher ranges, where it hase the smallest impact
+      unsigned range = (uint64_t(cnt)*(remRange*2) + remCnt)/(remCnt*2);
+      // (range < VAL_RANGE) is guaranteed , because we already handled the case of repetition of the same character
+      remCnt   -= cnt;
+      remRange -= range;
+      c2low[c] = range;
+    }
   }
 
-  // calculate entropy after quanization
+  // calculate entropy after quantization
   double entropy = 0;
-  for (unsigned c = 0; c < 256; ++c) {
+  for (unsigned c = 0; c <= maxC; ++c) {
     unsigned cnt = stat[c];
     if (cnt)
       entropy += log2(double(VAL_RANGE)/c2low[c])*cnt;
@@ -78,14 +91,12 @@ static int prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], dou
 
   // c2low -> cumulative sums of ranges
   unsigned lo = 0;
-  unsigned maxC = 255;
-  for (unsigned c = 0; c < 256; ++c) {
+  for (unsigned c = 0; c <= maxC; ++c) {
     unsigned range = c2low[c];
     c2low[c] = lo;
     lo += range;
-    if (range > 0)
-      maxC = c;
   }
+  c2low[maxC+1] = 0;
   return maxC;
 }
 
