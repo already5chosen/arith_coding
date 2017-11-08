@@ -89,118 +89,150 @@ static int prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], dou
   return maxC;
 }
 
-static int inline floor_log4(unsigned x) {
-  return unsigned(sizeof(unsigned)*8 - 1 - __builtin_clz(x))/2; // floor(log4(x))
-}
-
 // return the number of stored octets
 static int store_model(uint8_t* dst, const uint16_t c2low[256], unsigned maxC, double* pInfo)
 {
   uint16_t c2range[256];
-  // translate cumulative sums of ranges to individual ranges
+  uint32_t ranges[256];
+  // translate cummulative sums o ranges to individual ranges
   int nRanges = 0;
-  unsigned hist[9] = {0};
   for (unsigned c = 0; c < maxC; ++c) {
     uint32_t range = c2low[c+1] - c2low[c];
     c2range[c] = range;
-    if (range > 0) {
-      ++nRanges;
-      hist[1+floor_log4(range)] += 1;
-    }
+    if (range > 0)
+      ranges[nRanges++] = (range << 8) | c;
   }
-  // No need to store a last range.
-  // Decoder will calculated is as VAL_RANGE-sum of previous ranges
-  hist[0] = maxC - nRanges; // # of zero ranges before maxC
+  uint32_t lastRange = VAL_RANGE - c2low[maxC];
+  c2range[maxC] = lastRange;
+  ranges[nRanges++] = (lastRange << 8) | maxC;
 
   uint8_t* p = dst;
-  *p++ = maxC;
-  unsigned rem = maxC;
-  for (int i = 0; i < 8 && rem > 0; ++i) {
-    rem -= hist[i];
-    *p++ = hist[i];
-  }
-
-  // arithmetic encoder
-  const uint64_t MSK31_0  = (uint64_t(1) << 32)-(uint64_t(1) << 0);
-  const uint64_t MSK39_0  = (uint64_t(1) << 40)-(uint64_t(1) << 0);
-  const uint64_t MSK47_40 = (uint64_t(1) << 48)-(uint64_t(1) << 32);
-  uint64_t lo    = 0;                  // 48 bits
-  uint64_t range = uint64_t(-1) >> 16; // in fact, range-1
-  int pending_bytes = 0;
-  int ix = 0;
-  int phase0 = 1;
-  for (unsigned c = 0; c < maxC; c += phase0) {
-    // prevent range from becoming too small
-    while (range < (uint64_t(1) << 28)) {
-      // squeeze out all ones in bits[39..32]
-      lo = (lo & MSK47_40) | ((lo & MSK31_0) << 8);
-      range = (range << 8) | 255;
-      ++pending_bytes;
+  *p++ = 256 - nRanges; // # of zero ranges
+  if (nRanges < 8) {
+    // first variant of encoder - for small number of ranges
+    // Arithmetic encode could have been used here too, but the savings are too small
+    for (int i = 0; i < nRanges; ++i) {
+      uint32_t rangeAndC = ranges[i];
+      *p++ = uint8_t(rangeAndC);
+      *p++ = uint8_t(rangeAndC >> 8);
+      *p++ = uint8_t(rangeAndC >> 16);
     }
+  } else {
+    // main variant of encoder
+    std::sort(ranges, &ranges[nRanges]);
+    struct enc_rec_t {
+      uint32_t cnt;
+      uint32_t valx;
+    } enc_tab[5];
 
-    uint32_t val = c2range[c];
-    if (phase0) {
-      uint32_t cnt  = 0;
-      ix = 0;
-      // printf("%3u lo=%010llx ra=%010llx <= %04x\n", c, lo, range, val);
-      if (val != 0) {
-        ix = 1+floor_log4(val);
-        for (int i = 0; i < ix; ++i)
-          cnt += hist[i];
+    enc_tab[0].cnt = maxC + 1 - nRanges;
+    enc_tab[0].valx = 256;
+    uint32_t prevCnt = 0;
+    *p++ = enc_tab[0].cnt;
+    for (int i = 1; i < 5; ++i) {
+      uint32_t cnt = (i*nRanges)/4;
+      uint32_t valx = ranges[cnt-1];
+      enc_tab[i].cnt = cnt-prevCnt;
+      enc_tab[i].valx = valx;
+      valx >>= 8;
+      *p++ = uint8_t(valx>>0);
+      *p++ = uint8_t(valx>>8);
+      prevCnt = cnt;
+    }
+    // for (int i = 0; i < 5; ++i)
+      // printf(" %u:%u.%u", enc_tab[i].cnt, enc_tab[i].valx>>8, enc_tab[i].valx & 255);
+    // printf("\n");
+    // for (unsigned c = 0; c <= maxC; ++c)
+      // printf("%3u: %04x\n", c, c2range[c]);
+
+    const uint64_t MSK31_0  = (uint64_t(1) << 32)-(uint64_t(1) << 0);
+    const uint64_t MSK39_0  = (uint64_t(1) << 40)-(uint64_t(1) << 0);
+    const uint64_t MSK47_40 = (uint64_t(1) << 48)-(uint64_t(1) << 32);
+    uint64_t lo    = 0;                  // 48 bits
+    uint64_t range = uint64_t(-1) >> 16; // in fact, range-1
+    int pending_bytes = 0;
+    uint32_t valNum = 0;
+    uint32_t valDen = 0;
+    unsigned nc = maxC + 1;
+    int phase0 = 1;
+    for (unsigned c = 0; c < nc; c += phase0) {
+      // prevent range from becoming too small
+      while (range < (uint64_t(1) << 28)) {
+        // squeeze out all ones in bits[39..32]
+        lo = (lo & MSK47_40) | ((lo & MSK31_0) << 8);
+        range = (range << 8) | 255;
+        ++pending_bytes;
       }
 
-      // insert code of ix
-      uint32_t cnt1 = hist[ix];
-      hist[ix] -= 1;
+      if (phase0) {
+        uint32_t cnt  = 0;
+        int ix = 0;
+        uint32_t val = c2range[c];
+        // printf("%3u lo=%010llx ra=%010llx <= %04x\n", c, lo, range, val);
+        if (val != 0) {
+          uint32_t valx = val * 256 + c;
+          cnt = enc_tab[0].cnt;
+          for (ix = 1; enc_tab[ix].valx < valx; ++ix)
+            cnt += enc_tab[ix].cnt;
+        }
 
-      uint32_t l_num = cnt;    // up to 255
-      uint32_t r_num = cnt1;   // up to 255
-      uint32_t den = (maxC-c); // up to 255
+        // insert code of ix
+        uint32_t cnt1 = enc_tab[ix].cnt;
+        enc_tab[ix].cnt -= 1;
 
-      lo   += ((range+1) * l_num + den - 1)/den; // ceil
-      range = ((range+1) * r_num)/den - 1;       // floor
+        uint32_t l_num = cnt;  // up to 255
+        uint32_t r_num = cnt1; // up to 255
+        uint32_t den = (nc-c); // up to 256
 
-      if (val != 0)
-        phase0 = 0; // stage insertion of code of specific value within hist range
-    } else {
-      // insert code of specific value within hist range
-      int lshift = (ix-1)*2;
-      uint32_t valNum = val - (1u << lshift); // up to 2^16-2^14-1
-      uint32_t valDen = 3u << lshift;         // up to 2^16-2^14
+        lo   += ((range+1) * l_num + den - 1)/den; // ceil
+        range = ((range+1) * r_num)/den - 1;       // floor
 
-      lo   += ((range+1) * valNum + valDen - 1)/valDen; // ceil
-      range = (range+1)/valDen - 1;                     // floor
-      phase0 = 1;
-    }
-
-    uint64_t hi = lo + range;
-    uint64_t dbits = lo ^ hi;
-    while ((dbits >> 40)==0) {
-      // lo and hi have 8 common MS bits
-      *p++ = uint8_t(lo >> 40);
-      if (pending_bytes) {
-        uint8_t pending_byte = 0-((lo>>39) & 1);
-        do {
-          *p++ = pending_byte;
-          --pending_bytes;
-        } while (pending_bytes);
+        if (val != 0) {
+          uint32_t val0 = enc_tab[ix-1].valx >> 8;
+          uint32_t val1 = enc_tab[ix-0].valx >> 8;
+          if (val1 != val0) {
+            // stage insertion code of specific value within enc_tab range
+            phase0 = 0;
+            valNum = val - val0;     // up to 2^16-1
+            valDen = val1 - val0 + 1; // up to 2^16-1
+          }
+        }
+      } else {
+        // insert code of specific value within enc_tab range : (val-val0)/(val1+1-val0)
+        lo   += ((range+1) * valNum + valDen - 1)/valDen; // ceil
+        range = (range+1)/valDen - 1;                     // floor
+        phase0 = 1;
       }
-      lo    = (lo & MSK39_0) << 8;
-      range = (range << 8) | 255;
-      dbits <<= 8;
-    }
-  }
 
-  // last octet(s)
-  // We want a shift register at decoder to be in range [lo..hi]
-  // regardless of alien characters that a possibly resides after
-  // our code stream
-  uint64_t lastOctet = ((lo + range) >> 40)-1;
-  *p++ = uint8_t(lastOctet);
-  while (lastOctet == (lo>>40)) {
-    lastOctet = 255;
+      uint64_t hi = lo + range;
+      uint64_t dbits = lo ^ hi;
+      while ((dbits >> 40)==0) {
+        // lo and hi have 8 common MS bits
+        *p++ = uint8_t(lo >> 40);
+        if (pending_bytes) {
+          uint8_t pending_byte = 0-((lo>>39) & 1);
+          do {
+            *p++ = pending_byte;
+            --pending_bytes;
+          } while (pending_bytes);
+        }
+        lo    = (lo & MSK39_0) << 8;
+        range = (range << 8) | 255;
+        dbits <<= 8;
+      }
+    }
+
+    // last octet(s)
+    // We want a shift register at decoder to be in range [lo..hi]
+    // regardless of alien characters that a possibly resides after
+    // our code stream
+    uint64_t lastOctet = ((lo + range) >> 40)-1;
     *p++ = uint8_t(lastOctet);
-    lo = (lo & MSK39_0) << 8;
+    while (lastOctet == (lo>>40)) {
+      lastOctet = 255;
+      *p++ = uint8_t(lastOctet);
+      lo = (lo & MSK39_0) << 8;
+    }
   }
 
   int len = p - dst;

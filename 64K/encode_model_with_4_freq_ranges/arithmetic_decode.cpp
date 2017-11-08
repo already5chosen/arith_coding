@@ -11,132 +11,174 @@ static const unsigned VAL_RANGE = 1u << 16;
 
 // load_ranges
 // return  value:
-//   on success the # of processed source octets,
+//   on succes the # of processed source octets,
 //   on parsing error negative error code
 //static
 int load_ranges(uint16_t* ranges, const uint8_t* src, int srclen, int* pInfo)
 {
-  if (srclen == 0) return -1;
-  int maxC = src[0];
-  int srcI = 1;
-  int hist[9] = {0};
-  int rem = maxC;
-  for (int i = 0; i < 8 && rem > 0; ++i) {
-    if (srcI == srclen) return -1;
-    hist[i] = src[srcI++];
-    rem -= hist[i];
-  }
-  if (rem < 0) return -2; // inconsistent histogram table
-  if (rem > 0)
-    hist[8] = rem;
+  const uint8_t* p    = src;
+  const uint8_t* endp = p+srclen;
+  if (endp-p < 1) return -1;
+  int nZeros  = *p++;
+  int nRanges = 256 - nZeros;
+  unsigned maxC;
+  uint32_t sum = 0;
+  if (nRanges < 8) {
+    // first variant of encoder - for small number of ranges
+    // Arithmetic encode could have been used here too, but the savings are too small
+    if (endp-p < nRanges*3) return -2;
 
-  // arithmetic decoder
-  const uint64_t MSK31_0  = (uint64_t(1) << 32)-(uint64_t(1) << 0);
-  const uint64_t MSK39_0  = (uint64_t(1) << 40)-(uint64_t(1) << 0);
-  const uint64_t MSK47_40 = (uint64_t(1) << 48)-(uint64_t(1) << 32);
-  uint64_t lo    = 0;                  // 48 bits
-  uint64_t range = uint64_t(-1) >> 16; // in fact, range-1
+    unsigned zc = 0;
+    for (int i = 0; i < nRanges; ++i, p += 3) {
+      maxC = p[0];
+      unsigned range = p[2]*256 + p[1];
+      for (; zc < maxC; ++zc)
+        ranges[zc] = 0;
+      ranges[maxC] = range;
+      zc = maxC + 1;
+      sum += range;
+    }
+  } else {
+    // main variant of encoder
+    if (endp-p < 4*2+1+5) return -3;
+    struct enc_rec_t {
+      uint32_t cnt;
+      uint32_t val;
+    } enc_tab[5];
 
-  uint64_t value = 0;  // 40 bits
-  for (int i = 0; i < 6; ++i, ++srcI) {
-    uint8_t srcO = srcI < srclen ? src[srcI] : 0;
-    value = (value << 8) | srcO;
-  }
+    enc_tab[0].cnt = *p++;
+    enc_tab[0].val = 1;
+    maxC = enc_tab[0].cnt + nRanges - 1;
+    uint32_t prevCnt = 0;
+    for (int i = 1; i < 5; ++i, p += 2) {
+      uint32_t cnt = (i*nRanges)/4;
+      enc_tab[i].cnt = cnt-prevCnt;
+      enc_tab[i].val = p[1]*256 + p[0];
+      prevCnt = cnt;
+    }
+    for (int i = 2; i < 5; ++i) {
+      if (enc_tab[i].val < enc_tab[i-1].val)
+        return -4;
+    }
+    // for (int i = 0; i < 5; ++i)
+      // printf(" %u:%u", enc_tab[i].cnt, enc_tab[i].val);
+    // printf("\n");
 
-  uint32_t sum    = 0;
-  int ix = 0;
-  int phase0 = 1;
-  for (int c = 0; c < maxC; c += phase0) {
-    // prevent range from becoming too small
-    while (range < (uint64_t(1) << 28)) {
-      // squeeze out all ones in bits[39..32]
-      lo = (lo & MSK47_40) | ((lo & MSK31_0) << 8);
-      range = (range << 8) | 255;
-      value = (value & MSK47_40) | ((value & MSK31_0) << 8);
-      value |= (srcI < srclen) ? src[srcI] : 0;
+    const uint64_t MSK31_0  = (uint64_t(1) << 32)-(uint64_t(1) << 0);
+    const uint64_t MSK39_0  = (uint64_t(1) << 40)-(uint64_t(1) << 0);
+    const uint64_t MSK47_40 = (uint64_t(1) << 48)-(uint64_t(1) << 32);
+    uint64_t lo    = 0;                  // 48 bits
+    uint64_t range = uint64_t(-1) >> 16; // in fact, range-1
+    unsigned nc = maxC + 1;
+
+    uint64_t value = 0;  // 40 bits
+    for (int i = 0; i < 6; ++i)
+      value = (value << 8) | p[i];
+    p += 6;
+
+    int srcI = p - src;
+    uint32_t val0   = 0;
+    uint32_t valDen = 0;
+    int phase0 = 1;
+    for (unsigned c = 0; c < nc; c += phase0) {
+      // prevent range from becoming too small
+      while (range < (uint64_t(1) << 28)) {
+        // squeeze out all ones in bits[39..32]
+        lo = (lo & MSK47_40) | ((lo & MSK31_0) << 8);
+        range = (range << 8) | 255;
+        value = (value & MSK47_40) | ((value & MSK31_0) << 8);
+        value |= (srcI < srclen) ? src[srcI] : 0;
+        ++srcI;
+        if (value < lo || value > lo + range) return -201; // should not happen
+      }
+
+      uint64_t deltaV = value - lo;
+      if (phase0) {
+        // printf("%3u lo=%010llx ra=%010llx va=%010llx\n", c, lo, range, value); fflush(stdout);
+        // course search
+        uint32_t cnt = 0;
+        int ix;
+        for (ix = 0; deltaV*(nc-c) >= (cnt+enc_tab[ix].cnt)*(range+1) ; ++ix)
+          cnt += enc_tab[ix].cnt;
+
+        // insert code of ix
+        uint32_t cnt1 = enc_tab[ix].cnt;
+        enc_tab[ix].cnt -= 1;
+
+        uint32_t l_num = cnt;  // up to 255
+        uint32_t r_num = cnt1; // up to 255
+        uint32_t den = (nc-c); // up to 256
+
+        lo   += ((range+1) * l_num + den - 1)/den; // ceil
+        range = ((range+1) * r_num)/den - 1;       // floor
+
+        ranges[c] = 0;
+        if (ix != 0) {
+          val0 = enc_tab[ix-1].val; // up to 2^16-1
+          uint32_t val1 = enc_tab[ix].val;
+          ranges[c] = val0;
+          if (val0 != val1) {
+            // stage look up and insertion code of specific value within enc_tab range
+            phase0 = 0;
+            valDen = val1 - val0 + 1; // up to 2^16-1
+          } else {
+            sum += val0;
+          }
+        }
+      } else {
+        // fine search
+        uint32_t valNum = (deltaV*valDen)/(range+1); // floor
+        // insert code of specific value within enc_tab range : (val-val0)/(val1+1-val0)
+        lo   += ((range+1) * valNum + valDen - 1)/valDen; // ceil
+        range = (range+1)/valDen - 1;                     // floor
+        phase0 = 1;
+        uint32_t val = val0 + valNum;
+        ranges[c] = val0 + valNum;
+        sum += val;
+      }
+
+      uint64_t hi = lo + range;
+      uint64_t dbits = lo ^ hi;
+      while ((dbits >> 40)==0) {
+        // lo and hi have 8 common MS bits
+        lo    = (lo & MSK39_0) << 8;
+        range = (range << 8) | 255;
+        value = (value & MSK39_0) << 8;
+        value |= (srcI < srclen) ? src[srcI] : 0;
+        ++srcI;
+        if (srcI > srclen+5) return -5;
+        if (value < lo || value > lo + range) return -202; // should not happen
+        dbits <<= 8;
+      }
+    }
+
+    srcI -= (6-1);
+    // Imitate encoder's logic for last octets in order to find out
+    // an exact length of encoded stream.
+    uint64_t lastOctet = ((lo + range) >> 40)-1;
+    while (lastOctet == (lo>>40)) {
+      lastOctet = 255;
       ++srcI;
-      if (value < lo || value > lo + range) return -201; // should not happen
+      lo = (lo & MSK39_0) << 8;
     }
-
-    uint64_t deltaV = value - lo;
-    if (phase0) {
-      // printf("%3u lo=%010llx ra=%010llx va=%010llx\n", c, lo, range, value); fflush(stdout);
-      // course search
-      uint32_t cnt = 0;
-      for (ix = 0; deltaV*(maxC-c) >= (cnt+hist[ix])*(range+1) ; ++ix)
-        cnt += hist[ix];
-
-      // insert code of ix
-      uint32_t cnt1 = hist[ix];
-      hist[ix] -= 1;
-
-      uint32_t l_num = cnt;  // up to 255
-      uint32_t r_num = cnt1; // up to 255
-      uint32_t den = (maxC-c); // up to 255
-
-      lo   += ((range+1) * l_num + den - 1)/den; // ceil
-      range = ((range+1) * r_num)/den - 1;       // floor
-
-      ranges[c] = 0;
-      if (ix != 0)
-        phase0 = 0; // stage look up for specific value within hist[ix] range
-    } else {
-      // fine search
-      int lshift = (ix-1)*2;
-      uint32_t val0   = 1u << lshift; // up to 2^14
-      uint32_t valDen = 3u << lshift; // up to 2^16-2^14
-
-      uint32_t valNum = (deltaV*valDen)/(range+1); // floor
-      // insert code of specific value within hist range
-      lo   += ((range+1) * valNum + valDen - 1)/valDen; // ceil
-      range = (range+1)/valDen - 1;                     // floor
-      phase0 = 1;
-
-      uint32_t val = val0 + valNum;
-      ranges[c] = val;
-      sum += val;
-    }
-
-    uint64_t hi = lo + range;
-    uint64_t dbits = lo ^ hi;
-    while ((dbits >> 40)==0) {
-      // lo and hi have 8 common MS bits
-      lo    = (lo & MSK39_0) << 8;
-      range = (range << 8) | 255;
-      value = (value & MSK39_0) << 8;
-      value |= (srcI < srclen) ? src[srcI] : 0;
-      ++srcI;
-      if (srcI > srclen+5) return -3;
-      if (value < lo || value > lo + range) return -202; // should not happen
-      dbits <<= 8;
-    }
+    if (srcI > srclen) return -6;
+    p = &src[srcI];
   }
-
-  srcI -= (6-1);
-  // Imitate encoder's logic for last octets in order to find out
-  // an exact length of encoded stream.
-  uint64_t lastOctet = ((lo + range) >> 40)-1;
-  while (lastOctet == (lo>>40)) {
-    lastOctet = 255;
-    ++srcI;
-    lo = (lo & MSK39_0) << 8;
-  }
-  if (srcI > srclen) return -4;
 
   // for (unsigned c = 0; c <= maxC; ++c)
     // printf("%3u: %04x\n", c, ranges[c]);
   // printf("len=%d, sum=%04x\n", int(p - src), sum);
-  if (sum >= VAL_RANGE)
-    return -5; // parsing error
+  if (sum != VAL_RANGE)
+    return -7; // parsing error
 
-  ranges[maxC] = VAL_RANGE - sum;
   for (unsigned c = maxC+1; c < 256; ++c)
     ranges[c] = 0;
 
+  int len = p - src;
   if (pInfo)
-    pInfo[0] = srcI*8;
+    pInfo[0] = len*8;
 
-  return srcI; // success
+  return len; // success
 }
 
 namespace {
