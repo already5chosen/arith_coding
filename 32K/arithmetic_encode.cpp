@@ -4,7 +4,7 @@
 #include "arithmetic_encode.h"
 
 
-static const unsigned VAL_RANGE = 1u << 16;
+static const unsigned VAL_RANGE = 1u << 15;
 
 // return value:
 // -1  - source consists of repetition of the same character
@@ -93,10 +93,11 @@ static int prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], dou
   unsigned lo = 0;
   for (unsigned c = 0; c <= maxC; ++c) {
     unsigned range = c2low[c];
+    // printf("%3u: %04x\n", c, range);
     c2low[c] = lo;
     lo += range;
   }
-  c2low[maxC+1] = 0;
+  c2low[maxC+1] = VAL_RANGE;
   return maxC;
 }
 
@@ -176,8 +177,8 @@ static int store_model(uint8_t* dst, const uint16_t c2low[256], unsigned maxC, d
     } else {
       // insert code of specific value within hist range
       int lshift = (ix-1)*2;
-      uint32_t valNum = val - (1u << lshift); // up to 2^16-2^14-1
-      uint32_t valDen = 3u << lshift;         // up to 2^16-2^14
+      uint32_t valNum = val - (1u << lshift);                  // up to 2^15-2^14-1
+      uint32_t valDen = ix < 8 ? (3u << lshift) : (1u << 14) ; // up to 2^15-2^14
 
       lo   += ((range+1) * valNum + valDen - 1)/valDen; // ceil
       range = (range+1)/valDen - 1;                     // floor
@@ -240,9 +241,8 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
     range += 1;
 
     int c = src[i];
-    if (c < maxC)
-      hi = lo + ((range * c2low[c+1])>>16) - 1;
-    lo   = lo + ((range * c2low[c+0])>>16);
+    hi = lo + ((range * c2low[c+1])>>15) - 1;
+    lo = lo + ((range * c2low[c+0])>>15);
 
     while (((lo ^ hi) >> 40)==0) {
       // lo and hi have the same upper octet

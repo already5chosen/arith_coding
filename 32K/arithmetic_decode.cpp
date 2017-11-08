@@ -1,12 +1,12 @@
 #include <cstdint>
-#include <cstdio>
+// #include <cstdio>
 // #include <cmath>
 // #include <cctype>
 
 #include "arithmetic_decode.h"
 
 
-static const unsigned VAL_RANGE = 1u << 16;
+static const unsigned VAL_RANGE = 1u << 15;
 
 
 // load_ranges
@@ -83,8 +83,8 @@ int load_ranges(uint16_t* ranges, const uint8_t* src, int srclen, int* pInfo)
     } else {
       // fine search
       int lshift = (ix-1)*2;
-      uint32_t val0   = 1u << lshift; // up to 2^14
-      uint32_t valDen = 3u << lshift; // up to 2^16-2^14
+      uint32_t val0   = 1u << lshift;                          // up to 2^14
+      uint32_t valDen = ix < 8 ? (3u << lshift) : (1u << 14) ; // up to 2^15-2^14
 
       uint32_t valNum = (deltaV*valDen)/(range+1); // floor
       // insert code of specific value within hist range
@@ -123,15 +123,16 @@ int load_ranges(uint16_t* ranges, const uint8_t* src, int srclen, int* pInfo)
   }
   if (srcI > srclen) return -4;
 
-  // for (unsigned c = 0; c <= maxC; ++c)
-    // printf("%3u: %04x\n", c, ranges[c]);
-  // printf("len=%d, sum=%04x\n", int(p - src), sum);
   if (sum >= VAL_RANGE)
     return -5; // parsing error
 
   ranges[maxC] = VAL_RANGE - sum;
   for (unsigned c = maxC+1; c < 256; ++c)
     ranges[c] = 0;
+
+  // for (int c = 0; c <= maxC; ++c)
+    // printf("%3u: %04x\n", c, ranges[c]);
+  // printf("len=%d, sum=%04x\n", srcI, sum);
 
   if (pInfo)
     pInfo[0] = srcI*8;
@@ -153,29 +154,13 @@ private:
   void prepare();
   int val2c(uint64_t value, uint64_t range) {
     unsigned ri = (value*512)/range;
-    unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c] <= (val/128)*128
+    unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c] <= (val/64)*64
     if (c != m_range2c[ri+1]) {
-      while (((m_c2low[c+1]*range) >> 16) <= value && c < m_maxC)
+      while (((m_c2low[c+1]*range) >> 15) <= value && c < m_maxC)
         ++c;
     }
     return c;
   }
-
-  // const uint16_t* c2val(int c) const
-  // {
-    // return &m_i2low[m_c2i[c]];
-  // }
-  // uint16_t m_val2c[512];
-  // const uint16_t* findC(int val)
-  // {
-    // int c = m_val2c[val]; // m_c2low[c] <= val
-    // while (c < 255) {
-      // if (m_c2low[c+1] > val)
-        // break;
-      // ++c;
-    // }
-    // return &m_c2low[c];
-  // }
 };
 
 
@@ -195,21 +180,20 @@ void arithmetic_decode_model_t::prepare()
   unsigned invI = 0;
   for (int c = 0; c < 256; ++c) {
     unsigned range = m_c2low[c];
+    // printf("%3u: %04x %04x\n", c, range, lo);
     m_c2low[c] = lo;
-    // printf("%3d : %04x\n", c, lo);
     if (range != 0) {
       // build inverse index m_range2c
       maxC = c;
       lo += range;
-      for (; invI <= ((lo-1) >> 7); ++invI) {
+      for (; invI <= ((lo-1) >> 6); ++invI) {
         m_range2c[invI] = maxC;
-        // printf("%04x => %3d\n", invI << 7, maxC);
       }
     }
   }
+  m_c2low[256] = VAL_RANGE;
   for (; invI < 513; ++invI) {
     m_range2c[invI] = maxC;
-    // printf("%04x => %3d\n", invI << 7, maxC);
   }
   m_maxC = maxC;
 }
@@ -255,8 +239,8 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
        // , i, lo, hi, value, range
        // , unsigned(round(double(value - lo)*0x100000000/range))
        // , c, isprint(c) ? c : '.', m_c2low[c+0], m_c2low[c+1]
-       // , lo + ((range * m_c2low[c+0])>>16)
-       // , (c < m_maxC) ? lo + ((range * m_c2low[c+1])>>16) - 1 : hi);
+       // , lo + ((range * m_c2low[c+0])>>15)
+       // , lo + ((range * m_c2low[c+1])>>15) - 1);
       // fflush(stdout);
     // }
     dst[i] = c;
@@ -265,16 +249,13 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
       break; // success
 
     // keep decoder in sync with encoder (b)
-    if (c < m_maxC)
-      hi = lo + ((range * m_c2low[c+1])>>16) - 1;
-    lo   = lo + ((range * m_c2low[c+0])>>16);
+    hi = lo + ((range * m_c2low[c+1])>>15) - 1;
+    lo = lo + ((range * m_c2low[c+0])>>15);
 
     if (value < lo || value > hi) return -102; // should not happen
 
     while (((lo ^ hi) >> 40)==0) {
       // lo and hi have the same upper octet
-      if (((lo ^ value) >> 40)!=0)
-        return -12;
       lo = (lo << 8) & VAL_MSK;
       hi = (hi << 8) & VAL_MSK;
       value = (value << 8) & VAL_MSK;
