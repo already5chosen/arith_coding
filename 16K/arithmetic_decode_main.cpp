@@ -85,7 +85,7 @@ int main(int argz, char** argv)
           }
         }
 
-        int info[8];
+        int info[8]={0};
         uint8_t *pDst = 0;
         uint64_t t0 = __rdtsc();
         if (hdr[5] == 255) {
@@ -126,13 +126,21 @@ int main(int argz, char** argv)
         uint64_t t1 = __rdtsc();
 
         if (vFlag)
-          printf("%7u -> %7u. Model %7.3f. Coded %6d. %8.0f clocks. %4.1f clocks/char\n"
+          printf(
+            "%7u -> %7u. Model %7.3f. Coded %6d. %8.0f clocks. %4.1f clocks/char"
+            #ifdef ENABLE_PERF_COUNT
+            " %d"
+            #endif
+            "\n"
             ,unsigned(codelen)
             ,unsigned(tilelen)
             ,info[0]/8.0
             ,info[1]
             ,double(t1-t0)
             ,double(t1-t0)/tilelen
+            #ifdef ENABLE_PERF_COUNT
+            ,info[2]
+            #endif
             );
 
         if (pDst) {

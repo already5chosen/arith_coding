@@ -227,34 +227,48 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
   uint64_t MSK31_0  = (uint64_t(1) << 32)-(uint64_t(1) << 0);
   uint64_t MSK47_40 = (uint64_t(1) << 48)-(uint64_t(1) << 40);
   uint64_t lo = 0;
-  uint64_t hi = VAL_MSK;
+  uint64_t range = uint64_t(1) << 48;
   int pending_bytes = 0;
   uint8_t* dst0 = dst;
   for (unsigned i = 0; i < srclen; ++i) {
-    uint64_t range;
-    while ((range = hi - lo) < (1u << 28)) {
-      // squeeze out bits[39..32]
-      lo = (lo & MSK47_40) | ((lo & MSK31_0) << 8);
-      hi = (hi & MSK47_40) | ((hi & MSK31_0) << 8);
-      ++pending_bytes;
-    }
-    range += 1;
 
     int c = src[i];
-    hi = lo + ((range * c2low[c+1])>>14) - 1;
-    lo = lo + ((range * c2low[c+0])>>14);
+    uint32_t cLo = c2low[c+0];
+    uint32_t cHi = c2low[c+1];
+    lo   += (range * cLo + VAL_RANGE-1) >> 14;
+    range = (range * (cHi-cLo)) >> 14;
 
-    while (((lo ^ hi) >> 40)==0) {
-      // lo and hi have the same upper octet
-      *dst++ = uint8_t(lo>>40);
-      lo = (lo << 8) & VAL_MSK;
-      hi = (hi << 8) & VAL_MSK;
-      while (pending_bytes) {
-        uint8_t pending_byte = 0-((lo>>47) & 1);
-        *dst++ = pending_byte;
-        --pending_bytes;
+    if (range < (1u << 28)) {
+      uint64_t hi = lo + range -1;
+      uint64_t dbits = lo ^ hi;
+      while ((dbits >> 40)==0) {
+        // lo and hi have the same upper octet
+        *dst++ = uint8_t(lo>>40);
+        while (pending_bytes) {
+          uint8_t pending_byte = 0-((lo>>39) & 1);
+          *dst++ = pending_byte;
+          --pending_bytes;
+        }
+        lo    <<= 8;
+        range <<= 8;
+        dbits <<= 8;
+      }
+      lo &= VAL_MSK;
+      while (range < (1u << 28)) {
+        // squeeze out bits[39..32]
+        lo = (lo & MSK47_40) | ((lo & MSK31_0) << 8);
+        range <<= 8;
+        ++pending_bytes;
       }
     }
+  }
+  uint64_t hi = lo + range -1;
+  uint64_t dbits = lo ^ hi;
+  while ((dbits >> 40)==0) {
+    // lo and hi have the same upper octet
+    *dst++ = uint8_t(hi>>40);
+    hi <<= 8;
+    dbits <<= 8;
   }
   // put out last octet
   *dst++ = uint8_t(hi>>40);

@@ -1,12 +1,13 @@
 #include <cstdint>
-// #include <cstdio>
+#include <cstdio>
 // #include <cmath>
-// #include <cctype>
+#include <cctype>
 
 #include "arithmetic_decode.h"
 
 
-static const unsigned VAL_RANGE = 1u << 14;
+static const int RANGE_BITS = 14;
+static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 
 
 // load_ranges
@@ -19,16 +20,17 @@ int load_ranges(uint16_t* ranges, const uint8_t* src, int srclen, int* pInfo)
   if (srclen == 0) return -1;
   int maxC = src[0];
   int srcI = 1;
-  int hist[8] = {0};
+  const int HIST_LEN = (RANGE_BITS+1)/2 + 1;
+  int hist[HIST_LEN] = {0};
   int rem = maxC;
-  for (int i = 0; i < 7 && rem > 0; ++i) {
+  for (int i = 0; i < HIST_LEN-1 && rem > 0; ++i) {
     if (srcI == srclen) return -1;
     hist[i] = src[srcI++];
     rem -= hist[i];
   }
   if (rem < 0) return -2; // inconsistent histogram table
   if (rem > 0)
-    hist[7] = rem;
+    hist[HIST_LEN-1] = rem;
 
   // arithmetic decoder
   const uint64_t MSK31_0  = (uint64_t(1) << 32)-(uint64_t(1) << 0);
@@ -143,20 +145,28 @@ int load_ranges(uint16_t* ranges, const uint8_t* src, int srclen, int* pInfo)
 namespace {
 
 struct arithmetic_decode_model_t {
+  #ifdef ENABLE_PERF_COUNT
+  int m_longLookupCount;
+  #endif
   uint16_t m_c2low[257];
 
   int  load_and_prepare(const uint8_t* src, int srclen, int* pInfo);
   int  decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen);
 private:
-  uint8_t  m_range2c[513];
+  static const int RANGE2C_NBITS = 9;
+  static const int RANGE2C_SZ = 1 << RANGE2C_NBITS;
+  uint8_t  m_range2c[RANGE2C_SZ+1];
   unsigned m_maxC;
 
   void prepare();
   int val2c(uint64_t value, uint64_t range) {
-    unsigned ri = (value*512)/range;
+    unsigned ri = (value*RANGE2C_SZ)/range;
     unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c] <= (val/32)*32
     if (c != m_range2c[ri+1]) {
-      while (((m_c2low[c+1]*range) >> 14) <= value && c < m_maxC)
+      #ifdef ENABLE_PERF_COUNT
+      ++m_longLookupCount;
+      #endif
+      while (((m_c2low[c+1]*range+VAL_RANGE-1) >> RANGE_BITS) <= value)
         ++c;
     }
     return c;
@@ -166,6 +176,9 @@ private:
 
 int arithmetic_decode_model_t::load_and_prepare(const uint8_t* src, int srclen, int* pInfo)
 {
+  #ifdef ENABLE_PERF_COUNT
+  m_longLookupCount = 0;
+  #endif
   int ret = load_ranges(m_c2low, src, srclen, pInfo);
   if (ret >= 0)
     prepare();
@@ -186,13 +199,13 @@ void arithmetic_decode_model_t::prepare()
       // build inverse index m_range2c
       maxC = c;
       lo += range;
-      for (; invI <= ((lo-1) >> (14-9)); ++invI) {
+      for (; invI <= ((lo-1) >> (RANGE_BITS-RANGE2C_NBITS)); ++invI) {
         m_range2c[invI] = maxC;
       }
     }
   }
   m_c2low[256] = VAL_RANGE;
-  for (; invI < 513; ++invI) {
+  for (; invI <= RANGE2C_SZ; ++invI) {
     m_range2c[invI] = maxC;
   }
   m_maxC = maxC;
@@ -204,7 +217,7 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
   uint64_t MSK31_0  = (uint64_t(1) << 32)-(uint64_t(1) << 0);
   uint64_t MSK47_40 = (uint64_t(1) << 48)-(uint64_t(1) << 40);
   uint64_t lo = 0;
-  uint64_t hi = VAL_MSK;
+  uint64_t range = uint64_t(1) << 48;
   if (srclen < 2)
     return -11;
   uint64_t value = 0;
@@ -217,22 +230,6 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
   }
 
   for (int i = 0; ; ) {
-    uint64_t range;
-    // keep decoder in sync with encoder (a)
-    while ((range = hi - lo) < (1u << 28)) {
-      // squeeze out bits[39..32]
-      lo = (lo & MSK47_40) | ((lo & MSK31_0) << 8);
-      hi = (hi & MSK47_40) | ((hi & MSK31_0) << 8);
-      value = (value & MSK47_40) | ((value & MSK31_0) << 8);
-      if (srclen > 0)
-        value += *src++;
-      --srclen;
-      if (srclen < -5)
-        return i;
-      if (value < lo || value > hi) return -101; // should not happen
-    }
-    range += 1;
-
     unsigned c = val2c(value - lo, range);
     // if (i % 1000 < 10 || i > dstlen - 20000) {
       // printf(": %6d [%012llx %012llx] %012llx %012llx. %08x c=%3d '%c' [%04x..%04x) => [%012llx %012llx]\n"
@@ -248,23 +245,41 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     if (i == dstlen)
       break; // success
 
-    // keep decoder in sync with encoder (b)
-    hi = lo + ((range * m_c2low[c+1])>>14) - 1;
-    lo = lo + ((range * m_c2low[c+0])>>14);
+    // keep decoder in sync with encoder
+    uint32_t cLo = m_c2low[c+0];
+    uint32_t cHi = m_c2low[c+1];
+    lo   += (range * cLo + VAL_RANGE-1) >> RANGE_BITS;
+    range = (range * (cHi-cLo)) >> RANGE_BITS;
 
-    if (value < lo || value > hi) return -102; // should not happen
+    if (value < lo || value - lo >= range) return -102; // should not happen
 
-    while (((lo ^ hi) >> 40)==0) {
-      // lo and hi have the same upper octet
-      lo = (lo << 8) & VAL_MSK;
-      hi = (hi << 8) & VAL_MSK;
-      value = (value << 8) & VAL_MSK;
-      if (srclen > 0)
-        value += *src++;
-      --srclen;
+    if (range < (1u << 28)) {
+      uint64_t hi = lo + range -1;
+      uint64_t dbits = lo ^ hi;
+      while ((dbits >> 40)==0) {
+        // lo and hi have the same upper octet
+        lo    <<= 8;
+        range <<= 8;
+        value <<= 8;
+        if (srclen > 0)
+          value += *src++;
+        --srclen;
+        dbits <<= 8;
+      }
+      lo    &= VAL_MSK;
+      value &= VAL_MSK;
+      while (range < (1u << 28)) {
+        // squeeze out bits[39..32]
+        lo    = (lo    & MSK47_40) | ((lo    & MSK31_0) << 8);
+        value = (value & MSK47_40) | ((value & MSK31_0) << 8);
+        if (srclen > 0)
+          value += *src++;
+        --srclen;
+        range <<= 8;
+      }
       if (srclen < -5)
         return i;
-      if (value < lo || value > hi) return -103; // should not happen
+      if (value < lo || value - lo >= range) return -103; // should not happen
     }
   }
   return dstlen;
@@ -280,6 +295,10 @@ int arithmetic_decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen, 
     if (pInfo)
       pInfo[1] = srclen-modellen;
     int textlen = model.decode(dst, dstlen, &src[modellen], srclen-modellen);
+    #ifdef ENABLE_PERF_COUNT
+    if (pInfo)
+      pInfo[2] = model.m_longLookupCount;
+    #endif
     return textlen;
   }
   return modellen;
