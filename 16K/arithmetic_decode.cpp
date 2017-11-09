@@ -6,7 +6,7 @@
 #include "arithmetic_decode.h"
 
 
-static const unsigned VAL_RANGE = 1u << 15;
+static const unsigned VAL_RANGE = 1u << 14;
 
 
 // load_ranges
@@ -19,16 +19,16 @@ int load_ranges(uint16_t* ranges, const uint8_t* src, int srclen, int* pInfo)
   if (srclen == 0) return -1;
   int maxC = src[0];
   int srcI = 1;
-  int hist[9] = {0};
+  int hist[8] = {0};
   int rem = maxC;
-  for (int i = 0; i < 8 && rem > 0; ++i) {
+  for (int i = 0; i < 7 && rem > 0; ++i) {
     if (srcI == srclen) return -1;
     hist[i] = src[srcI++];
     rem -= hist[i];
   }
   if (rem < 0) return -2; // inconsistent histogram table
   if (rem > 0)
-    hist[8] = rem;
+    hist[7] = rem;
 
   // arithmetic decoder
   const uint64_t MSK31_0  = (uint64_t(1) << 32)-(uint64_t(1) << 0);
@@ -83,8 +83,8 @@ int load_ranges(uint16_t* ranges, const uint8_t* src, int srclen, int* pInfo)
     } else {
       // fine search
       int lshift = (ix-1)*2;
-      uint32_t val0   = 1u << lshift;                          // up to 2^14
-      uint32_t valDen = ix < 8 ? (3u << lshift) : (1u << 14) ; // up to 2^15-2^14
+      uint32_t val0   = 1u << lshift; // up to 2^12
+      uint32_t valDen = 3u << lshift; // up to 2^14-2^12
 
       uint32_t valNum = (deltaV*valDen)/(range+1); // floor
       // insert code of specific value within hist range
@@ -154,9 +154,9 @@ private:
   void prepare();
   int val2c(uint64_t value, uint64_t range) {
     unsigned ri = (value*512)/range;
-    unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c] <= (val/64)*64
+    unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c] <= (val/32)*32
     if (c != m_range2c[ri+1]) {
-      while (((m_c2low[c+1]*range) >> 15) <= value && c < m_maxC)
+      while (((m_c2low[c+1]*range) >> 14) <= value && c < m_maxC)
         ++c;
     }
     return c;
@@ -186,7 +186,7 @@ void arithmetic_decode_model_t::prepare()
       // build inverse index m_range2c
       maxC = c;
       lo += range;
-      for (; invI <= ((lo-1) >> 6); ++invI) {
+      for (; invI <= ((lo-1) >> (14-9)); ++invI) {
         m_range2c[invI] = maxC;
       }
     }
@@ -249,8 +249,8 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
       break; // success
 
     // keep decoder in sync with encoder (b)
-    hi = lo + ((range * m_c2low[c+1])>>15) - 1;
-    lo = lo + ((range * m_c2low[c+0])>>15);
+    hi = lo + ((range * m_c2low[c+1])>>14) - 1;
+    lo = lo + ((range * m_c2low[c+0])>>14);
 
     if (value < lo || value > hi) return -102; // should not happen
 

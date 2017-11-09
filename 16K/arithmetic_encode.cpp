@@ -4,7 +4,7 @@
 #include "arithmetic_encode.h"
 
 
-static const unsigned VAL_RANGE = 1u << 15;
+static const unsigned VAL_RANGE = 1u << 14;
 
 // return value:
 // -1  - source consists of repetition of the same character
@@ -111,7 +111,7 @@ static int store_model(uint8_t* dst, const uint16_t c2low[256], unsigned maxC, d
   uint16_t c2range[256];
   // translate cumulative sums of ranges to individual ranges
   int nRanges = 0;
-  unsigned hist[9] = {0};
+  unsigned hist[8] = {0};
   for (unsigned c = 0; c < maxC; ++c) {
     uint32_t range = c2low[c+1] - c2low[c];
     c2range[c] = range;
@@ -127,7 +127,7 @@ static int store_model(uint8_t* dst, const uint16_t c2low[256], unsigned maxC, d
   uint8_t* p = dst;
   *p++ = maxC;
   unsigned rem = maxC;
-  for (int i = 0; i < 8 && rem > 0; ++i) {
+  for (int i = 0; i < 7 && rem > 0; ++i) {
     rem -= hist[i];
     *p++ = hist[i];
   }
@@ -177,8 +177,8 @@ static int store_model(uint8_t* dst, const uint16_t c2low[256], unsigned maxC, d
     } else {
       // insert code of specific value within hist range
       int lshift = (ix-1)*2;
-      uint32_t valNum = val - (1u << lshift);                  // up to 2^15-2^14-1
-      uint32_t valDen = ix < 8 ? (3u << lshift) : (1u << 14) ; // up to 2^15-2^14
+      uint32_t valNum = val - (1u << lshift); // up to 2^14-2^12-1
+      uint32_t valDen = 3u << lshift;         // up to 2^14-2^12
 
       lo   += ((range+1) * valNum + valDen - 1)/valDen; // ceil
       range = (range+1)/valDen - 1;                     // floor
@@ -241,8 +241,8 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
     range += 1;
 
     int c = src[i];
-    hi = lo + ((range * c2low[c+1])>>15) - 1;
-    lo = lo + ((range * c2low[c+0])>>15);
+    hi = lo + ((range * c2low[c+1])>>14) - 1;
+    lo = lo + ((range * c2low[c+0])>>14);
 
     while (((lo ^ hi) >> 40)==0) {
       // lo and hi have the same upper octet
