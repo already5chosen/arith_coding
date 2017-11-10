@@ -149,6 +149,7 @@ struct arithmetic_decode_model_t {
   int m_longLookupCount;
   #endif
   uint16_t m_c2low[257];
+  uint32_t m_c2invRange[256]; // round(2^28/range)
 
   int  load_and_prepare(const uint8_t* src, int srclen, int* pInfo);
   int  decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen);
@@ -159,8 +160,9 @@ private:
   unsigned m_maxC;
 
   void prepare();
-  int val2c(uint64_t value, uint64_t range) {
-    unsigned ri = (value*RANGE2C_SZ)/range;
+  int val2c(uint64_t value, uint64_t range, uint64_t invRange) {
+    unsigned ri = (value*invRange)>>(64-RANGE2C_NBITS);
+    // unsigned ri = (value*RANGE2C_SZ)/range;
     unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c] <= (val/32)*32
     if (c != m_range2c[ri+1]) {
       #ifdef ENABLE_PERF_COUNT
@@ -196,6 +198,7 @@ void arithmetic_decode_model_t::prepare()
     // printf("%3u: %04x %04x\n", c, range, lo);
     m_c2low[c] = lo;
     if (range != 0) {
+      m_c2invRange[c] = ((1u << 29)+range)/(range*2); // round(2^28/range)
       // build inverse index m_range2c
       maxC = c;
       lo += range;
@@ -216,8 +219,7 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
   uint64_t VAL_MSK  = uint64_t(-1) >> 16;
   uint64_t MSK31_0  = (uint64_t(1) << 32)-(uint64_t(1) << 0);
   uint64_t MSK47_40 = (uint64_t(1) << 48)-(uint64_t(1) << 40);
-  uint64_t lo = 0;
-  uint64_t range = uint64_t(1) << 48;
+
   if (srclen < 2)
     return -11;
   uint64_t value = 0;
@@ -229,8 +231,12 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
       break;
   }
 
+  uint64_t lo = 0;
+  uint64_t range    = uint64_t(1) << 48; // scaled to 2**48. Maintained in (2**28..2**48]
+  uint64_t invRange = uint64_t(1) << 16; // approximation of floor(2**64/range).  Maintained in [2**16..2*36)
   for (int i = 0; ; ) {
-    unsigned c = val2c(value - lo, range);
+    // uint64_t invRange = ((uint64_t(1) << 63)/range)*2;
+    unsigned c = val2c(value - lo, range, invRange);
     // if (i % 1000 < 10 || i > dstlen - 20000) {
       // printf(": %6d [%012llx %012llx] %012llx %012llx. %08x c=%3d '%c' [%04x..%04x) => [%012llx %012llx]\n"
        // , i, lo, hi, value, range
@@ -251,14 +257,36 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     lo   += (range * cLo + VAL_RANGE-1) >> RANGE_BITS;
     range = (range * (cHi-cLo)) >> RANGE_BITS;
 
+    // update invRange
+    invRange = (invRange*m_c2invRange[c] + (1<<27)) >> (28-RANGE_BITS);
+    // do one NR iteration to increase precision and assure that invRange*range <= 2**64
+    // = (2-range*invRange/2**64)*invRange
+    // = invRange - (range*invRange/2**64-1)*invRange
+    // = invRange - (range*invRange-2**64)/2**64*invRange
+    const uint64_t PROD_THR = uint64_t(1) << 52;
+    int64_t prod;
+    do {
+      prod = invRange * range; // -2**64 is implied by treating product as signed
+      invRange = ((__int128(invRange)<<64) - __int128(invRange) * prod) >> 64;
+      #if 0
+      int64_t prodx = invRange * range;
+      uint64_t invRangeRef = ((uint64_t(1)<<63)/range)*2;
+      int64_t prodRef = invRangeRef * range;
+      printf("%7d : %012llx %012llx : %9.1e %9.1e %9.1e\n"
+        ,i ,invRangeRef, invRange, double(prodRef), double(prod), double(prodx));
+      #endif
+      // if original had less than 12 bits of precision do another NR step
+    } while (uint64_t(prod+PROD_THR) > PROD_THR*2);
+
     if (value < lo || value - lo >= range) return -102; // should not happen
 
-    if (range < (1u << 28)) {
+    if (range <= (1u << 28)) {
       uint64_t hi = lo + range -1;
       uint64_t dbits = lo ^ hi;
       while ((dbits >> 40)==0) {
         // lo and hi have the same upper octet
         lo    <<= 8;
+        invRange >>= 8;
         range <<= 8;
         value <<= 8;
         if (srclen > 0)
@@ -268,13 +296,14 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
       }
       lo    &= VAL_MSK;
       value &= VAL_MSK;
-      while (range < (1u << 28)) {
+      while (range <= (1u << 28)) {
         // squeeze out bits[39..32]
         lo    = (lo    & MSK47_40) | ((lo    & MSK31_0) << 8);
         value = (value & MSK47_40) | ((value & MSK31_0) << 8);
         if (srclen > 0)
           value += *src++;
         --srclen;
+        invRange >>= 8;
         range <<= 8;
       }
       if (srclen < -5)
