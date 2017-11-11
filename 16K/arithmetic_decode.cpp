@@ -1,5 +1,6 @@
 #include <cstdint>
-#include <cstdio>
+#include <cstring>
+// #include <cstdio>
 // #include <cmath>
 #include <cctype>
 
@@ -222,14 +223,20 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
 
   if (srclen < 2)
     return -11;
-  uint64_t value = 0;
-  for (int k = 0; k < 6; ++k) {
-    value += uint64_t(*src) << ((5-k)*8);
-    src++;
-    srclen--;
-    if (srclen == 0)
-      break;
+
+  uint8_t tmpbuf[16] = {0};
+  bool useTmpbuf = false;
+  if (srclen < 6) {
+    memcpy(tmpbuf, src, srclen);
+    src = tmpbuf;
+    useTmpbuf = true;
   }
+
+  uint64_t value = 0;
+  for (int k = 0; k < 6; ++k)
+    value = (value << 8) | src[k];
+  src    += 6;
+  srclen -= 6;
 
   uint64_t lo = 0;
   uint64_t range    = uint64_t(1) << 48; // scaled to 2**48. Maintained in (2**28..2**48]
@@ -280,32 +287,35 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
 
     if (value < lo || value - lo >= range) return -102; // should not happen
 
-    if (range <= (1u << 28)) {
+    if (range <= (1u << 31)) {
+      if (srclen < 6) {
+        if (!useTmpbuf && srclen > 0) {
+          memcpy(tmpbuf, src, srclen);
+          src = tmpbuf;
+          useTmpbuf = true;
+        }
+      }
       uint64_t hi = lo + range -1;
       uint64_t dbits = lo ^ hi;
-      while ((dbits >> 40)==0) {
+      int octetsShifted = 0;
+      for (; (dbits >> 40)==0; ++octetsShifted) {
         // lo and hi have the same upper octet
-        lo    <<= 8;
-        invRange >>= 8;
-        range <<= 8;
-        value <<= 8;
-        if (srclen > 0)
-          value += *src++;
-        --srclen;
+        value = (value << 8) | src[octetsShifted];
         dbits <<= 8;
       }
-      lo    &= VAL_MSK;
       value &= VAL_MSK;
-      while (range <= (1u << 28)) {
+      range <<= octetsShifted*8;
+      lo = (lo << octetsShifted*8) & VAL_MSK;
+      for (; range <= (1u << 31); ++octetsShifted) {
         // squeeze out bits[39..32]
         lo    = (lo    & MSK47_40) | ((lo    & MSK31_0) << 8);
         value = (value & MSK47_40) | ((value & MSK31_0) << 8);
-        if (srclen > 0)
-          value += *src++;
-        --srclen;
-        invRange >>= 8;
+        value |= src[octetsShifted];
         range <<= 8;
       }
+      invRange >>= octetsShifted*8;
+      src    += octetsShifted;
+      srclen -= octetsShifted;
       if (srclen < -5)
         return i;
       if (value < lo || value - lo >= range) return -103; // should not happen

@@ -238,7 +238,7 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
     lo   += (range * cLo + VAL_RANGE-1) >> 14;
     range = (range * (cHi-cLo)) >> 14;
 
-    if (range <= (1u << 28)) {
+    if (range <= (1u << 31)) {
       uint64_t hi = lo + range -1;
       uint64_t dbits = lo ^ hi;
       while ((dbits >> 40)==0) {
@@ -254,7 +254,7 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
         dbits <<= 8;
       }
       lo &= VAL_MSK;
-      while (range <= (1u << 28)) {
+      while (range <= (1u << 31)) {
         // squeeze out bits[39..32]
         lo = (lo & MSK47_40) | ((lo & MSK31_0) << 8);
         range <<= 8;
