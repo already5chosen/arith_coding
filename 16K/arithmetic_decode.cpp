@@ -1,6 +1,6 @@
 #include <cstdint>
 #include <cstring>
-// #include <cstdio>
+#include <cstdio>
 // #include <cmath>
 #include <cctype>
 
@@ -150,7 +150,7 @@ struct arithmetic_decode_model_t {
   int m_longLookupCount;
   #endif
   uint16_t m_c2low[257];
-  uint32_t m_c2invRange[256]; // round(2^28/range)
+  float    m_c2invRange[256]; // (VAL_RANGE/range) rounded down
 
   int  load_and_prepare(const uint8_t* src, int srclen, int* pInfo);
   int  decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen);
@@ -161,8 +161,8 @@ private:
   unsigned m_maxC;
 
   void prepare();
-  int val2c(uint64_t value, uint64_t range, uint64_t invRange) {
-    unsigned ri = (value*invRange)>>(64-RANGE2C_NBITS);
+  int val2c(uint64_t value, uint64_t range, double invRange) {
+    int ri = int((value<<RANGE2C_NBITS)*invRange);
     // unsigned ri = (value*RANGE2C_SZ)/range;
     unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c] <= (val/32)*32
     if (c != m_range2c[ri+1]) {
@@ -199,7 +199,8 @@ void arithmetic_decode_model_t::prepare()
     // printf("%3u: %04x %04x\n", c, range, lo);
     m_c2low[c] = lo;
     if (range != 0) {
-      m_c2invRange[c] = ((1u << 29)+range)/(range*2); // round(2^28/range)
+      const float VAL_RANGE_MINUS_EPS = float(0.999999940395355*VAL_RANGE);
+      m_c2invRange[c] = VAL_RANGE_MINUS_EPS/range; // (VAL_RANGE/range) rounded down
       // build inverse index m_range2c
       maxC = c;
       lo += range;
@@ -239,10 +240,9 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
   srclen -= 6;
 
   uint64_t lo = 0;
-  uint64_t range    = uint64_t(1) << 48; // scaled to 2**48. Maintained in (2**28..2**48]
-  uint64_t invRange = uint64_t(1) << 16; // approximation of floor(2**64/range).  Maintained in [2**16..2*36)
+  int64_t range  = int64_t(1) << 48; // scaled to 2**48. Maintained in (2**31..2**48]
+  double invRange = 1.0/range;       // approximation of (1/range) rounded down. Maintained in [2**48..2**-31)
   for (int i = 0; ; ) {
-    // uint64_t invRange = ((uint64_t(1) << 63)/range)*2;
     unsigned c = val2c(value - lo, range, invRange);
     // if (i % 1000 < 10 || i > dstlen - 20000) {
       // printf(": %6d [%012llx %012llx] %012llx %012llx. %08x c=%3d '%c' [%04x..%04x) => [%012llx %012llx]\n"
@@ -264,28 +264,10 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     lo   += (range * cLo + VAL_RANGE-1) >> RANGE_BITS;
     range = (range * (cHi-cLo)) >> RANGE_BITS;
 
-    // update invRange
-    invRange = (invRange*m_c2invRange[c] + (1<<27)) >> (28-RANGE_BITS);
-    // do one NR iteration to increase precision and assure that invRange*range <= 2**64
-    // = (2-range*invRange/2**64)*invRange
-    // = invRange - (range*invRange/2**64-1)*invRange
-    // = invRange - (range*invRange-2**64)/2**64*invRange
-    const uint64_t PROD_THR = uint64_t(1) << 52;
-    int64_t prod;
-    do {
-      prod = invRange * range; // -2**64 is implied by treating product as signed
-      invRange = ((__int128(invRange)<<64) - __int128(invRange) * prod) >> 64;
-      #if 0
-      int64_t prodx = invRange * range;
-      uint64_t invRangeRef = ((uint64_t(1)<<63)/range)*2;
-      int64_t prodRef = invRangeRef * range;
-      printf("%7d : %012llx %012llx : %9.1e %9.1e %9.1e\n"
-        ,i ,invRangeRef, invRange, double(prodRef), double(prod), double(prodx));
-      #endif
-      // if original had less than 12 bits of precision do another NR step
-    } while (uint64_t(prod+PROD_THR) > PROD_THR*2);
+    if (value - lo >= uint64_t(range)) return -102; // should not happen
 
-    if (value < lo || value - lo >= range) return -102; // should not happen
+    // update invRange
+    invRange = invRange*m_c2invRange[c];
 
     if (range <= (1u << 31)) {
       if (srclen < 6) {
@@ -313,12 +295,21 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
         value |= src[octetsShifted];
         range <<= 8;
       }
-      invRange >>= octetsShifted*8;
+      static const double invRangeDivTab[7] = {
+        1./(int64_t(1)<<(8*0)), 1./(int64_t(1)<<(8*1)),
+        1./(int64_t(1)<<(8*2)), 1./(int64_t(1)<<(8*3)),
+        1./(int64_t(1)<<(8*4)), 1./(int64_t(1)<<(8*5)),
+        1./(int64_t(1)<<(8*6)),
+      };
+      invRange *= invRangeDivTab[octetsShifted];
+      // do one NR iteration to increase precision of invRange and assure that invRange*range <= 2**64
+      invRange *= 2.0 - invRange * range;
+
       src    += octetsShifted;
       srclen -= octetsShifted;
       if (srclen < -5)
         return i;
-      if (value < lo || value - lo >= range) return -103; // should not happen
+      if (value - lo >= uint64_t(range)) return -103; // should not happen
     }
   }
   return dstlen;
