@@ -148,6 +148,7 @@ namespace {
 struct arithmetic_decode_model_t {
   #ifdef ENABLE_PERF_COUNT
   int m_longLookupCount;
+  int m_renormalizationCount;
   #endif
   uint16_t m_c2low[257];
   float    m_c2invRange[256]; // (VAL_RANGE/range) rounded down
@@ -162,7 +163,16 @@ private:
 
   void prepare();
   int val2c(uint64_t value, uint64_t range, double invRange) {
-    int ri = int((value<<RANGE2C_NBITS)*invRange);
+    #if 1
+    int ri = int(int64_t(value<<RANGE2C_NBITS)*invRange);
+    #else
+    // this trick relies on knowledge of IEEE-754 binary64 format
+    // It works, but the speedup is not significant
+    double dRi = int64_t(value)*invRange + 1.0;
+    uint64_t u64ri;
+    memcpy(&u64ri, &dRi, sizeof(u64ri));
+    int ri = (u64ri >> (52 - RANGE2C_NBITS)) & (RANGE2C_SZ-1);
+    #endif
     // unsigned ri = (value*RANGE2C_SZ)/range;
     unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c] <= (val/32)*32
     if (c != m_range2c[ri+1]) {
@@ -181,6 +191,7 @@ int arithmetic_decode_model_t::load_and_prepare(const uint8_t* src, int srclen, 
 {
   #ifdef ENABLE_PERF_COUNT
   m_longLookupCount = 0;
+  m_renormalizationCount = 0;
   #endif
   int ret = load_ranges(m_c2low, src, srclen, pInfo);
   if (ret >= 0)
@@ -270,6 +281,9 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     invRange = invRange*m_c2invRange[c];
 
     if (range <= (1u << 31)) {
+      #ifdef ENABLE_PERF_COUNT
+      ++m_renormalizationCount;
+      #endif
       if (srclen < 6) {
         if (!useTmpbuf && srclen > 0) {
           memcpy(tmpbuf, src, srclen);
@@ -326,8 +340,10 @@ int arithmetic_decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen, 
       pInfo[1] = srclen-modellen;
     int textlen = model.decode(dst, dstlen, &src[modellen], srclen-modellen);
     #ifdef ENABLE_PERF_COUNT
-    if (pInfo)
+    if (pInfo) {
       pInfo[2] = model.m_longLookupCount;
+      pInfo[3] = model.m_renormalizationCount;
+    }
     #endif
     return textlen;
   }

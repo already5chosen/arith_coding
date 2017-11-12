@@ -129,7 +129,7 @@ int main(int argz, char** argv)
           printf(
             "%7u -> %7u. Model %7.3f. Coded %6d. %8.0f clocks. %4.1f clocks/char"
             #ifdef ENABLE_PERF_COUNT
-            " %d"
+            " %d %d"
             #endif
             "\n"
             ,unsigned(codelen)
@@ -140,6 +140,7 @@ int main(int argz, char** argv)
             ,double(t1-t0)/tilelen
             #ifdef ENABLE_PERF_COUNT
             ,info[2]
+            ,info[3]
             #endif
             );
 
