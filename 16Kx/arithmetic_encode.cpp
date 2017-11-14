@@ -4,7 +4,8 @@
 #include "arithmetic_encode.h"
 
 
-static const unsigned VAL_RANGE = 1u << 14;
+static const int RANGE_BITS = 14;
+static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 
 // return value:
 // -1  - source consists of repetition of the same character
@@ -221,31 +222,36 @@ static int store_model(uint8_t* dst, const uint16_t c2low[256], unsigned maxC, d
   return len;
 }
 
+static inline uint64_t umulh(uint64_t a, uint64_t b) {
+  return ((unsigned __int128)a * b) >> 64;
+}
+
 static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint16_t c2low[257], int maxC)
 {
-  uint64_t VAL_MSK  = uint64_t(-1) >> 16;
-  uint64_t MSK31_0  = (uint64_t(1) << 32)-(uint64_t(1) << 0);
-  uint64_t MSK47_40 = (uint64_t(1) << 48)-(uint64_t(1) << 40);
-  uint64_t lo = 0;
-  uint64_t range = uint64_t(1) << 48;
+  uint64_t MSB_MSK  = uint64_t(255) << 55;
+  uint64_t ACC_MSK  = uint64_t(-1) >> 1;
+  uint64_t lo    = 0;                  // scaled by 2**63
+  uint64_t range = uint64_t(-1) << 63; // scaled by 2**63
   int pending_bytes = 0;
   uint8_t* dst0 = dst;
   for (unsigned i = 0; i < srclen; ++i) {
 
     int c = src[i];
-    uint32_t cLo = c2low[c+0];
-    uint32_t cHi = c2low[c+1];
-    lo   += (range * cLo + VAL_RANGE-1) >> 14;
-    range = (range * (cHi-cLo)) >> 14;
+    uint64_t cLo = c2low[c+0];
+    uint64_t cHi = c2low[c+1];
+    uint64_t incLo = umulh(range, cLo << (63-RANGE_BITS));
+    uint64_t incHi = umulh(range, cHi << (63-RANGE_BITS));
+    lo   += incLo*2;
+    range = (incHi-incLo)*2;
 
-    if (range <= (1u << 31)) {
+    if (range <= (1u << 30)) {
       uint64_t hi = lo + range -1;
       uint64_t dbits = lo ^ hi;
-      while ((dbits >> 40)==0) {
+      while ((dbits & MSB_MSK)==0) {
         // lo and hi have the same upper octet
-        *dst++ = uint8_t(lo>>40);
+        *dst++ = uint8_t(lo>>55);
         while (pending_bytes) {
-          uint8_t pending_byte = 0-((lo>>39) & 1);
+          uint8_t pending_byte = 0-((lo>>54) & 1);
           *dst++ = pending_byte;
           --pending_bytes;
         }
@@ -253,25 +259,25 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
         range <<= 8;
         dbits <<= 8;
       }
-      lo &= VAL_MSK;
-      while (range <= (1u << 31)) {
-        // squeeze out bits[39..32]
-        lo = (lo & MSK47_40) | ((lo & MSK31_0) << 8);
+      while (range <= (1u << 30)) {
+        // squeeze out bits[55..48]
+        lo = (lo & MSB_MSK) | (lo << 8);
         range <<= 8;
         ++pending_bytes;
       }
+      lo &= ACC_MSK;
     }
   }
   uint64_t hi = lo + range -1;
   uint64_t dbits = lo ^ hi;
-  while ((dbits >> 40)==0) {
+  while ((dbits & MSB_MSK)==0) {
     // lo and hi have the same upper octet
-    *dst++ = uint8_t(hi>>40);
-    hi <<= 8;
+    *dst++ = uint8_t(hi>>55);
+    hi    <<= 8;
     dbits <<= 8;
   }
   // put out last octet
-  *dst++ = uint8_t(hi>>40);
+  *dst++ = uint8_t(hi>>55);
   return dst - dst0;
 }
 
