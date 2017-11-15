@@ -313,25 +313,37 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
       }
       uint64_t hi = lo + range -1;
       uint64_t dbits = lo ^ hi;
-      int octetsShifted = 0;
-      for (; (dbits & MSB_MSK)==0; ++octetsShifted) {
-        // lo and hi have the same upper octet
-        value = (value << 8) | src[octetsShifted];
-        dbits <<= 8;
+      int octetsShifted = unsigned(__builtin_clzll(dbits)-1)/8; // lo and hi have the same upper octets
+      // for (int k = 0; k < octetsShifted; ++k)
+        // value = (value << 8) | src[k];
+      if (octetsShifted != 0) {
+        range <<= octetsShifted*8;
+        lo    <<= octetsShifted*8;
+        value <<= octetsShifted*8;
+        invRange >>= octetsShifted*8;
+        uint64_t sixOctets =
+          (uint64_t(src[4])       ) |
+          (uint64_t(src[3]) << 1*8) |
+          (uint64_t(src[2]) << 2*8) |
+          (uint64_t(src[1]) << 3*8) |
+          (uint64_t(src[0]) << 4*8);
+        value |= sixOctets >> (40-octetsShifted*8);
+        lo &= ACC_MSK;
+        src    += octetsShifted;
+        srclen -= octetsShifted;
       }
-      range <<= octetsShifted*8;
-      lo    <<= octetsShifted*8;
-      for (; range <= (1u << 30); ++octetsShifted) {
-        // squeeze out bits[55..48]
-        lo    = (lo    & (MSB_MSK*1)) | (lo    << 8);
-        value = (value & (MSB_MSK*2)) | (value << 8);
-        value |= src[octetsShifted];
-        range <<= 8;
+      if (__builtin_expect(range <= (1u << 30), 0)) {
+        do {
+          // squeeze out bits[55..48]
+          lo    = (lo    & (MSB_MSK*1)) | (lo    << 8);
+          value = (value & (MSB_MSK*2)) | (value << 8);
+          value |= *src++;
+          srclen--;
+          invRange >>= 8;
+          range <<= 8;
+        } while (range <= (1u << 30));
+        lo &= ACC_MSK;
       }
-      lo &= ACC_MSK;
-      invRange >>= octetsShifted*8;
-      src    += octetsShifted;
-      srclen -= octetsShifted;
       if (srclen < -7)
         return i;
       hvalue = value>>1;
