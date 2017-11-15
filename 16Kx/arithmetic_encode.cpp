@@ -238,11 +238,13 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
 
     int c = src[i];
     uint64_t cLo = c2low[c+0];
-    uint64_t cHi = c2low[c+1];
-    uint64_t incLo = umulh(range, cLo << (63-RANGE_BITS));
-    uint64_t incHi = umulh(range, cHi << (63-RANGE_BITS));
-    lo   += incLo*2;
-    range = (incHi-incLo)*2;
+    uint64_t cRa = c2low[c+1] - cLo;
+    lo   += umulh(range, cLo << (63-RANGE_BITS))*2;
+    range = umulh(range, cRa << (63-RANGE_BITS))*2;
+    // This form of calculation of 'range' loses ~half a LSbit of encode space
+    // relatively to method that calculates hi and takes range as lo-hi.
+    // In practice a difference is minuscule - 1bit per TB or something like that.
+    // I did it this way, because it allows for easier maintenance of floor(1/range) in decoder.
 
     if (range <= (1u << 30)) {
       uint64_t hi = lo + range -1;

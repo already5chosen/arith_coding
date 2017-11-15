@@ -2,7 +2,7 @@
 #include <cstring>
 // #include <cstdio>
 // #include <cmath>
-#include <cctype>
+// #include <cctype>
 
 #include "arithmetic_decode.h"
 
@@ -155,7 +155,7 @@ struct arithmetic_decode_model_t {
   int m_renormalizationCount;
   #endif
   uint16_t m_c2low[257];
-  uint32_t m_c2invRange[256]; // round(2^31/range)
+  uint32_t m_c2invRange[256]; // floor(2^31/range)
 
   int  load_and_prepare(const uint8_t* src, int srclen, int* pInfo);
   int  decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen);
@@ -204,7 +204,7 @@ void arithmetic_decode_model_t::prepare()
     // printf("%3u: %04x %04x\n", c, range, lo);
     m_c2low[c] = lo;
     if (range != 0) {
-      m_c2invRange[c] = ((1llu << 32)+range)/(range*2); // round(2^31/range)
+      m_c2invRange[c] = (1u << 31)/range; // floor(2^31/range)
       // build inverse index m_range2c
       maxC = c;
       lo += range;
@@ -246,7 +246,17 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
   uint64_t lo    = 0;                    // scaled by 2**63
   uint64_t range = uint64_t(-1) << 63;   // scaled by 2**63. Maintained in (2**30..2**63]
   uint64_t invRange = uint64_t(1) << 31; // approximation of floor(2**94/range).  Maintained in [2**31..2*64)
+
+  // uint64_t mxProd = 0, mnProd = uint64_t(-1);
   for (int i = 0; ; ) {
+    #if 0
+    uint64_t prod = umulh(invRange, range);
+    if (prod > mxProd || prod < mnProd) {
+      if (prod > mxProd) mxProd=prod;
+      if (prod < mnProd) mnProd=prod;
+      printf("%016llx*%016llx=%016llx [%016llx..%016llx]\n", range, invRange, prod, mnProd, mxProd);
+    }
+    #endif
     // uint64_t ri = umulh(hvalue-lo,invRange)>>(30-RANGE2C_NBITS);
     // printf("was here A0. %016llx %016llx %016llx %llu=>%d,%d,%d %.12f %08llx\n"
       // , hvalue - lo, range, invRange
@@ -276,18 +286,21 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
 
     // keep decoder in sync with encoder
     uint64_t cLo = m_c2low[c+0];
-    uint64_t cHi = m_c2low[c+1];
-    uint64_t incLo = umulh(range, cLo << (63-RANGE_BITS));
-    uint64_t incHi = umulh(range, cHi << (63-RANGE_BITS));
-    lo   += incLo*2;
-    range = (incHi-incLo)*2;
+    uint64_t cRa = m_c2low[c+1]-cLo;
+    lo   += umulh(range, cLo << (63-RANGE_BITS))*2;
+    range = umulh(range, cRa << (63-RANGE_BITS))*2;
+    uint64_t hi = lo + range;
+    if (hvalue == hi) return -12;
+    // That is an input error, rather than internal error of decoder.
+    // Due to way that encoder works, not any bit stream is possible as its output
+    // That's the case of illegal code stream.
+    // The case is extremely unlikely, but not impossible.
 
-    // printf("was here A2 %016llx : %016llx : %016llx. %016llx %016llx\n", lo, hvalue, lo+range-1, value - lo, range);
-    // fflush(stdout);
-    if (hvalue < lo || hvalue - lo >= range) return -102; // should not happen
+    if (hvalue > hi || hvalue < lo) return -102; // should never happen
+
+    // printf("was here A2. %016llx %016llx %016llx\n",  lo, hvalue, hi); fflush(stdout);
 
     if (range <= (1u << 30)) {
-      // printf("was here B\n"); fflush(stdout);
       #ifdef ENABLE_PERF_COUNT
       ++m_renormalizationCount;
       #endif
@@ -328,29 +341,31 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     // update invRange
     invRange = umulh(invRange, uint64_t(m_c2invRange[c]) << (63-31)) << (RANGE_BITS+1);
 
-    // do one NR iteration to increase precision of invRange and assure that invRange*range <= 2**64
-    // const uint64_t PROD_THR = uint64_t(1) << 18;
-    const uint64_t PROD_ONE = uint64_t(1) << 30;
-    uint64_t prod;
-    // do {
-      prod = umulh(invRange, range); // scaled to 2^30
-      invRange = umulh(invRange, (PROD_ONE*2-1-prod)<<33)<<1;
-      #if 0
-      uint64_t prodx = umulh(invRange, range);
-      uint64_t invRangeRef = range ? (__int128(1)<<94)/range : uint64_t(1) << 30;
-      int64_t prodRef = umulh(invRangeRef, range);
-      printf("%7d : %016llx : %016llx %016llx : %9.1e %9.1e %9.1e %u:%08x\n"
-        ,i ,range, invRangeRef, invRange
-        , double(int64_t(prodRef-PROD_ONE))
-        , double(int64_t(prod-PROD_ONE))
-        , double(int64_t(prodx-PROD_ONE))
-        , c, m_c2invRange[c]
-        );
-      // fflush(stdout);
-      if (invRange==0) return -104; // should not happen
-      #endif
-      // if original had less than 12 bits of precision do another NR step
-    // } while (prod - PROD_ONE + PROD_THR > PROD_THR*2);
+    if ((i & 15)==0) {
+      // do one NR iteration to increase precision of invRange and assure that invRange*range <= 2**64
+      // const uint64_t PROD_THR = uint64_t(1) << 18;
+      const uint64_t PROD_ONE = uint64_t(1) << 30;
+      uint64_t prod;
+      // do {
+        prod = umulh(invRange, range); // scaled to 2^30
+        invRange = umulh(invRange, (PROD_ONE*2-1-prod)<<33)<<1;
+        #if 0
+        uint64_t prodx = umulh(invRange, range);
+        uint64_t invRangeRef = range ? (__int128(1)<<94)/range : uint64_t(1) << 30;
+        int64_t prodRef = umulh(invRangeRef, range);
+        printf("%7d : %016llx : %016llx %016llx : %9.1e %9.1e %9.1e %u:%08x\n"
+          ,i ,range, invRangeRef, invRange
+          , double(int64_t(prodRef-PROD_ONE))
+          , double(int64_t(prod-PROD_ONE))
+          , double(int64_t(prodx-PROD_ONE))
+          , c, m_c2invRange[c]
+          );
+        // fflush(stdout);
+        if (invRange==0) return -104; // should not happen
+        #endif
+        // if original had less than 12 bits of precision do another NR step
+      // } while (prod - PROD_ONE + PROD_THR > PROD_THR*2);
+    }
   }
   return dstlen;
 }
