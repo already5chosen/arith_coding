@@ -151,6 +151,7 @@ namespace {
 
 struct arithmetic_decode_model_t {
   #ifdef ENABLE_PERF_COUNT
+  int m_extLookupCount;
   int m_longLookupCount;
   int m_renormalizationCount;
   #endif
@@ -171,10 +172,14 @@ private:
     unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c] <= (val/32)*32
     if (c != m_range2c[ri+1]) {
       #ifdef ENABLE_PERF_COUNT
-      ++m_longLookupCount;
+      ++m_extLookupCount;
       #endif
-      while (umulh(uint64_t(m_c2low[c+1]) << (63-RANGE_BITS),range)*2 <= value)
+      while (umulh(uint64_t(m_c2low[c+1]) << (63-RANGE_BITS),range)*2 <= value) {
+        #ifdef ENABLE_PERF_COUNT
+        ++m_longLookupCount;
+        #endif
         ++c;
+      }
     }
     return c;
   }
@@ -184,6 +189,7 @@ private:
 int arithmetic_decode_model_t::load_and_prepare(const uint8_t* src, int srclen, int* pInfo)
 {
   #ifdef ENABLE_PERF_COUNT
+  m_extLookupCount = 0;
   m_longLookupCount = 0;
   m_renormalizationCount = 0;
   #endif
@@ -394,8 +400,9 @@ int arithmetic_decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen, 
     int textlen = model.decode(dst, dstlen, &src[modellen], srclen-modellen);
     #ifdef ENABLE_PERF_COUNT
     if (pInfo) {
-      pInfo[2] = model.m_longLookupCount;
-      pInfo[3] = model.m_renormalizationCount;
+      pInfo[2] = model.m_extLookupCount;
+      pInfo[3] = model.m_longLookupCount;
+      pInfo[4] = model.m_renormalizationCount;
     }
     #endif
     return textlen;

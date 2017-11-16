@@ -127,9 +127,9 @@ int main(int argz, char** argv)
 
         if (vFlag)
           printf(
-            "%7u -> %7u. Model %7.3f. Coded %6d. %8.0f clocks. %4.1f clocks/char"
+            "%7u -> %7u. Model %7.3f. Coded %7d. %8.0f clocks. %4.1f clocks/char"
             #ifdef ENABLE_PERF_COUNT
-            " %d %d"
+            " %6d %6d %6d"
             #endif
             "\n"
             ,unsigned(codelen)
@@ -141,6 +141,7 @@ int main(int argz, char** argv)
             #ifdef ENABLE_PERF_COUNT
             ,info[2]
             ,info[3]
+            ,info[4]
             #endif
             );
 
