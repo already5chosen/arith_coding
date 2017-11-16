@@ -9,6 +9,10 @@
 
 static const int RANGE_BITS = 14;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
+struct c2low_t {
+  uint16_t lo;
+  uint8_t  c;
+};
 
 
 // load_ranges
@@ -16,7 +20,7 @@ static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 //   on success the # of processed source octets,
 //   on parsing error negative error code
 //static
-int load_ranges(uint16_t* ranges, const uint8_t* src, int srclen, int* pInfo)
+static int load_ranges(c2low_t* ranges, const uint8_t* src, int srclen, int* pInfo)
 {
   if (srclen == 0) return -1;
   int maxC = src[0];
@@ -80,7 +84,7 @@ int load_ranges(uint16_t* ranges, const uint8_t* src, int srclen, int* pInfo)
       lo   += ((range+1) * l_num + den - 1)/den; // ceil
       range = ((range+1) * r_num)/den - 1;       // floor
 
-      ranges[c] = 0;
+      ranges[c].lo = 0;
       if (ix != 0)
         phase0 = 0; // stage look up for specific value within hist[ix] range
     } else {
@@ -96,7 +100,7 @@ int load_ranges(uint16_t* ranges, const uint8_t* src, int srclen, int* pInfo)
       phase0 = 1;
 
       uint32_t val = val0 + valNum;
-      ranges[c] = val;
+      ranges[c].lo = val;
       sum += val;
     }
 
@@ -129,9 +133,9 @@ int load_ranges(uint16_t* ranges, const uint8_t* src, int srclen, int* pInfo)
   if (sum >= VAL_RANGE)
     return -5; // parsing error
 
-  ranges[maxC] = VAL_RANGE - sum;
+  ranges[maxC].lo = VAL_RANGE - sum;
   for (unsigned c = maxC+1; c < 256; ++c)
-    ranges[c] = 0;
+    ranges[c].lo = 0;
 
   // for (int c = 0; c <= maxC; ++c)
     // printf("%3u: %04x\n", c, ranges[c]);
@@ -155,7 +159,7 @@ struct arithmetic_decode_model_t {
   int m_longLookupCount;
   int m_renormalizationCount;
   #endif
-  uint16_t m_c2low[257];
+  c2low_t  m_c2low[257];
   uint32_t m_c2invRange[256]; // floor(2^31/range)
 
   int  load_and_prepare(const uint8_t* src, int srclen, int* pInfo);
@@ -170,16 +174,16 @@ private:
   int val2c(uint64_t value, uint64_t range, uint64_t invRange) {
     uint32_t loEst30b = umulh(value,invRange);
     unsigned ri = loEst30b>>(30-RANGE2C_NBITS);
-    unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c] <= (val/32)*32
+    unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c].lo <= ri*32
     if (c != m_range2c[ri+1]) {
       #ifdef ENABLE_PERF_COUNT
       ++m_extLookupCount;
       #endif
       unsigned loEst = loEst30b>>(30-RANGE_BITS);
-      while (m_c2low[c+1] <= loEst) {
+      while (m_c2low[c+1].lo <= loEst) {
         ++c;
       }
-      while (umulh(uint64_t(m_c2low[c+1]) << (63-RANGE_BITS),range)*2 <= value) {
+      while (umulh(uint64_t(m_c2low[c+1].lo) << (63-RANGE_BITS),range)*2 <= value) {
         #ifdef ENABLE_PERF_COUNT
         ++m_longLookupCount;
         #endif
@@ -206,25 +210,28 @@ int arithmetic_decode_model_t::load_and_prepare(const uint8_t* src, int srclen, 
 
 void arithmetic_decode_model_t::prepare()
 {
-  // m_c2low -> cumulative sums of ranges
+  // m_c2low[].lo -> cumulative sums of ranges
   unsigned maxC = 255;
   unsigned lo = 0;
   unsigned invI = 0;
+  int cc = 0;
   for (int c = 0; c < 256; ++c) {
-    unsigned range = m_c2low[c];
+    unsigned range = m_c2low[c].lo;
     // printf("%3u: %04x %04x\n", c, range, lo);
-    m_c2low[c] = lo;
+    m_c2low[cc].lo = lo;
     if (range != 0) {
-      m_c2invRange[c] = (1u << 31)/range; // floor(2^31/range)
+      m_c2low[cc].c = c;
+      m_c2invRange[cc] = (1u << 31)/range; // floor(2^31/range)
       // build inverse index m_range2c
-      maxC = c;
+      maxC = cc;
       lo += range;
       for (; invI <= ((lo-1) >> (RANGE_BITS-RANGE2C_NBITS)); ++invI) {
         m_range2c[invI] = maxC;
       }
+      ++cc;
     }
   }
-  m_c2low[256] = VAL_RANGE;
+  m_c2low[cc].lo = VAL_RANGE;
   for (; invI <= RANGE2C_SZ; ++invI) {
     m_range2c[invI] = maxC;
   }
@@ -290,14 +297,14 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
        // , lo + ((range * m_c2low[c+1])>>15) - 1);
       // fflush(stdout);
     // }
-    dst[i] = c;
+    dst[i] = m_c2low[c].c;
     ++i;
     if (i == dstlen)
       break; // success
 
     // keep decoder in sync with encoder
-    uint64_t cLo = m_c2low[c+0];
-    uint64_t cRa = m_c2low[c+1]-cLo;
+    uint64_t cLo = m_c2low[c+0].lo;
+    uint64_t cRa = m_c2low[c+1].lo-cLo;
     lo   += umulh(range, cLo << (63-RANGE_BITS))*2;
     range = umulh(range, cRa << (63-RANGE_BITS))*2;
     uint64_t hi = lo + range;
