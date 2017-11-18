@@ -263,7 +263,7 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
       }
       while (range <= (1u << 30)) {
         // squeeze out bits[55..48]
-        lo = (lo & MSB_MSK) | (lo << 8);
+        lo = (lo & MSB_MSK) | ((lo << 8) & (~MSB_MSK));
         range <<= 8;
         ++pending_bytes;
       }

@@ -222,64 +222,64 @@ static int store_model(uint8_t* dst, const uint16_t c2low[256], unsigned maxC, d
   return len;
 }
 
-static inline uint64_t umulh(uint64_t a, uint64_t b) {
-  return ((unsigned __int128)a * b) >> 64;
-}
-
 static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint16_t c2low[257], int maxC)
 {
-  uint64_t MSB_MSK  = uint64_t(255) << 55;
-  uint64_t ACC_MSK  = uint64_t(-1) >> 1;
-  uint64_t lo    = 0;                  // scaled by 2**63
-  uint64_t range = uint64_t(-1) << 63; // scaled by 2**63
+  const uint64_t MSB_MSK   = uint64_t(255) << 56;
+  const uint64_t MIN_RANGE = uint64_t(1) << (31-RANGE_BITS);
+  uint64_t lo    = 0;                              // scaled by 2**64
+  uint64_t range = uint64_t(1) << (64-RANGE_BITS); // scaled by 2**50
   int pending_bytes = 0;
   uint8_t* dst0 = dst;
   for (unsigned i = 0; i < srclen; ++i) {
-
     int c = src[i];
     uint64_t cLo = c2low[c+0];
     uint64_t cRa = c2low[c+1] - cLo;
-    lo   += umulh(range, cLo << (63-RANGE_BITS))*2;
-    range = umulh(range, cRa << (63-RANGE_BITS))*2;
+    lo   += range * cLo;
+    range = range * cRa;
     // This form of calculation of 'range' loses ~half a LSbit of encode space
     // relatively to method that calculates hi and takes range as lo-hi.
     // In practice a difference is minuscule - 1bit per TB or something like that.
     // I did it this way, because it allows for easier maintenance of floor(1/range) in decoder.
 
-    if (range <= (1u << 30)) {
+    // at this point range is scaled by 2**64 - the same scale as lo
+    uint64_t nxtRange = range >> RANGE_BITS;
+    if (nxtRange <= MIN_RANGE) {
+      // re-normalize
       uint64_t hi = lo + range -1;
       uint64_t dbits = lo ^ hi;
+      int rangeShift = 0;
       while ((dbits & MSB_MSK)==0) {
         // lo and hi have the same upper octet
-        *dst++ = uint8_t(lo>>55);
+        *dst++ = uint8_t(lo>>56);
         while (pending_bytes) {
-          uint8_t pending_byte = 0-((lo>>54) & 1);
+          uint8_t pending_byte = 0-((lo>>55) & 1);
           *dst++ = pending_byte;
           --pending_bytes;
         }
         lo    <<= 8;
-        range <<= 8;
         dbits <<= 8;
+        rangeShift += 8;
       }
-      while (range <= (1u << 30)) {
-        // squeeze out bits[55..48]
-        lo = (lo & MSB_MSK) | (lo << 8);
-        range <<= 8;
+      while (rangeShift < 16) {
+        // squeeze out bits[56..49]
+        lo = (lo & MSB_MSK) | ((lo << 8) & (~MSB_MSK));
         ++pending_bytes;
+        rangeShift += 8;
       }
-      lo &= ACC_MSK;
+      nxtRange = range << (rangeShift-RANGE_BITS);
     }
+    range = nxtRange;
   }
-  uint64_t hi = lo + range -1;
+  uint64_t hi = lo + ((range<<RANGE_BITS)-1);
   uint64_t dbits = lo ^ hi;
   while ((dbits & MSB_MSK)==0) {
     // lo and hi have the same upper octet
-    *dst++ = uint8_t(hi>>55);
+    *dst++ = uint8_t(hi>>56);
     hi    <<= 8;
     dbits <<= 8;
   }
   // put out last octet
-  *dst++ = uint8_t(hi>>55);
+  *dst++ = uint8_t(hi>>56);
   return dst - dst0;
 }
 

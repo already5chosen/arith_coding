@@ -346,8 +346,8 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
       if (__builtin_expect(range <= (1u << 30), 0)) {
         do {
           // squeeze out bits[55..48]
-          lo    = (lo    & (MSB_MSK*1)) | (lo    << 8);
-          value = (value & (MSB_MSK*2)) | (value << 8);
+          lo    = (lo    & (MSB_MSK*1)) | ((lo    << 8) & (~(MSB_MSK*1)));
+          value = (value & (MSB_MSK*2)) | ((value << 8) & (~(MSB_MSK*2)));
           value |= *src++;
           srclen--;
           invRange >>= 8;
