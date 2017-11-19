@@ -175,11 +175,11 @@ private:
       #ifdef ENABLE_PERF_COUNT
       ++m_extLookupCount;
       #endif
-      unsigned loEst = loEst31b>>(31-RANGE_BITS);
-      while (m_c2low[c+1] <= loEst) {
-        ++c;
-      }
-      while (m_c2low[c+1]*range <= value) {
+      // unsigned loEst = loEst31b>>(31-RANGE_BITS);
+      // while (m_c2low[c+1] <= loEst) {
+        // ++c;
+      // }
+      while (m_c2low[c+1]*range-1 < value) {
         #ifdef ENABLE_PERF_COUNT
         ++m_longLookupCount;
         #endif
