@@ -236,10 +236,6 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
     uint64_t cRa = c2low[c+1] - cLo;
     lo   += range * cLo;
     range = range * cRa;
-    // This form of calculation of 'range' loses ~half a LSbit of encode space
-    // relatively to method that calculates hi and takes range as lo-hi.
-    // In practice a difference is minuscule - 1bit per TB or something like that.
-    // I did it this way, because it allows for easier maintenance of floor(1/range) in decoder.
 
     // at this point range is scaled by 2**64 - the same scale as lo
     uint64_t nxtRange = range >> RANGE_BITS;
