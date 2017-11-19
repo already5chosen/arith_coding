@@ -281,7 +281,15 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
       // , umulh(invRange, range)
       // );
     // fflush(stdout);
-    unsigned c = val2c(value - lo, range, invRange);
+
+    uint64_t dValue = value - lo;
+    if (dValue > (range << RANGE_BITS)-1) return -12;
+    // That is an input error, rather than internal error of decoder.
+    // Due to way that encoder works, not any bit stream is possible as its output
+    // That's the case of illegal code stream.
+    // The case is extremely unlikely, but not impossible.
+
+    unsigned c = val2c(dValue, range, invRange);
     // printf("was here A1 %u => [%04x..%04x]=%04x\n", c, m_c2low[c+0], m_c2low[c+1], m_c2low[c+1]-m_c2low[c+0]);
     // fflush(stdout);
     // if (i % 1000 < 10 || i > dstlen - 20000) {
@@ -304,14 +312,8 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     lo   += range * cLo;
     range = range * cRa;
     // at this point range is scaled by 2**64 - the same scale as lo
-    uint64_t hi = lo + range;
-    if (value == hi) return -12;
-    // That is an input error, rather than internal error of decoder.
-    // Due to way that encoder works, not any bit stream is possible as its output
-    // That's the case of illegal code stream.
-    // The case is extremely unlikely, but not impossible.
 
-    if (value > hi || value < lo) return -102; // should never happen
+    if (value-lo >= range) return -102; // should never happen
 
     // printf("was here A2. %016llx %016llx %016llx\n",  lo, value, hi); fflush(stdout);
 
