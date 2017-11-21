@@ -1,4 +1,6 @@
-//#include <cstdio>
+// #include <cstdio>
+#include <cfenv>
+#include <cstring>
 #include <cmath>
 
 #include "arithmetic_encode.h"
@@ -6,11 +8,17 @@
 
 static const int RANGE_BITS = 14;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
+static const float INV_VAL_RANGE = 1.0f / VAL_RANGE;
+
+typedef union {
+  uint32_t u;
+  float    f;
+} c2low_t;
 
 // return value:
 // -1  - source consists of repetition of the same character
 // >=0 - maxC = the character with the biggest numeric value that appears in the source at least once
-static int prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], double* pQuantizedEntropy, double* pInfo)
+static int prepare1(const uint8_t* src, unsigned srclen, c2low_t c2low[257], double* pQuantizedEntropy, double* pInfo)
 {
   // calculated statistics of appearance
   unsigned stat[256]={0};
@@ -61,7 +69,7 @@ static int prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], dou
         remCnt   -= cnt;
         remRange -= range;
       }
-      c2low[c] = range;
+      c2low[c].u = range;
     }
   }
   // 2nd pass - translate characters with higher counts
@@ -75,7 +83,7 @@ static int prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], dou
       // (range < VAL_RANGE) is guaranteed , because we already handled the case of repetition of the same character
       remCnt   -= cnt;
       remRange -= range;
-      c2low[c] = range;
+      c2low[c].u = range;
     }
   }
 
@@ -84,22 +92,26 @@ static int prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], dou
   for (unsigned c = 0; c <= maxC; ++c) {
     unsigned cnt = stat[c];
     if (cnt)
-      entropy += log2(double(VAL_RANGE)/c2low[c])*cnt;
+      entropy += log2(double(VAL_RANGE)/c2low[c].u)*cnt;
   }
   *pQuantizedEntropy = entropy;
   if (pInfo)
     pInfo[3] = entropy;
 
+  return maxC;
+}
+
+static void prepare2(c2low_t c2low[257], unsigned maxC)
+{
   // c2low -> cumulative sums of ranges
   unsigned lo = 0;
   for (unsigned c = 0; c <= maxC; ++c) {
-    unsigned range = c2low[c];
+    unsigned range = c2low[c].u;
     // printf("%3u: %04x\n", c, range);
-    c2low[c] = lo;
+    c2low[c].f = lo*INV_VAL_RANGE;
     lo += range;
   }
-  c2low[maxC+1] = VAL_RANGE;
-  return maxC;
+  c2low[maxC+1].f = 1.0f;
 }
 
 static int inline floor_log4(unsigned x) {
@@ -107,14 +119,14 @@ static int inline floor_log4(unsigned x) {
 }
 
 // return the number of stored octets
-static int store_model(uint8_t* dst, const uint16_t c2low[256], unsigned maxC, double* pInfo)
+static int store_model(uint8_t* dst, const c2low_t c2low[256], unsigned maxC, double* pInfo)
 {
   uint16_t c2range[256];
-  // translate cumulative sums of ranges to individual ranges
+  // copy and count non-zero ranges
   int nRanges = 0;
   unsigned hist[8] = {0};
   for (unsigned c = 0; c < maxC; ++c) {
-    uint32_t range = c2low[c+1] - c2low[c];
+    uint32_t range = c2low[c].u;
     c2range[c] = range;
     if (range > 0) {
       ++nRanges;
@@ -222,60 +234,76 @@ static int store_model(uint8_t* dst, const uint16_t c2low[256], unsigned maxC, d
   return len;
 }
 
-static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint16_t c2low[257], int maxC)
+static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const c2low_t c2low[257], int maxC)
 {
-  const uint64_t MSB_MSK   = uint64_t(255) << 56;
-  const uint64_t MIN_RANGE = uint64_t(1) << (31-RANGE_BITS);
-  uint64_t lo    = 0;                              // scaled by 2**64
-  uint64_t range = uint64_t(1) << (64-RANGE_BITS); // scaled by 2**50
+  const uint64_t MSB_MSK = uint64_t(-1) << 40; // 16 overhead bits + 8 most significant bits
+  const uint64_t VAL_MSK = uint64_t(-1) >> 16;
+  const double MIN_RANGE = 1.0 /(int32_t(1) << 26); // 2**(-26)
+  double lo = 16.0;   // offset by 16 to push significant bits into 48 LS bits
+  double range = 1.0;
   int pending_bytes = 0;
   uint8_t* dst0 = dst;
   for (unsigned i = 0; i < srclen; ++i) {
     int c = src[i];
-    uint64_t cLo = c2low[c+0];
-    uint64_t cRa = c2low[c+1] - cLo;
+    float cLo = c2low[c+0].f;
+    float cRa = c2low[c+1].f - cLo;
     lo   += range * cLo;
-    range = range * cRa;
+    range = (16.0 + range * cRa) - 16.0;
 
-    // at this point range is scaled by 2**64 - the same scale as lo
-    uint64_t nxtRange = range >> RANGE_BITS;
-    if (nxtRange <= MIN_RANGE) {
+    if (range <= MIN_RANGE) {
       // re-normalize
-      uint64_t hi = lo + range -1;
-      uint64_t dbits = lo ^ hi;
-      int rangeShift = 0;
-      while ((dbits & MSB_MSK)==0) {
-        // lo and hi have the same upper octet
-        *dst++ = uint8_t(lo>>56);
-        while (pending_bytes) {
-          uint8_t pending_byte = 0-((lo>>55) & 1);
-          *dst++ = pending_byte;
-          --pending_bytes;
+      double hi = lo + range;
+      uint64_t uLo; memcpy(&uLo, &lo, sizeof(uint64_t));
+      uint64_t uHi; memcpy(&uHi, &hi, sizeof(uint64_t));
+      uHi -= 1;
+      uint32_t lo32 = uLo >> 16; // 32 most significant bits of lo
+      dst[3] = lo32 >> (0*8);
+      dst[2] = lo32 >> (1*8);
+      dst[1] = lo32 >> (2*8);
+      dst[0] = lo32 >> (3*8);
+      uint64_t dbits = uLo ^ uHi;
+      dbits |= (1<<15); // we don't want to renormalize by more than 32 bits
+      unsigned bitsShifted   = (__builtin_clzll(dbits)-16) & (-8); // # of common MS bits in lo and hi
+      if (pending_bytes) {
+        if (bitsShifted !=  0) {
+          uint8_t pending_byte = 0-((lo32>>23) & 1);
+          for (int i = 0; i < pending_bytes; ++i)
+            dst[i+1] = pending_byte;
+          dst += pending_bytes;
+          dst[3] = lo32 >> (0*8);
+          dst[2] = lo32 >> (1*8);
+          dst[1] = lo32 >> (2*8);
+          pending_bytes = 0;
         }
-        lo    <<= 8;
-        dbits <<= 8;
-        rangeShift += 8;
       }
-      while (rangeShift < 16) {
-        // squeeze out bits[56..49]
-        lo = (lo & MSB_MSK) | ((lo << 8) & (~MSB_MSK));
+      uLo = (uLo & ~VAL_MSK) | ((uLo << bitsShifted) & VAL_MSK); // shift significant bits, keep upper bits intact
+      dst += bitsShifted/8;
+      while (bitsShifted < 16) {
+        // squeeze out bits[39..32]
+        uLo = (uLo & MSB_MSK) | ((uLo << 8) & (~MSB_MSK));
         ++pending_bytes;
-        rangeShift += 8;
+        bitsShifted += 8;
       }
-      nxtRange = range << (rangeShift-RANGE_BITS);
+      unsigned octetsShifted = bitsShifted/8;                    // # of common MS octets in lo and hi
+      const double pow256_tab[5] = { 1., 256., 256.*256., 256.*256*256., 256.*256.*256*256};
+      range *= pow256_tab[octetsShifted];
+      memcpy(&lo, &uLo, sizeof(uint64_t));
     }
-    range = nxtRange;
   }
-  uint64_t hi = lo + ((range<<RANGE_BITS)-1);
-  uint64_t dbits = lo ^ hi;
+
+  double hi = lo + range;
+  uint64_t uLo; memcpy(&uLo, &lo, sizeof(uint64_t));
+  uint64_t uHi; memcpy(&uHi, &hi, sizeof(uint64_t));
+  uHi -= 1;
+  uint64_t dbits = uLo ^ uHi;
   while ((dbits & MSB_MSK)==0) {
     // lo and hi have the same upper octet
-    *dst++ = uint8_t(hi>>56);
-    hi    <<= 8;
+    *dst++ = uint8_t(uHi>>40);
+    uHi   <<= 8;
     dbits <<= 8;
   }
   // put out last octet
-  *dst++ = uint8_t(hi>>56);
+  *dst++ = uint8_t(uHi>>40);
   return dst - dst0;
 }
 
@@ -285,9 +313,9 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
 // >0 - the length of compressed buffer
 int arithmetic_encode(std::vector<uint8_t>* dst, const uint8_t* src, int srclen, double* pInfo)
 {
-  uint16_t c2low[257];
+  c2low_t c2low[257];
   double quantizedEntropy;
-  int maxC = prepare(src, srclen, c2low, &quantizedEntropy, pInfo);
+  int maxC = prepare1(src, srclen, c2low, &quantizedEntropy, pInfo);
 
   if (maxC == -1)
     return -1; // source consists of repetition of the same character
@@ -299,9 +327,13 @@ int arithmetic_encode(std::vector<uint8_t>* dst, const uint8_t* src, int srclen,
   if ((quantizedEntropy+7)/8 + modellen >= srclen)
     return 0; // not compressible
 
+  int rdir = fegetround();
+  fesetround(FE_TOWARDZERO);
+  prepare2(c2low, maxC);
   // printf("ml=%u\n", modellen);
   dst->resize(sz0 + modellen + int(quantizedEntropy/8)+64);
   int dstlen = encode(&dst->at(sz0+modellen), src, srclen, c2low, maxC);
+  fesetround(rdir);
 
   if (pInfo)
     pInfo[2] = dstlen*8.0;

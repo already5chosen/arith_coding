@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <cstring>
+#include <cfenv>
 // #include <cstdio>
 // #include <cmath>
 // #include <cctype>
@@ -9,7 +10,7 @@
 
 static const int RANGE_BITS = 14;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
-
+static const float INV_VAL_RANGE = 1.0f / VAL_RANGE;
 
 // load_ranges
 // return  value:
@@ -155,23 +156,24 @@ struct arithmetic_decode_model_t {
   int m_longLookupCount;
   int m_renormalizationCount;
   #endif
-  uint16_t m_c2low[257];
-  uint32_t m_c2invRange[256]; // floor(2^31/range)
+  float m_c2low[257];
+  float m_c2invRange[256]; // 1/range
 
   int  load_and_prepare(const uint8_t* src, int srclen, int* pInfo);
   int  decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen);
 private:
   static const int RANGE2C_NBITS = 9;
   static const int RANGE2C_SZ = 1 << RANGE2C_NBITS;
-  uint8_t  m_range2c[RANGE2C_SZ+1];
+  uint8_t  m_range2c[RANGE2C_SZ+2];
   unsigned m_maxC;
 
-  void prepare();
-  int val2c(uint64_t value, uint64_t range, uint64_t invRange) {
-    uint32_t loEst31b = umulh(value,invRange);
-    unsigned ri = loEst31b>>(31-RANGE2C_NBITS);
+  void prepare(uint16_t c2range[256]);
+  int val2c(double value, double lo, double range, float invRange) {
+    // uint32_t loEst31b = umulh(value,invRange);
+    // unsigned ri = loEst31b>>(31-RANGE2C_NBITS);
+    unsigned ri = int(float(value-lo)*invRange*512.0f);
     unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c] <= (val/32)*32
-    if (c != m_range2c[ri+1]) {
+    if (c != m_range2c[ri+2]) {
       #ifdef ENABLE_PERF_COUNT
       ++m_extLookupCount;
       #endif
@@ -179,7 +181,7 @@ private:
       // while (m_c2low[c+1] <= loEst) {
         // ++c;
       // }
-      while (m_c2low[c+1]*range-1 < value) {
+      while (m_c2low[c+1]*range+lo <= value) {
         #ifdef ENABLE_PERF_COUNT
         ++m_longLookupCount;
         #endif
@@ -198,24 +200,25 @@ int arithmetic_decode_model_t::load_and_prepare(const uint8_t* src, int srclen, 
   m_longLookupCount = 0;
   m_renormalizationCount = 0;
   #endif
-  int ret = load_ranges(m_c2low, src, srclen, pInfo);
+  uint16_t c2range[256];
+  int ret = load_ranges(c2range, src, srclen, pInfo);
   if (ret >= 0)
-    prepare();
+    prepare(c2range);
   return ret;
 }
 
-void arithmetic_decode_model_t::prepare()
+void arithmetic_decode_model_t::prepare(uint16_t c2range[256])
 {
   // m_c2low -> cumulative sums of ranges
   unsigned maxC = 255;
   unsigned lo = 0;
   unsigned invI = 0;
   for (int c = 0; c < 256; ++c) {
-    unsigned range = m_c2low[c];
+    unsigned range = c2range[c];
     // printf("%3u: %04x %04x\n", c, range, lo);
-    m_c2low[c] = lo;
+    m_c2low[c] = lo*INV_VAL_RANGE;
     if (range != 0) {
-      m_c2invRange[c] = (1u << 31)/range; // floor(2^31/range)
+      m_c2invRange[c] = float(VAL_RANGE)/range;
       // build inverse index m_range2c
       maxC = c;
       lo += range;
@@ -224,17 +227,24 @@ void arithmetic_decode_model_t::prepare()
       }
     }
   }
-  m_c2low[256] = VAL_RANGE;
-  for (; invI <= RANGE2C_SZ; ++invI) {
+  m_c2low[256] = 1.0f;
+  for (; invI < RANGE2C_SZ+2; ++invI) {
     m_range2c[invI] = maxC;
   }
   m_maxC = maxC;
 }
 
+// static uint64_t to_u(double x){
+  // uint64_t u;
+  // memcpy(&u, &x, sizeof(u));
+  // return u;
+// }
+
 int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen)
 {
-  const uint64_t MSB_MSK   = uint64_t(255) << 56;
-  const uint64_t MIN_RANGE = uint64_t(1) << (31-RANGE_BITS);
+  const uint64_t MSB_MSK = uint64_t(-1) << 40; // 16 overhead bits + 8 most significant bits
+  const uint64_t VAL_MSK = uint64_t(-1) >> 16;
+  const double MIN_RANGE = 1.0 /(int32_t(1) << 26); // 2**(-26)
 
   if (srclen < 2)
     return -11;
@@ -247,78 +257,59 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     useTmpbuf = true;
   }
 
-  uint64_t value = 0;
-  for (int k = 0; k < 8; ++k)
-    value = (value << 8) | src[k];
-  src    += 8;
-  srclen -= 8;
+  double value = 0;
+  for (int k = 0; k < 6; ++k)
+    value = (value+src[5-k]) * (1.0/256);
+  src    += 6;
+  srclen -= 6;
+  value  += 16.0;
 
-  uint64_t lo    = 0;                              // scaled by 2**64
-  uint64_t range = uint64_t(1) << (64-RANGE_BITS); // scaled by 2**50.  Maintained in [2**17+1..2*50]
-  uint64_t invRange = uint64_t(1) << 31; // approximation of floor(2**81/range). Maintained in [2**31..2*64)
+  double lo    = 16.0;    // offset by 16 to push significant bits into 48 LS bits
+  double range = 1.0;
+  float  invRange = 1.0f; // approximation of 1/range from below
 
-  // uint64_t mxProd = 0, mnProd = uint64_t(-1);
   for (int i = 0; ; ) {
-    #if 0
-    uint64_t prod = umulh(invRange, range);
-    if (prod > mxProd || prod < mnProd) {
-      const int64_t PROD_ONE = int64_t(1) << 17;
-      if (prod > mxProd) mxProd=prod;
-      if (prod < mnProd) mnProd=prod;
-      printf("%016llx*%016llx=%3lld [%3lld..%3lld]\n"
-        ,(unsigned long long)range, (unsigned long long)invRange,
-        (long long)(prod-PROD_ONE), (long long)(mnProd-PROD_ONE), (long long)(mxProd-PROD_ONE)
-        );
+    if ((i & 63)==0) {
+      invRange = float(1.0/range);
     }
-    #endif
-    // uint32_t loEst31b = umulh(value-lo,invRange);
-    // unsigned ri = loEst31b>>(31-RANGE2C_NBITS);
-    // printf("was here A0. %016llx %016llx %016llx %llu=>%d,%d,%d %.12f %08llx\n"
-      // , value - lo, range, invRange
-      // , ri
-      // , ri > 0 ? m_range2c[ri-1]:m_range2c[ri],  m_range2c[ri], m_range2c[ri+1]
-      // , (value-lo)*(double(1u<<RANGE2C_NBITS)/(1u<<RANGE_BITS))/range
-      // , umulh(invRange, range)
-      // );
-    // fflush(stdout);
 
-    uint64_t dValue = value - lo;
-    if (dValue > (range << RANGE_BITS)-1) return -12;
+    if (value - lo >= range) return -12;
     // That is an input error, rather than internal error of decoder.
     // Due to way that encoder works, not any bit stream is possible as its output
     // That's the case of illegal code stream.
     // The case is extremely unlikely, but not impossible.
 
-    unsigned c = val2c(dValue, range, invRange);
-    // printf("was here A1 %u => [%04x..%04x]=%04x\n", c, m_c2low[c+0], m_c2low[c+1], m_c2low[c+1]-m_c2low[c+0]);
-    // fflush(stdout);
-    // if (i % 1000 < 10 || i > dstlen - 20000) {
-      // printf(": %6d [%012llx %012llx] %012llx %012llx. %08x c=%3d '%c' [%04x..%04x) => [%012llx %012llx]\n"
-       // , i, lo, hi, value, range
-       // , unsigned(round(double(value - lo)*0x100000000/range))
-       // , c, isprint(c) ? c : '.', m_c2low[c+0], m_c2low[c+1]
-       // , lo + ((range * m_c2low[c+0])>>15)
-       // , lo + ((range * m_c2low[c+1])>>15) - 1);
-      // fflush(stdout);
-    // }
+    unsigned c = val2c(value, lo, range, invRange);
     dst[i] = c;
     ++i;
     if (i == dstlen)
       break; // success
+    // if (i > 5880 && i < 5890) {
+      // unsigned ri = float(dValue)*invRange*512.0f;
+      // printf("%d:%3d %8.1f %8.1f %8.1f    %18.11f %18.11f   %20.18f  %20.18f %d %d\n"//"=%016llx %016llx\n"
+     // , i
+     // , c, m_c2low[c+0]*VAL_RANGE, m_c2low[c+1]*VAL_RANGE, c < 254 ? m_c2low[c+2]*VAL_RANGE : m_c2low[c+1]*VAL_RANGE
+     // , dValue/range*VAL_RANGE, float(dValue)*invRange*VAL_RANGE
+     // ,m_c2low[c+1]*range+lo, value
+     // ,m_range2c[ri+0]
+     // ,m_range2c[ri+1]
+     // //, to_u(value), to_u(range+16)
+     // );
+    // }
 
     // keep decoder in sync with encoder
-    uint64_t cLo = m_c2low[c+0];
-    uint64_t cRa = m_c2low[c+1]-cLo;
+    float cLo = m_c2low[c+0];
+    float cRa = m_c2low[c+1] - cLo;
     lo   += range * cLo;
-    range = range * cRa;
-    // at this point range is scaled by 2**64 - the same scale as lo
+    range = (16.0 + range * cRa) - 16.0;
+    // update invRange
+    invRange *= m_c2invRange[c];
 
     if (value-lo >= range) return -102; // should never happen
 
     // printf("was here A2. %016llx %016llx %016llx\n",  lo, value, hi); fflush(stdout);
 
-    uint64_t nxtRange = range >> RANGE_BITS;
-    if (nxtRange <= MIN_RANGE) {
+    if (range <= MIN_RANGE) {
       #ifdef ENABLE_PERF_COUNT
       ++m_renormalizationCount;
       #endif
@@ -329,37 +320,47 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
           useTmpbuf = true;
         }
       }
-      uint64_t hi = lo + range -1;
-      uint64_t dbits = lo ^ hi;
-      int octetsShifted = unsigned(__builtin_clzll(dbits))/8; // lo and hi have the same upper octets
-      if (octetsShifted != 0) {
-        lo    <<= octetsShifted*8;
-        value <<= octetsShifted*8;
-        uint64_t fiveOctets =
-          (uint64_t(src[4])       ) |
-          (uint64_t(src[3]) << 1*8) |
-          (uint64_t(src[2]) << 2*8) |
-          (uint64_t(src[1]) << 3*8) |
-          (uint64_t(src[0]) << 4*8);
-        value |= fiveOctets >> (40-octetsShifted*8);
+      double hi = lo + range;
+      uint64_t uLo; memcpy(&uLo, &lo, sizeof(uint64_t));
+      uint64_t uHi; memcpy(&uHi, &hi, sizeof(uint64_t));
+      uHi -= 1;
+      uint64_t dbits = uLo ^ uHi;
+      dbits |= (1<<15); // we don't want to renormalize by more than 32 bits
+      unsigned bitsShifted = (__builtin_clzll(dbits)-16) & (-8); // # of common MS bits in lo and hi
+      uint64_t uVa; memcpy(&uVa, &value, sizeof(uint64_t));
+      if (bitsShifted != 0) {
+        uLo = (uLo & ~VAL_MSK) | ((uLo << bitsShifted) & VAL_MSK); // shift significant bits, keep upper bits intact
+        uVa = (uVa & ~VAL_MSK) | ((uVa << bitsShifted) & VAL_MSK); // shift significant bits, keep upper bits intact
+        uint32_t fourOctets =
+          (uint32_t(src[3])       ) |
+          (uint32_t(src[2]) << 1*8) |
+          (uint32_t(src[1]) << 2*8) |
+          (uint32_t(src[0]) << 3*8);
+        uVa    |= fourOctets >> (32-bitsShifted);
+        unsigned octetsShifted = bitsShifted/8;                    // # of common MS octets in lo and hi
         src    += octetsShifted;
         srclen -= octetsShifted;
       }
-      if (__builtin_expect(octetsShifted < 2, 0)) {
+      if (__builtin_expect(bitsShifted < 16, 0)) {
         do {
           // squeeze out bits[56..49]
-          lo    = (lo    & MSB_MSK) | ((lo    << 8) & (~MSB_MSK));
-          value = (value & MSB_MSK) | ((value << 8) & (~MSB_MSK));
-          value |= *src++;
+          uLo = (uLo & MSB_MSK) | ((uLo << 8) & (~MSB_MSK));
+          uVa = (uVa & MSB_MSK) | ((uVa << 8) & (~MSB_MSK));
+          uVa |= *src++;
           srclen--;
-          octetsShifted += 1;
-        } while (octetsShifted < 2);
+          bitsShifted += 8;
+        } while (bitsShifted < 16);
       }
-      nxtRange = range << (octetsShifted*8 - RANGE_BITS);
-      invRange >>= octetsShifted*8;
+      memcpy(&lo,    &uLo, sizeof(uint64_t));
+      memcpy(&value, &uVa, sizeof(uint64_t));
+      unsigned octetsShifted = bitsShifted/8;                    // # of common MS octets in lo and hi
+      const double pow256_tab[5]    = { 1., 256., 256.*256., 256.*256*256., 256.*256.*256*256};
+      const float  invPow256_tab[5] = { 1., 1.0f/256., 1.0f/(256.*256.), 1.0f/(256.*256*256.), 1.0f/(256.*256.*256*256)};
+      range    *= pow256_tab[octetsShifted];
+      invRange *= invPow256_tab[octetsShifted];
       if (srclen < -7)
         return i;
-      if (value < lo || value - lo > ((nxtRange<<RANGE_BITS)-1)) {
+      if (value < lo || value - lo >= range) {
         // printf(
          // "%016llx < %016llx [<=  %016llx] || %016llx > %016llx\n"
          // "%016llx %016llx %016llx %d\n"
@@ -370,36 +371,6 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
         return -103; // should not happen
       }
     }
-    range = nxtRange;
-
-    // update invRange
-    invRange = umulh(invRange, uint64_t(m_c2invRange[c]) << (63-31)) << (RANGE_BITS+1);
-
-    if ((i & 15)==0) {
-      // do one NR iteration to increase precision of invRange and assure that invRange*range <= 2**81
-      // const uint64_t PROD_THR = uint64_t(1) << 18;
-      const uint64_t PROD_ONE = uint64_t(1) << 17;
-      uint64_t prod;
-      // do {
-        prod = umulh(invRange, range); // scaled to 2^17
-        invRange = umulh(invRange, (PROD_ONE*2-1-prod)<<46)<<1;
-        #if 0
-        uint64_t prodx = umulh(invRange, range);
-        uint64_t invRangeRef = (__int128(1)<<81)/range;
-        int64_t prodRef = umulh(invRangeRef, range);
-        printf("%7d : %016llx : %016llx %016llx : %9.1e %9.1e %9.1e %u:%08x\n"
-          ,i ,range, invRangeRef, invRange
-          , double(int64_t(prodRef-PROD_ONE))
-          , double(int64_t(prod-PROD_ONE))
-          , double(int64_t(prodx-PROD_ONE))
-          , c, m_c2invRange[c]
-          );
-        fflush(stdout);
-        if (invRange==0) return -104; // should not happen
-        #endif
-        // if original had less than 12 bits of precision do another NR step
-      // } while (prod - PROD_ONE + PROD_THR > PROD_THR*2);
-    }
   }
   return dstlen;
 }
@@ -409,11 +380,14 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
 int arithmetic_decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen, int* pInfo)
 {
   arithmetic_decode_model_t model;
+  int rdir = fegetround();
+  fesetround(FE_TOWARDZERO);
   int modellen = model.load_and_prepare(&src[0], srclen, pInfo);
   if (modellen >= 0) {
     if (pInfo)
       pInfo[1] = srclen-modellen;
     int textlen = model.decode(dst, dstlen, &src[modellen], srclen-modellen);
+    fesetround(rdir);
     #ifdef ENABLE_PERF_COUNT
     if (pInfo) {
       pInfo[2] = model.m_extLookupCount;
@@ -423,6 +397,7 @@ int arithmetic_decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen, 
     #endif
     return textlen;
   }
+  fesetround(rdir);
   return modellen;
 }
 
