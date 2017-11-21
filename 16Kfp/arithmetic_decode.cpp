@@ -171,7 +171,11 @@ private:
   int val2c(double value, double lo, double range, float invRange) {
     // uint32_t loEst31b = umulh(value,invRange);
     // unsigned ri = loEst31b>>(31-RANGE2C_NBITS);
-    unsigned ri = int(float(value-lo)*invRange*512.0f);
+    // unsigned ri = int(float(value-lo)*invRange*512.0f);
+    float f_rat = float(value-lo)*invRange + 1.0f;
+    uint32_t u_rat;
+    memcpy(&u_rat, &f_rat, sizeof(u_rat));
+    unsigned ri = (u_rat >> (23-RANGE2C_NBITS)) & (RANGE2C_SZ-1);
     unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c] <= (val/32)*32
     if (c != m_range2c[ri+2]) {
       #ifdef ENABLE_PERF_COUNT
