@@ -233,7 +233,7 @@ void arithmetic_decode_model_t::prepare()
 
 int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen)
 {
-  const uint64_t MSB_MSK   = uint64_t(255) << 56;
+  // const uint64_t MSB_MSK   = uint64_t(255) << 55;
   const uint64_t MIN_RANGE = uint64_t(1) << (31-RANGE_BITS);
 
   if (srclen < 2)
@@ -250,13 +250,14 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
   uint64_t value = 0;
   for (int k = 0; k < 8; ++k)
     value = (value << 8) | src[k];
-  src    += 8;
-  srclen -= 8;
+  src    += 7;
+  srclen -= 7;
 
-  uint64_t lo    = 0;                              // scaled by 2**64
-  uint64_t range = uint64_t(1) << (64-RANGE_BITS); // scaled by 2**50.  Maintained in [2**17+1..2*50]
-  uint64_t invRange = uint64_t(1) << 31; // approximation of floor(2**81/range). Maintained in [2**31..2*64)
+  uint64_t lo    = 0;                              // scaled by 2**63
+  uint64_t range = uint64_t(1) << (63-RANGE_BITS); // scaled by 2**49.  Maintained in [2**17+1..2*49]
+  uint64_t invRange = uint64_t(1) << 32; // approximation of floor(2**81/range). Maintained in [2**32..2*64)
 
+  value >>= 1;
   // uint64_t mxProd = 0, mnProd = uint64_t(-1);
   for (int i = 0; ; ) {
     #if 0
@@ -329,43 +330,33 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
           useTmpbuf = true;
         }
       }
-      uint64_t hi = lo + range -1;
-      uint64_t dbits = lo ^ hi;
-      int octetsShifted = unsigned(__builtin_clzll(dbits))/8; // lo and hi have the same upper octets
-      if (octetsShifted != 0) {
-        lo    <<= octetsShifted*8;
-        value <<= octetsShifted*8;
-        uint64_t fiveOctets =
-          (uint64_t(src[4])       ) |
-          (uint64_t(src[3]) << 1*8) |
-          (uint64_t(src[2]) << 2*8) |
-          (uint64_t(src[1]) << 3*8) |
-          (uint64_t(src[0]) << 4*8);
-        value |= fiveOctets >> (40-octetsShifted*8);
-        src    += octetsShifted;
-        srclen -= octetsShifted;
-      }
-      if (__builtin_expect(octetsShifted < 2, 0)) {
-        do {
-          // squeeze out bits[56..49]
-          lo    = (lo    & MSB_MSK) | ((lo    << 8) & (~MSB_MSK));
-          value = (value & MSB_MSK) | ((value << 8) & (~MSB_MSK));
-          value |= *src++;
-          srclen--;
-          octetsShifted += 1;
-        } while (octetsShifted < 2);
-      }
-      nxtRange = range << (octetsShifted*8 - RANGE_BITS);
-      invRange >>= octetsShifted*8;
+
+      value = (value-lo) << 24;
+      lo = (lo & (uint64_t(-1) >> 25)) << 24;
+      value += lo;
+      uint32_t fourOctets =
+        (uint32_t(src[3])       ) |
+        (uint32_t(src[2]) << 1*8) |
+        (uint32_t(src[1]) << 2*8) |
+        (uint32_t(src[0]) << 3*8);
+      value += (fourOctets >> 1) & (uint32_t(-1) >> 8);
+      src    += 3;
+      srclen -= 3;
+      nxtRange = range << (24 - RANGE_BITS);
+      invRange >>= 24;
       if (srclen < -7)
         return i;
       if (value < lo || value - lo > ((nxtRange<<RANGE_BITS)-1)) {
         // printf(
-         // "%016llx < %016llx [<=  %016llx] || %016llx > %016llx\n"
-         // "%016llx %016llx %016llx %d\n"
-         // , lo, value, lo+((nxtRange<<RANGE_BITS)-1)
+         // "%d: %016llx <= %016llx || %016llx <= %016llx\n"
+         // "%d: %016llx <= %016llx || %016llx <= %016llx    %016llx\n"
+         // , i
+         // , lo, value
          // , value - lo, (nxtRange<<RANGE_BITS)-1
-         // , hi ^ dbits, hi, dbits, octetsShifted
+         // , i - 1
+         // , lo0, va0
+         // , va0 - lo0, range-1
+         // , ((va0 - lo0) << 24) + lo
          // );
         return -103; // should not happen
       }
