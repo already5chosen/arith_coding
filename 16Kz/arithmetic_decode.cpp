@@ -168,14 +168,14 @@ private:
 
   void prepare();
   int val2c(uint64_t value, uint64_t range, uint64_t invRange) {
-    uint32_t loEst31b = umulh(value,invRange);
-    unsigned ri = loEst31b>>(31-RANGE2C_NBITS);
+    uint64_t loEst33b = umulh(value,invRange);
+    unsigned ri = loEst33b>>(33-RANGE2C_NBITS);
     unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c] <= (val/32)*32
     if (c != m_range2c[ri+1]) {
       #ifdef ENABLE_PERF_COUNT
       ++m_extLookupCount;
       #endif
-      // unsigned loEst = loEst31b>>(31-RANGE_BITS);
+      // unsigned loEst = loEst33b>>(33-RANGE_BITS);
       // while (m_c2low[c+1] <= loEst) {
         // ++c;
       // }
@@ -233,7 +233,7 @@ void arithmetic_decode_model_t::prepare()
 
 int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen)
 {
-  const uint64_t MIN_RANGE = uint64_t(1) << (31-RANGE_BITS);
+  const uint64_t MIN_RANGE = uint64_t(1) << (33-RANGE_BITS);
 
   if (srclen < 2)
     return -11;
@@ -246,26 +246,26 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     useTmpbuf = true;
   }
 
-  uint64_t value = 0;
+  uint64_t value = 0; // scaled by 2**64
   for (int k = 0; k < 8; ++k)
     value = (value << 8) | src[k];
-  src    += 7;
-  srclen -= 7;
-  value >>= 1;                                     // scaled by 2**63
-  uint64_t range = uint64_t(1) << (63-RANGE_BITS); // scaled by 2**49.  Maintained in [2**17+1..2*49]
-  uint64_t invRange = uint64_t(1) << 32; // approximation of floor(2**81/range). Maintained in [2**32..2*64)
+  src    += 8;
+  srclen -= 8;
+  uint64_t range = uint64_t(1) << (64-RANGE_BITS); // scaled by 2**50.  Maintained in [2**19+1..2*50]
+  uint64_t invRange = uint64_t(1) << 33; // approximation of floor(2**83/range). Maintained in [2**33..2*64)
 
   // uint64_t mxProd = 0, mnProd = uint64_t(-1);
   for (int i = 0; ; ) {
     #if 0
     uint64_t prod = umulh(invRange, range);
     if (prod > mxProd || prod < mnProd) {
-      const int64_t PROD_ONE = int64_t(1) << 17;
+      const int64_t PROD_ONE = int64_t(1) << 19;
       if (prod > mxProd) mxProd=prod;
       if (prod < mnProd) mnProd=prod;
-      printf("%016llx*%016llx=%3lld [%3lld..%3lld]\n"
-        ,(unsigned long long)range, (unsigned long long)invRange,
-        (long long)(prod-PROD_ONE), (long long)(mnProd-PROD_ONE), (long long)(mxProd-PROD_ONE)
+      printf("%016llx*%016llx=%3lld [%3lld..%3lld] %d (%d)\n"
+        ,(unsigned long long)range, (unsigned long long)invRange
+        ,(long long)(prod-PROD_ONE), (long long)(mnProd-PROD_ONE), (long long)(mxProd-PROD_ONE)
+        ,i, i & 15
         );
     }
     #endif
@@ -287,7 +287,7 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     uint64_t cRa = m_c2low[c+1]-cLo;
     value -= range * cLo;
     range = range * cRa;
-    // at this point range is scaled by 2**63 - the same scale as value
+    // at this point range is scaled by 2**64 - the same scale as value
 
     if (value >= range) return -102; // should never happen
 
@@ -304,12 +304,11 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
         }
       }
 
-      uint32_t fourOctets =
-        (uint32_t(src[3])       ) |
-        (uint32_t(src[2]) << 1*8) |
-        (uint32_t(src[1]) << 2*8) |
-        (uint32_t(src[0]) << 3*8);
-      value = (value << 24) + ((fourOctets >> 1) & (uint32_t(-1) >> 8));
+      uint32_t threeOctets =
+        (uint32_t(src[2])       ) |
+        (uint32_t(src[1]) << 1*8) |
+        (uint32_t(src[0]) << 2*8);
+      value = (value << 24) + threeOctets;
       src    += 3;
       srclen -= 3;
       nxtRange = range << (24 - RANGE_BITS);
@@ -326,10 +325,10 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     invRange = umulh(invRange, uint64_t(m_c2invRange[c]) << (63-31)) << (RANGE_BITS+1);
 
     if ((i & 15)==0) {
-      // do one NR iteration to increase precision of invRange and assure that invRange*range <= 2**81
-      const uint64_t PROD_ONE = uint64_t(1) << 17;
-      uint64_t prod = umulh(invRange, range); // scaled to 2^17
-      invRange = umulh(invRange, (PROD_ONE*2-1-prod)<<46)<<1;
+      // do one NR iteration to increase precision of invRange and assure that invRange*range <= 2**83
+      const uint64_t PROD_ONE = uint64_t(1) << 19;
+      uint64_t prod = umulh(invRange, range); // scaled to 2^20
+      invRange = umulh(invRange, (PROD_ONE*2-1-prod)<<44)<<1;
     }
   }
   return dstlen;

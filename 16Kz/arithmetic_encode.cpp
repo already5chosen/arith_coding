@@ -246,11 +246,12 @@ static void inc_dst(uint8_t* dst) {
 
 static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint16_t c2low[257], int maxC)
 {
-  const uint64_t MSB_MSK   = uint64_t(255) << 55;
-  const uint64_t MIN_RANGE = uint64_t(1) << (31-RANGE_BITS);
-  uint64_t lo    = 0;                              // scaled by 2**63
-  uint64_t range = uint64_t(1) << (63-RANGE_BITS); // scaled by 2**49
+  const uint64_t MSB_MSK   = uint64_t(255) << 56;
+  const uint64_t MIN_RANGE = uint64_t(1) << (33-RANGE_BITS);
+  uint64_t lo    = 0;                              // scaled by 2**64
+  uint64_t range = uint64_t(1) << (64-RANGE_BITS); // scaled by 2**50
   uint8_t* dst0 = dst;
+  uint64_t prevLo = lo;
   for (unsigned i = 0; i < srclen; ++i) {
     int c = src[i];
     uint64_t cLo = c2low[c+0];
@@ -262,33 +263,32 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
     uint64_t nxtRange = range >> RANGE_BITS;
     if (nxtRange <= MIN_RANGE) {
       // re-normalize
-      if ((lo >> 63) != 0)
+      if (lo < prevLo) // lo overflow
         inc_dst(dst); //dst = inc_dst(dst0, dst);
-      dst[0] = lo >> (63-8*1);
-      dst[1] = lo >> (63-8*2);
-      dst[2] = lo >> (63-8*3);
+      dst[0] = lo >> (64-8*1);
+      dst[1] = lo >> (64-8*2);
+      dst[2] = lo >> (64-8*3);
       dst += 3;
-      lo = (lo & (uint64_t(-1) >> 25)) << 24;
+      lo <<= 24;
       nxtRange = range << (24-RANGE_BITS);
+      prevLo = lo;
     }
     range = nxtRange;
   }
   // output last bits
-  if ((lo >> 63) != 0) {
+  if (lo < prevLo) // lo overflow
     inc_dst(dst); //dst = inc_dst(dst0, dst);
-    lo &= uint64_t(-1) >> 1;
-  }
   uint64_t hi = lo + ((range<<RANGE_BITS)-1);
-  if ((hi >> 63) == 0) {
+  if (hi > lo) {
     uint64_t dbits = lo ^ hi;
     while ((dbits & MSB_MSK)==0) {
       // lo and hi have the same upper octet
-      *dst++ = uint8_t(hi>>55);
+      *dst++ = uint8_t(hi>>56);
       hi    <<= 8;
       dbits <<= 8;
     }
     // put out last octet
-    *dst++ = uint8_t(hi>>55);
+    *dst++ = uint8_t(hi>>56);
   } else {
     inc_dst(dst); //dst = inc_dst(dst0, dst);
   }
