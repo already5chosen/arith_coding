@@ -233,7 +233,6 @@ void arithmetic_decode_model_t::prepare()
 
 int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen)
 {
-  // const uint64_t MSB_MSK   = uint64_t(255) << 55;
   const uint64_t MIN_RANGE = uint64_t(1) << (31-RANGE_BITS);
 
   if (srclen < 2)
@@ -252,12 +251,10 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     value = (value << 8) | src[k];
   src    += 7;
   srclen -= 7;
-
-  uint64_t lo    = 0;                              // scaled by 2**63
+  value >>= 1;                                     // scaled by 2**63
   uint64_t range = uint64_t(1) << (63-RANGE_BITS); // scaled by 2**49.  Maintained in [2**17+1..2*49]
   uint64_t invRange = uint64_t(1) << 32; // approximation of floor(2**81/range). Maintained in [2**32..2*64)
 
-  value >>= 1;
   // uint64_t mxProd = 0, mnProd = uint64_t(-1);
   for (int i = 0; ; ) {
     #if 0
@@ -272,36 +269,14 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
         );
     }
     #endif
-    // uint32_t loEst31b = umulh(value-lo,invRange);
-    // unsigned ri = loEst31b>>(31-RANGE2C_NBITS);
-    // printf("was here A0. %016llx %016llx %016llx %llu=>%d,%d,%d %.12f %08llx\n"
-      // , value - lo, range, invRange
-      // , ri
-      // , ri > 0 ? m_range2c[ri-1]:m_range2c[ri],  m_range2c[ri], m_range2c[ri+1]
-      // , (value-lo)*(double(1u<<RANGE2C_NBITS)/(1u<<RANGE_BITS))/range
-      // , umulh(invRange, range)
-      // );
-    // fflush(stdout);
 
-    uint64_t dValue = value - lo;
-    if (dValue > (range << RANGE_BITS)-1) return -12;
+    if (value > (range << RANGE_BITS)-1) return -12;
     // That is an input error, rather than internal error of decoder.
     // Due to way that encoder works, not any bit stream is possible as its output
     // That's the case of illegal code stream.
     // The case is extremely unlikely, but not impossible.
 
-    unsigned c = val2c(dValue, range, invRange);
-    // printf("was here A1 %u => [%04x..%04x]=%04x\n", c, m_c2low[c+0], m_c2low[c+1], m_c2low[c+1]-m_c2low[c+0]);
-    // fflush(stdout);
-    // if (i % 1000 < 10 || i > dstlen - 20000) {
-      // printf(": %6d [%012llx %012llx] %012llx %012llx. %08x c=%3d '%c' [%04x..%04x) => [%012llx %012llx]\n"
-       // , i, lo, hi, value, range
-       // , unsigned(round(double(value - lo)*0x100000000/range))
-       // , c, isprint(c) ? c : '.', m_c2low[c+0], m_c2low[c+1]
-       // , lo + ((range * m_c2low[c+0])>>15)
-       // , lo + ((range * m_c2low[c+1])>>15) - 1);
-      // fflush(stdout);
-    // }
+    unsigned c = val2c(value, range, invRange);
     dst[i] = c;
     ++i;
     if (i == dstlen)
@@ -310,13 +285,11 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     // keep decoder in sync with encoder
     uint64_t cLo = m_c2low[c+0];
     uint64_t cRa = m_c2low[c+1]-cLo;
-    lo   += range * cLo;
+    value -= range * cLo;
     range = range * cRa;
-    // at this point range is scaled by 2**64 - the same scale as lo
+    // at this point range is scaled by 2**63 - the same scale as value
 
-    if (value-lo >= range) return -102; // should never happen
-
-    // printf("was here A2. %016llx %016llx %016llx\n",  lo, value, hi); fflush(stdout);
+    if (value >= range) return -102; // should never happen
 
     uint64_t nxtRange = range >> RANGE_BITS;
     if (nxtRange <= MIN_RANGE) {
@@ -331,33 +304,19 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
         }
       }
 
-      value = (value-lo) << 24;
-      lo = (lo & (uint64_t(-1) >> 25)) << 24;
-      value += lo;
       uint32_t fourOctets =
         (uint32_t(src[3])       ) |
         (uint32_t(src[2]) << 1*8) |
         (uint32_t(src[1]) << 2*8) |
         (uint32_t(src[0]) << 3*8);
-      value += (fourOctets >> 1) & (uint32_t(-1) >> 8);
+      value = (value << 24) + ((fourOctets >> 1) & (uint32_t(-1) >> 8));
       src    += 3;
       srclen -= 3;
       nxtRange = range << (24 - RANGE_BITS);
       invRange >>= 24;
       if (srclen < -7)
         return i;
-      if (value < lo || value - lo > ((nxtRange<<RANGE_BITS)-1)) {
-        // printf(
-         // "%d: %016llx <= %016llx || %016llx <= %016llx\n"
-         // "%d: %016llx <= %016llx || %016llx <= %016llx    %016llx\n"
-         // , i
-         // , lo, value
-         // , value - lo, (nxtRange<<RANGE_BITS)-1
-         // , i - 1
-         // , lo0, va0
-         // , va0 - lo0, range-1
-         // , ((va0 - lo0) << 24) + lo
-         // );
+      if (value > ((nxtRange<<RANGE_BITS)-1)) {
         return -103; // should not happen
       }
     }
@@ -368,28 +327,9 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
 
     if ((i & 15)==0) {
       // do one NR iteration to increase precision of invRange and assure that invRange*range <= 2**81
-      // const uint64_t PROD_THR = uint64_t(1) << 18;
       const uint64_t PROD_ONE = uint64_t(1) << 17;
-      uint64_t prod;
-      // do {
-        prod = umulh(invRange, range); // scaled to 2^17
-        invRange = umulh(invRange, (PROD_ONE*2-1-prod)<<46)<<1;
-        #if 0
-        uint64_t prodx = umulh(invRange, range);
-        uint64_t invRangeRef = (__int128(1)<<81)/range;
-        int64_t prodRef = umulh(invRangeRef, range);
-        printf("%7d : %016llx : %016llx %016llx : %9.1e %9.1e %9.1e %u:%08x\n"
-          ,i ,range, invRangeRef, invRange
-          , double(int64_t(prodRef-PROD_ONE))
-          , double(int64_t(prod-PROD_ONE))
-          , double(int64_t(prodx-PROD_ONE))
-          , c, m_c2invRange[c]
-          );
-        fflush(stdout);
-        if (invRange==0) return -104; // should not happen
-        #endif
-        // if original had less than 12 bits of precision do another NR step
-      // } while (prod - PROD_ONE + PROD_THR > PROD_THR*2);
+      uint64_t prod = umulh(invRange, range); // scaled to 2^17
+      invRange = umulh(invRange, (PROD_ONE*2-1-prod)<<46)<<1;
     }
   }
   return dstlen;
