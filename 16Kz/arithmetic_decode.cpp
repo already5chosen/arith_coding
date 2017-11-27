@@ -167,26 +167,31 @@ private:
   unsigned m_maxC;
 
   void prepare();
-  int val2c(uint64_t value, uint64_t range, uint64_t invRange) {
+  int val2c_estimate(uint64_t value, uint64_t invRange) {
     uint64_t loEst33b = umulh(value,invRange);
     unsigned ri = loEst33b>>(33-RANGE2C_NBITS);
-    unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c] <= (val/32)*32
-    if (c != m_range2c[ri+1]) {
+    unsigned lo = loEst33b>>(33-RANGE_BITS);
+    unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c] <= (lo/32)*32
+    if (m_c2low[c+1] <= lo) {
+      do {
+        #ifdef ENABLE_PERF_COUNT
+        ++m_extLookupCount;
+        #endif
+        ++c;
+      } while (m_c2low[c+1] <= lo);
+    }
+    return c;
+    #if 0
+    int ret;
+    do {
       #ifdef ENABLE_PERF_COUNT
       ++m_extLookupCount;
       #endif
-      // unsigned loEst = loEst33b>>(33-RANGE_BITS);
-      // while (m_c2low[c+1] <= loEst) {
-        // ++c;
-      // }
-      while (m_c2low[c+1]*range-1 < value) {
-        #ifdef ENABLE_PERF_COUNT
-        ++m_longLookupCount;
-        #endif
-        ++c;
-      }
-    }
-    return c;
+      ret = c;
+      ++c;
+    } while (m_c2low[c] <= lo);
+    return ret;
+    #endif
   }
 };
 
@@ -276,22 +281,29 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     // That's the case of illegal code stream.
     // The case is extremely unlikely, but not impossible.
 
-    unsigned c = val2c(value, range, invRange);
+    unsigned c, cEst = val2c_estimate(value, invRange); // can be off by -1, much less likely by -2
+    uint64_t nxtValue, nxtRange;
+    do {
+      #ifdef ENABLE_PERF_COUNT
+      ++m_longLookupCount;
+      #endif
+      // keep decoder in sync with encoder
+      uint64_t cLo = m_c2low[cEst+0];
+      uint64_t cRa = m_c2low[cEst+1]-cLo;
+      c = cEst;
+      ++cEst;
+      nxtValue = value - range * cLo;
+      nxtRange = range * cRa;
+      // at this point range is scaled by 2**64 - the same scale as value
+    } while (nxtValue >= nxtRange);
+    value = nxtValue;
+    range = nxtRange;
     dst[i] = c;
     ++i;
     if (i == dstlen)
       break; // success
 
-    // keep decoder in sync with encoder
-    uint64_t cLo = m_c2low[c+0];
-    uint64_t cRa = m_c2low[c+1]-cLo;
-    value -= range * cLo;
-    range = range * cRa;
-    // at this point range is scaled by 2**64 - the same scale as value
-
-    if (value >= range) return -102; // should never happen
-
-    uint64_t nxtRange = range >> RANGE_BITS;
+    nxtRange = range >> RANGE_BITS;
     if (nxtRange <= MIN_RANGE) {
       #ifdef ENABLE_PERF_COUNT
       ++m_renormalizationCount;
@@ -347,7 +359,7 @@ int arithmetic_decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen, 
     #ifdef ENABLE_PERF_COUNT
     if (pInfo) {
       pInfo[2] = model.m_extLookupCount;
-      pInfo[3] = model.m_longLookupCount;
+      pInfo[3] = model.m_longLookupCount - dstlen;
       pInfo[4] = model.m_renormalizationCount;
     }
     #endif
