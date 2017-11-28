@@ -172,7 +172,7 @@ private:
     unsigned ri = loEst33b>>(33-RANGE2C_NBITS);
     unsigned lo = loEst33b>>(33-RANGE_BITS);
     unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c] <= (lo/32)*32
-    if (m_c2low[c+1] <= lo) {
+    if (__builtin_expect(m_c2low[c+1] <= lo, 0)) {
       do {
         #ifdef ENABLE_PERF_COUNT
         ++m_extLookupCount;
@@ -281,22 +281,23 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     // That's the case of illegal code stream.
     // The case is extremely unlikely, but not impossible.
 
-    unsigned c, cEst = val2c_estimate(value, invRange); // can be off by -1, much less likely by -2
-    uint64_t nxtValue, nxtRange;
-    do {
+    unsigned c = val2c_estimate(value, invRange); // can be off by -1, much less likely by -2
+    // keep decoder in sync with encoder
+    uint64_t cLo = m_c2low[c+0];
+    uint64_t cHi = m_c2low[c+1];
+    value -= range * cLo;
+    uint64_t nxtRange = range * (cHi-cLo);
+    // at this point range is scaled by 2**64 - the same scale as value
+    while (__builtin_expect(value >= nxtRange, 0)) {
       #ifdef ENABLE_PERF_COUNT
       ++m_longLookupCount;
       #endif
-      // keep decoder in sync with encoder
-      uint64_t cLo = m_c2low[cEst+0];
-      uint64_t cRa = m_c2low[cEst+1]-cLo;
-      c = cEst;
-      ++cEst;
-      nxtValue = value - range * cLo;
-      nxtRange = range * cRa;
-      // at this point range is scaled by 2**64 - the same scale as value
-    } while (nxtValue >= nxtRange);
-    value = nxtValue;
+      value -= nxtRange;
+      cLo = cHi;
+      cHi = m_c2low[c+2];
+      nxtRange = range * (cHi-cLo);
+      ++c;
+    }
     range = nxtRange;
     dst[i] = c;
     ++i;
@@ -359,7 +360,7 @@ int arithmetic_decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen, 
     #ifdef ENABLE_PERF_COUNT
     if (pInfo) {
       pInfo[2] = model.m_extLookupCount;
-      pInfo[3] = model.m_longLookupCount - dstlen;
+      pInfo[3] = model.m_longLookupCount;
       pInfo[4] = model.m_renormalizationCount;
     }
     #endif
