@@ -1,3 +1,4 @@
+// #include <immintrin.h>
 // #include <cstdio>
 #include <cfenv>
 #include <cstring>
@@ -5,6 +6,8 @@
 
 #include "arithmetic_encode.h"
 
+#define _LIKELY(cond)   __builtin_expect((cond), 1)
+#define _UNLIKELY(cond) __builtin_expect((cond), 0)
 
 static const int      RANGE_BITS = 14;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
@@ -276,11 +279,11 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const c2low
   const double MIN_RANGE      = 1.0 /(uint64_t(1) << 49); // 2**(-49)
   const double LO_INCR_OFFSET = MIN_RANGE;                // 2**(-49)
   const double MAX_LO_L       = MIN_RANGE*0.5;            // 2**(-50)
-  const double X_OFFSET       = double(1<<(52-8*5));      // 2**(12)
-  double lo_h  = 0.0;   // upper part of accumulator
+  double lo_h  = 1.0;   // upper part of accumulator + offset
   double lo_l  = 0.0;   // lower part of accumulator
   double range = 1.0;
   uint8_t* dst0 = dst;
+  int64_t prevDstW = -1;
   for (unsigned i = 0; i < srclen; ++i) {
     if (lo_l >= MAX_LO_L) {
       double nxtLo = lo_h + lo_l; lo_l -= nxtLo - lo_h; lo_h = nxtLo;
@@ -294,6 +297,10 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const c2low
     // After reduction loIncr still contains no less than 39 significant bits, so efficiency of compression does not suffer.
     loIncr += LO_INCR_OFFSET; loIncr -= LO_INCR_OFFSET;
 
+    // fesetround(FE_TONEAREST);
+    // printf("[%d]=%3d: lo_h %.20e lo_l %.20e range %.20e. Incr %.20e\n", i, c, lo_h, lo_l, range, loIncr);
+    // fesetround(FE_TOWARDZERO);
+
     // dual-double style addition
     double nxtLo = lo_h + loIncr;
     loIncr -= (nxtLo-lo_h);
@@ -304,31 +311,44 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const c2low
     if (range <= MIN_RANGE) {
       // re-normalize
       {double nxtLo = lo_h + lo_l; lo_l -= nxtLo - lo_h; lo_h = nxtLo;}
-      if (lo_h >= 1.0) {
-        inc_dst(dst);
-        lo_h -= 1.0;
-        {double nxtLo = lo_h + lo_l; lo_l -= nxtLo - lo_h; lo_h = nxtLo;}
-      }
-      // output 5 MS octets
-      double lo_x = lo_h + X_OFFSET;
-      uint64_t uLo; memcpy(&uLo, &lo_x, sizeof(uint64_t));
-      // store 6 octets
-      dst[4] = uLo >> (0*8);
-      dst[3] = uLo >> (1*8);
-      dst[2] = uLo >> (2*8);
-      dst[1] = uLo >> (3*8);
-      dst[0] = uLo >> (4*8);
-      dst += 5;
-      lo_x -= X_OFFSET;
-      lo_h -= lo_x;
+      lo_h  *= double(uint64_t(1) << 48);
+      int64_t dstW = lo_h;
+      lo_h -= dstW-1;
+      lo_l  *= double(uint64_t(1) << 48);
+      range *= double(uint64_t(1) << 48);
       {double nxtLo = lo_h + lo_l; lo_l -= nxtLo - lo_h; lo_h = nxtLo;}
-      range *= double(uint64_t(1) << 40);
-      lo_h  *= double(uint64_t(1) << 40);
-      lo_l  *= double(uint64_t(1) << 40);
+      dstW -= (int64_t(1)<<48);
+      if (_LIKELY(prevDstW >= 0)) {
+        prevDstW += (dstW >> 48);
+        if (_UNLIKELY(prevDstW >= (int64_t(1)<<48)))
+          inc_dst(dst); // very unlikely
+        dstW &= uint64_t(-1) >> (64-48);
+        // store 6 octets
+        dst[5] = prevDstW >> (0*8);
+        dst[4] = prevDstW >> (1*8);
+        dst[3] = prevDstW >> (2*8);
+        dst[2] = prevDstW >> (3*8);
+        dst[1] = prevDstW >> (4*8);
+        dst[0] = prevDstW >> (5*8);
+        dst += 6;
+      }
+      prevDstW = dstW;
     }
   }
 
+  if (prevDstW >= 0) {
+    // store 6 octets
+    dst[5] = prevDstW >> (0*8);
+    dst[4] = prevDstW >> (1*8);
+    dst[3] = prevDstW >> (2*8);
+    dst[2] = prevDstW >> (3*8);
+    dst[1] = prevDstW >> (4*8);
+    dst[0] = prevDstW >> (5*8);
+    dst += 6;
+  }
+
   // output last bits
+  lo_h -= 1.0;
   {double nxtLo = lo_h + lo_l; lo_l -= nxtLo - lo_h; lo_h = nxtLo;}
   if (lo_h >= 1.0) {
     inc_dst(dst);

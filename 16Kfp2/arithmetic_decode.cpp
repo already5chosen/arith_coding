@@ -1,7 +1,8 @@
+// #include <immintrin.h>
+// #include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <cfenv>
-// #include <cstdio>
 #include <cmath>
 // #include <cctype>
 
@@ -173,13 +174,11 @@ private:
   void prepare(uint16_t c2range[256]);
   int val2c(double valRatio) {
     float lo = valRatio+VAL_RATIO_ADJ;
-    // uint32_t loEst31b = umulh(value,invRange);
-    // unsigned ri = loEst31b>>(31-RANGE2C_NBITS);
-    // unsigned ri = int(float(value-lo)*invRange*512.0f);
-    float f_rat = lo + 1.0f;
-    uint32_t u_rat;
-    memcpy(&u_rat, &f_rat, sizeof(u_rat));
-    unsigned ri = (u_rat >> (23-RANGE2C_NBITS)) & (RANGE2C_SZ-1);
+    // double d_rat = valRatio + (1.0+VAL_RATIO_ADJ);
+    // uint64_t u_rat;
+    // memcpy(&u_rat, &d_rat, sizeof(u_rat));
+    // unsigned ri = (u_rat >> (52-RANGE2C_NBITS)) & (RANGE2C_SZ-1);
+    unsigned ri = int(valRatio * RANGE2C_SZ);
     unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c] <= (val/32)*32
     if (m_c2low[c+1] <= lo) {
       do {
@@ -254,12 +253,10 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
 {
   const double MIN_RANGE      = 1.0 /(uint64_t(1) << 49); // 2**(-49)
   const double LO_INCR_OFFSET = MIN_RANGE;                // 2**(-49)
-  const double TWO_POWn48 = 1.0/(int64_t(1) << 48);
+  const double TWO_POW48 = int64_t(1) << 48;
+  const double TWO_POWn48 = 1.0/TWO_POW48;
   const double TWO_POWn56 = 1.0/(int64_t(1) << 56);
-  // const double TWO_POWn96  = TWO_POWn48*TWO_POWn48;
   const double TWO_POWn104 = TWO_POWn48*TWO_POWn56;
-  const double TWO_POW40  = int64_t(1) << 40;
-  const double TWO_POWn40 = 1.0/TWO_POW40;
 
   if (srclen < 2)
     return -11;
@@ -303,9 +300,10 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
 
     unsigned c = val2c(val_h*invRange);
     dst[i] = c;
-    ++i;
-    if (i == dstlen)
-      break; // success
+
+    // fesetround(FE_TONEAREST);
+    // printf("[%d]=%3d: val_h %.20e val_l %.20e range %.20e\n", i, dst[i], val_h, val_l, range);
+    // fesetround(FE_TOWARDZERO);
 
     // keep decoder in sync with encoder
     float cLo = m_c2low[c+0];
@@ -322,15 +320,19 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     val_h = nxtVal;
     range *= cRa;
 
-    // update invRange
-    invRange *= m_c2invRange[c];
-
     // if (val_h < 0 || val_h >= range) {
       // fesetround(FE_TONEAREST);
-      // printf("[%d]=%3d: val_h %.20e val_l %.20e range %.20e\n", i-1, dst[i-1], val_h, val_l, range);
+      // printf("[%d]=%3d: val_h %.20e val_l %.20e range %.20e\n", i, dst[i], val_h, val_l, range);
       // fesetround(FE_TOWARDZERO);
     // }
     if (val_h < 0 || val_h >= range) return -102; // should never happen
+
+    ++i;
+    if (i == dstlen)
+      break; // success
+
+    // update invRange
+    invRange *= m_c2invRange[c];
 
     // printf("was here A2. %016llx %016llx %016llx\n",  lo, value, hi); fflush(stdout);
     if (range <= MIN_RANGE) {
@@ -338,34 +340,35 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
       #ifdef ENABLE_PERF_COUNT
       ++m_renormalizationCount;
       #endif
-      if (srclen < 5) {
+      if (srclen < 6) {
         if (!useTmpbuf) {
           if (srclen > 0)
             memcpy(tmpbuf, src, srclen);
           src = tmpbuf;
           useTmpbuf = true;
         } else {
-          if (src > &tmpbuf[32-5])
+          if (src > &tmpbuf[32-6])
             return i;
         }
       }
-      int64_t fiveOctets =
-        (int64_t(src[4])       ) |
-        (int64_t(src[3]) << 1*8) |
-        (int64_t(src[2]) << 2*8) |
-        (int64_t(src[1]) << 3*8) |
-        (int64_t(src[0]) << 4*8);
-      src    += 5;
-      srclen -= 5;
-      double valDecr = (((int64_t(1)<<40)-1)-fiveOctets)*TWO_POWn104;
+      int64_t sixOctets =
+        (int64_t(src[5])       ) |
+        (int64_t(src[4]) << 1*8) |
+        (int64_t(src[3]) << 2*8) |
+        (int64_t(src[2]) << 3*8) |
+        (int64_t(src[1]) << 4*8) |
+        (int64_t(src[0]) << 5*8);
+      src    += 6;
+      srclen -= 6;
+      double valDecr = (((int64_t(1)<<48)-1)-sixOctets)*TWO_POWn104;
       { double nxtVal = val_h + val_l; val_l -= nxtVal - val_h; val_h = nxtVal; }
-      val_h *= TWO_POW40;
-      val_l *= TWO_POW40;
+      val_h *= TWO_POW48;
+      val_l *= TWO_POW48;
       // dual-double style addition
       {double nxtVal = val_h - valDecr; valDecr -= val_h - nxtVal; val_h = nxtVal;}
       val_l -= valDecr;
-      invRange *= TWO_POWn40;
-      range    *= TWO_POW40;
+      invRange *= TWO_POWn48;
+      range    *= TWO_POW48;
       if (val_h < 0 || val_h >= range) {
         // fesetround(FE_TONEAREST);
         // // printf("[%d]=%3d: val_h %.20e val_l %.20e range %.20e. %02x.%02x.%02x.%02x.%02x.%02x.%02x.%02x\n", i-1, dst[i-1], val_h, val_l, range, src[0], src[1], src[2], src[3], src[4], src[5], src[6], src[7]);
