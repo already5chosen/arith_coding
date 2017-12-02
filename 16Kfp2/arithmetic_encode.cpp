@@ -1,5 +1,5 @@
 // #include <immintrin.h>
-// #include <cstdio>
+#include <cstdio>
 #include <cfenv>
 #include <cstring>
 #include <cmath>
@@ -12,7 +12,7 @@
 static const int      RANGE_BITS = 14;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 static const float    INV_VAL_RANGE = 1.0f / VAL_RANGE;
-static const float    LAST_VAL = nexttowardf(1.0f, 0);
+static const double   RANGE_LEAKAGE_FACTOR = 1.0 - 1.0/(int64_t(1)<<29);
 
 typedef union {
   uint32_t u;
@@ -115,7 +115,7 @@ static void prepare2(c2low_t c2low[257], unsigned maxC)
     c2low[c].f = lo*INV_VAL_RANGE;
     lo += range;
   }
-  c2low[maxC+1].f = LAST_VAL;
+  c2low[maxC+1].f = 1.0f;
 }
 
 static int inline floor_log4(unsigned x) {
@@ -289,6 +289,7 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const c2low
       double nxtLo = lo_h + lo_l; lo_l -= nxtLo - lo_h; lo_h = nxtLo;
     }
 
+    range *= RANGE_LEAKAGE_FACTOR;
     int c = src[i];
     float cLo = c2low[c+0].f;
     float cRa = c2low[c+1].f - cLo;
@@ -297,9 +298,11 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const c2low
     // After reduction loIncr still contains no less than 39 significant bits, so efficiency of compression does not suffer.
     loIncr += LO_INCR_OFFSET; loIncr -= LO_INCR_OFFSET;
 
-    // fesetround(FE_TONEAREST);
-    // printf("[%d]=%3d: lo_h %.20e lo_l %.20e range %.20e. Incr %.20e\n", i, c, lo_h, lo_l, range, loIncr);
-    // fesetround(FE_TOWARDZERO);
+    // if (i < 8420) {
+      // fesetround(FE_TONEAREST);
+      // printf("[%d]=%3d: lo_h %.20e lo_l %.20e range %.20e. Incr %.20e\n", i, c, lo_h, lo_l, range, loIncr);
+      // fesetround(FE_TOWARDZERO);
+    // }
 
     // dual-double style addition
     double nxtLo = lo_h + loIncr;
