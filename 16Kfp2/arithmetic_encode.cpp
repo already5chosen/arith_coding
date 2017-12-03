@@ -1,5 +1,5 @@
 // #include <immintrin.h>
-#include <cstdio>
+// #include <cstdio>
 #include <cfenv>
 #include <cstring>
 #include <cmath>
@@ -11,18 +11,12 @@
 
 static const int      RANGE_BITS = 14;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
-static const float    INV_VAL_RANGE = 1.0f / VAL_RANGE;
 static const double   RANGE_LEAKAGE_FACTOR = 1.0 - 1.0/(int64_t(1)<<29);
-
-typedef union {
-  uint32_t u;
-  float    f;
-} c2low_t;
 
 // return value:
 // -1  - source consists of repetition of the same character
 // >=0 - maxC = the character with the biggest numeric value that appears in the source at least once
-static int prepare1(const uint8_t* src, unsigned srclen, c2low_t c2low[257], double* pQuantizedEntropy, double* pInfo)
+static int prepare1(const uint8_t* src, unsigned srclen, uint16_t c2low[257], double* pQuantizedEntropy, double* pInfo)
 {
   // calculated statistics of appearance
   unsigned stat[256]={0};
@@ -73,7 +67,7 @@ static int prepare1(const uint8_t* src, unsigned srclen, c2low_t c2low[257], dou
         remCnt   -= cnt;
         remRange -= range;
       }
-      c2low[c].u = range;
+      c2low[c] = range;
     }
   }
   // 2nd pass - translate characters with higher counts
@@ -87,7 +81,7 @@ static int prepare1(const uint8_t* src, unsigned srclen, c2low_t c2low[257], dou
       // (range < VAL_RANGE) is guaranteed , because we already handled the case of repetition of the same character
       remCnt   -= cnt;
       remRange -= range;
-      c2low[c].u = range;
+      c2low[c] = range;
     }
   }
 
@@ -96,7 +90,7 @@ static int prepare1(const uint8_t* src, unsigned srclen, c2low_t c2low[257], dou
   for (unsigned c = 0; c <= maxC; ++c) {
     unsigned cnt = stat[c];
     if (cnt)
-      entropy += log2(double(VAL_RANGE)/c2low[c].u)*cnt;
+      entropy += log2(double(VAL_RANGE)/c2low[c])*cnt;
   }
   *pQuantizedEntropy = entropy;
   if (pInfo)
@@ -105,17 +99,17 @@ static int prepare1(const uint8_t* src, unsigned srclen, c2low_t c2low[257], dou
   return maxC;
 }
 
-static void prepare2(c2low_t c2low[257], unsigned maxC)
+static void prepare2(uint16_t c2low[257], unsigned maxC)
 {
   // c2low -> cumulative sums of ranges
   unsigned lo = 0;
   for (unsigned c = 0; c <= maxC; ++c) {
-    unsigned range = c2low[c].u;
+    unsigned range = c2low[c];
     // printf("%3u: %04x\n", c, range);
-    c2low[c].f = lo*INV_VAL_RANGE;
+    c2low[c] = lo;
     lo += range;
   }
-  c2low[maxC+1].f = 1.0f;
+  c2low[maxC+1] = VAL_RANGE;
 }
 
 static int inline floor_log4(unsigned x) {
@@ -123,14 +117,14 @@ static int inline floor_log4(unsigned x) {
 }
 
 // return the number of stored octets
-static int store_model(uint8_t* dst, const c2low_t c2low[256], unsigned maxC, double* pInfo)
+static int store_model(uint8_t* dst, const uint16_t c2low[256], unsigned maxC, double* pInfo)
 {
   uint16_t c2range[256];
   // copy and count non-zero ranges
   int nRanges = 0;
   unsigned hist[8] = {0};
   for (unsigned c = 0; c < maxC; ++c) {
-    uint32_t range = c2low[c].u;
+    uint32_t range = c2low[c];
     c2range[c] = range;
     if (range > 0) {
       ++nRanges;
@@ -274,7 +268,7 @@ int storeLastOctets(uint8_t* dst, double lo, double hi) {
   return ret + 1;
 }
 
-static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const c2low_t c2low[257], int maxC)
+static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint16_t c2low[257], int maxC)
 {
   const double MIN_RANGE      = 1.0 /(uint64_t(1) << 49); // 2**(-49)
   const double LO_INCR_OFFSET = MIN_RANGE;                // 2**(-49)
@@ -289,20 +283,18 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const c2low
       double nxtLo = lo_h + lo_l; lo_l -= nxtLo - lo_h; lo_h = nxtLo;
     }
 
-    range *= RANGE_LEAKAGE_FACTOR;
+    range *= (RANGE_LEAKAGE_FACTOR/VAL_RANGE);
     int c = src[i];
-    float cLo = c2low[c+0].f;
-    float cRa = c2low[c+1].f - cLo;
+    int64_t cLo = c2low[c+0];
+    int64_t cRa = c2low[c+1] - cLo;
     double loIncr = range * cLo;
     // Reduce precision of loIncr in controlled manner, in order to prevent uncontrolled leakage of LS bits
     // After reduction loIncr still contains no less than 39 significant bits, so efficiency of compression does not suffer.
     loIncr += LO_INCR_OFFSET; loIncr -= LO_INCR_OFFSET;
 
-    // if (i < 8420) {
-      // fesetround(FE_TONEAREST);
-      // printf("[%d]=%3d: lo_h %.20e lo_l %.20e range %.20e. Incr %.20e\n", i, c, lo_h, lo_l, range, loIncr);
-      // fesetround(FE_TOWARDZERO);
-    // }
+    // fesetround(FE_TONEAREST);
+    // printf("[%d]=%3d: lo_h %.20e lo_l %.20e range %.20e. Incr %.20e\n", i, c, lo_h, lo_l, range, loIncr);
+    // fesetround(FE_TOWARDZERO);
 
     // dual-double style addition
     double nxtLo = lo_h + loIncr;
@@ -385,7 +377,7 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const c2low
 // >0 - the length of compressed buffer
 int arithmetic_encode(std::vector<uint8_t>* dst, const uint8_t* src, int srclen, double* pInfo)
 {
-  c2low_t c2low[257];
+  uint16_t c2low[257];
   double quantizedEntropy;
   int maxC = prepare1(src, srclen, c2low, &quantizedEntropy, pInfo);
 

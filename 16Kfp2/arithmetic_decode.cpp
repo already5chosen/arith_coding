@@ -1,5 +1,5 @@
 // #include <immintrin.h>
-#include <cstdio>
+// #include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <cfenv>
@@ -11,7 +11,6 @@
 
 static const int RANGE_BITS = 14;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
-static const float INV_VAL_RANGE  = 1.0f / VAL_RANGE;
 static const double RANGE_LEAKAGE_FACTOR = 1.0 - 1.0/(int64_t(1)<<29);
 static const double VAL_RATIO_ADJ = 1.0+(1.0-RANGE_LEAKAGE_FACTOR)/VAL_RANGE*0.5;
 
@@ -159,7 +158,7 @@ struct arithmetic_decode_model_t {
   int m_longLookupCount;
   int m_renormalizationCount;
   #endif
-  float m_c2low[257];
+  uint16_t m_c2low[257];
   double m_c2invRange[256]; // 1/range
 
   int  load_and_prepare(const uint8_t* src, int srclen, int* pInfo);
@@ -172,12 +171,8 @@ private:
 
   void prepare(uint16_t c2range[256]);
   int val2c(double valRatio) {
-    float lo = valRatio;
-    // double d_rat = valRatio + (1.0+VAL_RATIO_ADJ);
-    // uint64_t u_rat;
-    // memcpy(&u_rat, &d_rat, sizeof(u_rat));
-    // unsigned ri = (u_rat >> (52-RANGE2C_NBITS)) & (RANGE2C_SZ-1);
-    unsigned ri = int(valRatio * RANGE2C_SZ);
+    int lo = valRatio;
+    unsigned ri = lo >> (RANGE_BITS-RANGE2C_NBITS);
     unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c] <= (val/32)*32
     if (m_c2low[c+1] <= lo) {
       do {
@@ -215,7 +210,7 @@ void arithmetic_decode_model_t::prepare(uint16_t c2range[256])
   for (int c = 0; c < 256; ++c) {
     unsigned range = c2range[c];
     // printf("%3u: %04x %04x\n", c, range, lo);
-    m_c2low[c] = lo*INV_VAL_RANGE;
+    m_c2low[c] = lo;
     if (range != 0) {
       m_c2invRange[c] = double(VAL_RANGE/RANGE_LEAKAGE_FACTOR)/range;
       // build inverse index m_range2c
@@ -227,7 +222,7 @@ void arithmetic_decode_model_t::prepare(uint16_t c2range[256])
     }
   }
   for (unsigned c = maxC + 1; c < 257; ++c)
-    m_c2low[c] = 1.0f;
+    m_c2low[c] = VAL_RANGE;
   for (; invI < RANGE2C_SZ+2; ++invI) {
     m_range2c[invI] = maxC;
   }
@@ -279,12 +274,12 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
   src    += 13;
   srclen -= 13;
   double range    = 1.0;
-  double invRange = (VAL_RATIO_ADJ/RANGE_LEAKAGE_FACTOR);
+  double invRange = (VAL_RANGE*VAL_RATIO_ADJ/RANGE_LEAKAGE_FACTOR);
   for (int i = 0; ; ) {
 
     if ((i & 63)==0) {
       // invRange = 1.0/range;
-      invRange *= 2.0-range*invRange*(RANGE_LEAKAGE_FACTOR/VAL_RATIO_ADJ);
+      invRange *= 2.0-range*invRange*(RANGE_LEAKAGE_FACTOR/VAL_RATIO_ADJ/VAL_RANGE);
     }
 
     //if (val_l >= MAX_VAL_L)
@@ -310,9 +305,9 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     // fesetround(FE_TOWARDZERO);
 
     // keep decoder in sync with encoder
-    range *= RANGE_LEAKAGE_FACTOR;
-    float cLo = m_c2low[c+0];
-    float cRa = m_c2low[c+1] - cLo;
+    range *= (RANGE_LEAKAGE_FACTOR/VAL_RANGE);
+    int64_t cLo = m_c2low[c+0];
+    int64_t cRa = m_c2low[c+1] - cLo;
 
     double valDecr = range * cLo;
     // Reduce precision of valDecr in controlled manner, in order to prevent uncontrolled leakage of LS bits
@@ -325,11 +320,11 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     val_h = nxtVal;
     range *= cRa;
 
-    if (val_h < 0 || val_h >= range) {
-      fesetround(FE_TONEAREST);
-      printf("[%d]=%3d: val_h %.20e val_l %.20e range %.20e\n", i, dst[i], val_h, val_l, range);
-      fesetround(FE_TOWARDZERO);
-    }
+    // if (val_h < 0 || val_h >= range) {
+      // fesetround(FE_TONEAREST);
+      // printf("[%d]=%3d: val_h %.20e val_l %.20e range %.20e\n", i, dst[i], val_h, val_l, range);
+      // fesetround(FE_TOWARDZERO);
+    // }
     if (val_h < 0 || val_h >= range) return -102; // should never happen
 
     ++i;
