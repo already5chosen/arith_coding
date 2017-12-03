@@ -262,7 +262,7 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     useTmpbuf = true;
   }
 
-  double val_h = 1.0, val_l = 0;
+  double val_h = 0.0, val_l = 0;
   for (int k = 0; k < 13; ++k) {
     double x = src[12-k];
     {double s = val_h + x; double d1 = s - x; x = val_h - d1; val_h = s; }
@@ -360,13 +360,13 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
         (int64_t(src[0]) << 5*8);
       src    += 6;
       srclen -= 6;
-      double valDecr = (((int64_t(1)<<48)-1)-sixOctets)*TWO_POWn104;
+      double valIncr = sixOctets*TWO_POWn104;
       { double nxtVal = val_h + val_l; val_l -= nxtVal - val_h; val_h = nxtVal; }
       val_h *= TWO_POW48;
       val_l *= TWO_POW48;
       // dual-double style addition
-      {double nxtVal = val_h - valDecr; valDecr -= val_h - nxtVal; val_h = nxtVal;}
-      val_l -= valDecr;
+      {double nxtVal = val_h + valIncr; valIncr -= nxtVal - val_h; val_h = nxtVal;}
+      val_l += valIncr;
       invRange *= TWO_POWn48;
       range    *= TWO_POW48;
       if (val_h < 0 || val_h >= range) {
