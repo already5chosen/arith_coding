@@ -8,11 +8,12 @@
 
 #include "arithmetic_decode.h"
 
+#define _LIKELY(cond)   __builtin_expect((cond), 1)
+#define _UNLIKELY(cond) __builtin_expect((cond), 0)
 
 static const int RANGE_BITS = 14;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
-static const double RANGE_LEAKAGE_FACTOR = 1.0 - 1.0/(int64_t(1)<<29);
-static const double VAL_RATIO_ADJ = 1.0+(1.0-RANGE_LEAKAGE_FACTOR)/VAL_RANGE*0.5;
+static const double VAL_RATIO_ADJ = 1.0+1.0/(uint64_t(1) << 45);
 
 // load_ranges
 // return  value:
@@ -158,7 +159,7 @@ struct arithmetic_decode_model_t {
   int m_longLookupCount;
   int m_renormalizationCount;
   #endif
-  uint16_t m_c2low[257];
+  uint16_t m_c2low[258];
   double m_c2invRange[256]; // 1/range
 
   int  load_and_prepare(const uint8_t* src, int srclen, int* pInfo);
@@ -166,7 +167,7 @@ struct arithmetic_decode_model_t {
 private:
   static const int RANGE2C_NBITS = 9;
   static const int RANGE2C_SZ = 1 << RANGE2C_NBITS;
-  uint8_t  m_range2c[RANGE2C_SZ+2];
+  uint8_t  m_range2c[RANGE2C_SZ+1];
   unsigned m_maxC;
 
   void prepare(uint16_t c2range[256]);
@@ -212,7 +213,7 @@ void arithmetic_decode_model_t::prepare(uint16_t c2range[256])
     // printf("%3u: %04x %04x\n", c, range, lo);
     m_c2low[c] = lo;
     if (range != 0) {
-      m_c2invRange[c] = double(VAL_RANGE/RANGE_LEAKAGE_FACTOR)/range;
+      m_c2invRange[c] = double(VAL_RANGE)/range;
       // build inverse index m_range2c
       maxC = c;
       lo += range;
@@ -221,9 +222,10 @@ void arithmetic_decode_model_t::prepare(uint16_t c2range[256])
       }
     }
   }
-  for (unsigned c = maxC + 1; c < 257; ++c)
-    m_c2low[c] = VAL_RANGE;
-  for (; invI < RANGE2C_SZ+2; ++invI) {
+  m_c2low[maxC + 1] = VAL_RANGE;
+  for (unsigned c = maxC + 2; c < 258; ++c)
+    m_c2low[c] = VAL_RANGE+c;
+  for (; invI < RANGE2C_SZ+1; ++invI) {
     m_range2c[invI] = maxC;
   }
   m_maxC = maxC;
@@ -274,16 +276,13 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
   src    += 13;
   srclen -= 13;
   double range    = 1.0;
-  double invRange = (VAL_RANGE*VAL_RATIO_ADJ/RANGE_LEAKAGE_FACTOR);
+  double invRange = (VAL_RANGE*VAL_RATIO_ADJ);
   for (int i = 0; ; ) {
 
     if ((i & 63)==0) {
       // invRange = 1.0/range;
-      invRange *= 2.0-range*invRange*(RANGE_LEAKAGE_FACTOR/VAL_RATIO_ADJ/VAL_RANGE);
+      invRange *= 2.0-range*invRange*(1.0/VAL_RATIO_ADJ/VAL_RANGE);
     }
-
-    //if (val_l >= MAX_VAL_L)
-    { double nxtVal = val_h + val_l; val_l -= nxtVal - val_h; val_h = nxtVal; }
 
     if (val_h >= range) return -12;
     // That is an input error, rather than internal error of decoder.
@@ -291,41 +290,42 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     // That's the case of illegal code stream.
     // The case is extremely unlikely, but not impossible.
 
-    unsigned c = val2c(val_h*invRange);
-    dst[i] = c;
+    unsigned c = val2c(val_h*invRange); // can be off by +1
 
+    // if (i < 20) {
     // fesetround(FE_TONEAREST);
-    // printf("[%2d]=%3d: val_h %.20e val_l %.20e range %.20e. [%7.1f..%7.1f) %23.17f  %23.17f %23.17f %23.17f %.20e\n", i, dst[i], val_h, val_l, range, m_c2low[c+0]*VAL_RANGE, m_c2low[c+1]*VAL_RANGE
+    // printf("[%2d]=%3d: val_h %.20e val_l %.20e range %.20e. [%5d..%5d) %23.17f  %23.17f %23.17f %23.17f %.20e\n", i, dst[i], val_h, val_l, range, m_c2low[c+0], m_c2low[c+1]
     // , val_h*invRange*VAL_RANGE
     // , val_h/range*VAL_RANGE
-    // , val_h/range*VAL_RANGE/RANGE_LEAKAGE_FACTOR
-    // , val_h/range*VAL_RANGE/RANGE_LEAKAGE_FACTOR*VAL_RATIO_ADJ
+    // , val_h/range*VAL_RANGE
+    // , val_h/range*VAL_RANGE*VAL_RATIO_ADJ
     // , range * invRange
     // );
     // fesetround(FE_TOWARDZERO);
+    // }
 
     // keep decoder in sync with encoder
-    range *= (RANGE_LEAKAGE_FACTOR/VAL_RANGE);
+    range *= (1.0/VAL_RANGE);
     int64_t cLo = m_c2low[c+0];
-    int64_t cRa = m_c2low[c+1] - cLo;
-
     double valDecr = range * cLo;
     // Reduce precision of valDecr in controlled manner, in order to prevent uncontrolled leakage of LS bits
     valDecr += LO_INCR_OFFSET; valDecr -= LO_INCR_OFFSET;
+    if (_UNLIKELY(valDecr > val_h)) {
+      cLo = m_c2low[c-1];
+      --c;
+      valDecr = range * cLo;
+      valDecr += LO_INCR_OFFSET; valDecr -= LO_INCR_OFFSET;
+      if (valDecr > val_h) {
+        return -102; // should never happen
+      }
+    }
+    int64_t cRa = m_c2low[c+1] - cLo;
+    range *= cRa;
+    dst[i] = c;
 
     // dual-double style subtraction
-    double nxtVal = val_h - valDecr;
-    valDecr -= (val_h-nxtVal);
-    val_l -= valDecr;
-    val_h = nxtVal;
-    range *= cRa;
-
-    // if (val_h < 0 || val_h >= range) {
-      // fesetround(FE_TONEAREST);
-      // printf("[%d]=%3d: val_h %.20e val_l %.20e range %.20e\n", i, dst[i], val_h, val_l, range);
-      // fesetround(FE_TOWARDZERO);
-    // }
-    if (val_h < 0 || val_h >= range) return -102; // should never happen
+    double nxtVal = val_h - valDecr; valDecr += (nxtVal - val_h); val_l -= valDecr; val_h = nxtVal;
+    nxtVal = val_h + val_l; val_l -= (nxtVal - val_h); val_h = nxtVal;
 
     ++i;
     if (i == dstlen)
@@ -369,13 +369,6 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
       val_l += valIncr;
       invRange *= TWO_POWn48;
       range    *= TWO_POW48;
-      if (val_h < 0 || val_h >= range) {
-        // fesetround(FE_TONEAREST);
-        // // printf("[%d]=%3d: val_h %.20e val_l %.20e range %.20e. %02x.%02x.%02x.%02x.%02x.%02x.%02x.%02x\n", i-1, dst[i-1], val_h, val_l, range, src[0], src[1], src[2], src[3], src[4], src[5], src[6], src[7]);
-        // printf("[%d]=%3d: val_h %.20e+val_l %.20e=%.20e range %.20e.\n", i-1, dst[i-1], val_h, val_l, val_h+val_l, range);
-        // fesetround(FE_TOWARDZERO);
-        return -103; // should not happen
-      }
     }
 
   }
@@ -403,7 +396,7 @@ int arithmetic_decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen, 
       pInfo[4] = model.m_renormalizationCount;
     }
     #endif
-    return textlen;
+    return textlen <= 0 ? textlen : dstlen;
   }
   fesetround(rdir);
   return modellen;

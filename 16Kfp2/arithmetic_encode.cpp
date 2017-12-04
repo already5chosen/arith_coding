@@ -11,7 +11,6 @@
 
 static const int      RANGE_BITS = 14;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
-static const double   RANGE_LEAKAGE_FACTOR = 1.0 - 1.0/(int64_t(1)<<29);
 
 // return value:
 // -1  - source consists of repetition of the same character
@@ -283,7 +282,7 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
       double nxtLo = lo_h + lo_l; lo_l -= nxtLo - lo_h; lo_h = nxtLo;
     }
 
-    range *= (RANGE_LEAKAGE_FACTOR/VAL_RANGE);
+    range *= (1.0/VAL_RANGE);
     int c = src[i];
     int64_t cLo = c2low[c+0];
     int64_t cRa = c2low[c+1] - cLo;
