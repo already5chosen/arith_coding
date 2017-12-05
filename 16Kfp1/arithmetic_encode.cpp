@@ -245,123 +245,89 @@ static void inc_dst(uint8_t* dst) {
   } while (val==0);
 }
 
-int storeLastOctets(uint8_t* dst, double lo, double hi) {
-  const uint64_t MSB_MSK = uint64_t(-1) << 40; // 16 overhead bits + 8 most significant bits
-  uint64_t uLo; memcpy(&uLo, &lo, sizeof(uint64_t));
-  uint64_t uHi; memcpy(&uHi, &hi, sizeof(uint64_t));
-  dst[5] = uHi >> (0*8);
-  dst[4] = uHi >> (1*8);
-  dst[3] = uHi >> (2*8);
-  dst[2] = uHi >> (3*8);
-  dst[1] = uHi >> (4*8);
-  dst[0] = uHi >> (5*8);
-  uint64_t dbits = uLo ^ uHi;
-  if (dbits==0)
-    return 6;
-  int ret = 0;
-  while ((dbits & MSB_MSK)==0) {
-    // lo and hi have the same upper octet
-    ++ret;
-    dbits <<= 8;
-  }
-  return ret + 1;
-}
-
 static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint16_t c2low[257], int maxC)
 {
-  const double MIN_RANGE      = 1.0 /(uint64_t(1) << 49); // 2**(-49)
-  const double LO_INCR_OFFSET = MIN_RANGE;                // 2**(-49)
-  const double MAX_LO_L       = MIN_RANGE*0.5;            // 2**(-50)
-  double lo_h  = 1.0;   // upper part of accumulator + offset
-  double lo_l  = 0.0;   // lower part of accumulator
+  const double MIN_RANGE = 1.0 /(uint64_t(1) << 17); // 2**(-17)
+  const double TWO_POW16  = int64_t(1) << 16;
+
+  double lo    = 0.0;
   double range = 1.0;
   uint8_t* dst0 = dst;
-  int64_t prevDstW = -1;
+  int32_t prevDstW = -1;
   for (unsigned i = 0; i < srclen; ++i) {
-    if (lo_l >= MAX_LO_L) {
-      double nxtLo = lo_h + lo_l; lo_l -= nxtLo - lo_h; lo_h = nxtLo;
-    }
-
+    // Reduce precision of range in controlled manner, in order to prevent uncontrolled leakage of LS bits
+    // After reduction range still contains no less than 49 significant bits, so efficiency of compression does not suffer.
+    // range = range*(1.0+1.0/VAL_RANGE) - range;
     range *= (1.0/VAL_RANGE);
+    range += 1.0;
+    range -= 1.0;
+
+    // if (i < 25) {
+      // fesetround(FE_TONEAREST);
+      // printf("%5d: %.20e (%05x) %.20e %016llx", i, lo, int32_t(lo*TWO_POW16), range, int64_t(range*(int64_t(1)<<60)));
+      // fesetround(FE_TOWARDZERO);
+    // }
+    // all following sequence of operations is precise
     int c = src[i];
     int64_t cLo = c2low[c+0];
     int64_t cRa = c2low[c+1] - cLo;
     double loIncr = range * cLo;
-    // Reduce precision of loIncr in controlled manner, in order to prevent uncontrolled leakage of LS bits
-    // After reduction loIncr still contains no less than 39 significant bits, so efficiency of compression does not suffer.
-    loIncr += LO_INCR_OFFSET; loIncr -= LO_INCR_OFFSET;
-
-    // fesetround(FE_TONEAREST);
-    // printf("[%d]=%3d: lo_h %.20e lo_l %.20e range %.20e. Incr %.20e\n", i, c, lo_h, lo_l, range, loIncr);
-    // fesetround(FE_TOWARDZERO);
-
-    // dual-double style addition
-    double nxtLo = lo_h + loIncr;
-    loIncr -= (nxtLo-lo_h);
-    lo_l += loIncr;
-    lo_h = nxtLo;
+    lo    += loIncr;
     range *= cRa;
+    // if (i < 25) {
+      // fesetround(FE_TONEAREST);
+      // printf(" + %016llx %.20e = %.20e\n", int64_t(loIncr*(int64_t(1)<<60)), loIncr, lo);
+      // fesetround(FE_TOWARDZERO);
+    // }
 
     if (range <= MIN_RANGE) {
       // re-normalize
-      {double nxtLo = lo_h + lo_l; lo_l -= nxtLo - lo_h; lo_h = nxtLo;}
-      lo_h  *= double(uint64_t(1) << 48);
-      int64_t dstW = lo_h;
-      lo_h -= dstW-1;
-      lo_l  *= double(uint64_t(1) << 48);
-      range *= double(uint64_t(1) << 48);
-      {double nxtLo = lo_h + lo_l; lo_l -= nxtLo - lo_h; lo_h = nxtLo;}
-      dstW -= (int64_t(1)<<48);
+      // if (i < 25) {
+        // fesetround(FE_TONEAREST);
+        // printf("%5d: %.20e %05x %05x\n", i, lo, prevDstW, int32_t(lo*TWO_POW16));
+        // fesetround(FE_TOWARDZERO);
+      // }
+      lo    *= TWO_POW16;
+      int32_t dstW = lo;
+      lo    -= dstW;
+      range *= TWO_POW16;
       if (_LIKELY(prevDstW >= 0)) {
-        prevDstW += (dstW >> 48);
-        if (_UNLIKELY(prevDstW >= (int64_t(1)<<48)))
-          inc_dst(dst); // very unlikely
-        dstW &= uint64_t(-1) >> (64-48);
-        // store 6 octets
-        dst[5] = prevDstW >> (0*8);
-        dst[4] = prevDstW >> (1*8);
-        dst[3] = prevDstW >> (2*8);
-        dst[2] = prevDstW >> (3*8);
-        dst[1] = prevDstW >> (4*8);
-        dst[0] = prevDstW >> (5*8);
-        dst += 6;
+        prevDstW += (dstW >> 16);
+        if (_UNLIKELY(prevDstW >= (int32_t(1)<<16)))
+          inc_dst(dst);
+        dstW &= uint32_t(-1) >> (32-16);
+        // store 2 octets
+        dst[1] = prevDstW >> (0*8);
+        dst[0] = prevDstW >> (1*8);
+        dst += 2;
       }
       prevDstW = dstW;
     }
   }
 
   if (prevDstW >= 0) {
-    // store 6 octets
-    dst[5] = prevDstW >> (0*8);
-    dst[4] = prevDstW >> (1*8);
-    dst[3] = prevDstW >> (2*8);
-    dst[2] = prevDstW >> (3*8);
-    dst[1] = prevDstW >> (4*8);
-    dst[0] = prevDstW >> (5*8);
-    dst += 6;
+    // store 2 octets
+    dst[1] = prevDstW >> (0*8);
+    dst[0] = prevDstW >> (1*8);
+    dst += 2;
   }
 
   // output last bits
-  lo_h -= 1.0;
-  {double nxtLo = lo_h + lo_l; lo_l -= nxtLo - lo_h; lo_h = nxtLo;}
-  if (lo_h >= 1.0) {
+  if (lo >= 1.0) {
     inc_dst(dst);
-    lo_h -= 1.0;
-    {double nxtLo = lo_h + lo_l; lo_l -= nxtLo - lo_h; lo_h = nxtLo;}
+    lo -= 1.0;
   }
 
   while (range <= (1.0/256)) {
     // octet is common in lo and lo+range-ULP
-    lo_h  *= 256.0;
-    lo_l  *= 256.0;
-    int oct = lo_h;
+    lo    *= 256.0;
+    int oct = lo;
     *dst++ = oct;
-    lo_h -= oct;
-    {double nxtLo = lo_h + lo_l; lo_l -= nxtLo - lo_h; lo_h = nxtLo;}
+    lo    -= oct;
     range *= 256.0;
   }
   // last octet
-  int oct = lo_h*256.0 + 1.0;
+  int oct = lo*256.0 + 1.0;
   if (oct < 256)
     *dst++ = oct;
   else

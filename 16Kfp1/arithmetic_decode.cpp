@@ -13,7 +13,7 @@
 
 static const int RANGE_BITS = 14;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
-static const double VAL_RATIO_ADJ = 1.0+1.0/(uint64_t(1) << 45);
+static const double VAL_RATIO_ADJ = 1.0+1.0/(uint64_t(1) << 17);
 
 // load_ranges
 // return  value:
@@ -237,95 +237,85 @@ void arithmetic_decode_model_t::prepare(uint16_t c2range[256])
   // return u;
 // }
 
-// static int64_t load48bits(const uint8_t* src) {
-  // int64_t value = 0;
-  // for (int k = 0; k < 6; ++k)
-    // value = (value << 8) | src[k];
-  // return value;
-// }
-
 int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen)
 {
-  const double MIN_RANGE      = 1.0 /(uint64_t(1) << 49); // 2**(-49)
-  const double LO_INCR_OFFSET = MIN_RANGE;                // 2**(-49)
-  const double TWO_POW48 = int64_t(1) << 48;
-  const double TWO_POWn48 = 1.0/TWO_POW48;
-  const double TWO_POWn56 = 1.0/(int64_t(1) << 56);
-  const double TWO_POWn104 = TWO_POWn48*TWO_POWn56;
+// const uint8_t* src0 = src;
+  const double MIN_RANGE  = 1.0 /(uint64_t(1) << 17); // 2**(-17)
+  const double TWO_POW16  = int64_t(1) << 16;
+  const double TWO_POWn16 = 1.0/TWO_POW16;
+  const double TWO_POWn52 = 1.0/(int64_t(1) << 52);
 
   if (srclen < 2)
     return -11;
 
-  uint8_t tmpbuf[32] = {0};
+  uint8_t tmpbuf[16] = {0};
   bool useTmpbuf = false;
-  if (srclen < 13) {
+  if (srclen < 7) {
     memcpy(tmpbuf, src, srclen);
     src = tmpbuf;
     useTmpbuf = true;
   }
 
-  double val_h = 0.0, val_l = 0;
-  for (int k = 0; k < 13; ++k) {
-    double x = src[12-k];
-    {double s = val_h + x; double d1 = s - x; x = val_h - d1; val_h = s; }
-    val_l += x;
-    { double nxtVal = val_h + val_l; val_l -= nxtVal - val_h; val_h = nxtVal; }
-    val_h *= 1.0/256;
-    val_l *= 1.0/256;
-  }
-  src    += 13;
-  srclen -= 13;
+  double val = 0.0;
+  uint64_t val56 = 0;
+  for (int k = 0; k < 7; ++k)
+    val56 = val56*256+src[k];
+  val = (val56 >> 4)*TWO_POWn52;
+  src    += 6;
+  srclen -= 6;
   double range    = 1.0;
   double invRange = (VAL_RANGE*VAL_RATIO_ADJ);
   for (int i = 0; ; ) {
 
-    if ((i & 63)==0) {
+    if ((i & 31)==0) {
       // invRange = 1.0/range;
       invRange *= 2.0-range*invRange*(1.0/VAL_RATIO_ADJ/VAL_RANGE);
     }
 
-    if (val_h >= range) return -12;
+    if (val >= range) return -12;
     // That is an input error, rather than internal error of decoder.
     // Due to way that encoder works, not any bit stream is possible as its output
     // That's the case of illegal code stream.
     // The case is extremely unlikely, but not impossible.
 
-    unsigned c = val2c(val_h*invRange); // can be off by +1
+    unsigned c = val2c(val*invRange); // can be off by +1
 
-    // if (i < 20) {
+//    if (i < 20)
+      // {
     // fesetround(FE_TONEAREST);
-    // printf("[%2d]=%3d: val_h %.20e val_l %.20e range %.20e. [%5d..%5d) %23.17f  %23.17f %23.17f %23.17f %.20e\n", i, dst[i], val_h, val_l, range, m_c2low[c+0], m_c2low[c+1]
-    // , val_h*invRange*VAL_RANGE
-    // , val_h/range*VAL_RANGE
-    // , val_h/range*VAL_RANGE
-    // , val_h/range*VAL_RANGE*VAL_RATIO_ADJ
+    // printf("[%2d]=%3d: val %.20e range %.20e. [%5d..%5d) %23.17f  %23.17f %23.17f %.20e\n"
+    // , i, c, val, range, m_c2low[c+0], m_c2low[c+1]
+    // , val*invRange
+    // , val/range*VAL_RANGE
+    // , val/range*VAL_RANGE*VAL_RATIO_ADJ
     // , range * invRange
     // );
     // fesetround(FE_TOWARDZERO);
     // }
 
-    // keep decoder in sync with encoder
+    //
+    // Keep decoder in sync with encoder
+    //
+    // Reduce precision of range in controlled manner, in order to prevent uncontrolled leakage of LS bits
+    // After reduction range still contains no less than 49 significant bits, so efficiency of compression does not suffer.
+    // range = range*(1.0+1.0/VAL_RANGE) - range;
     range *= (1.0/VAL_RANGE);
+    range += 1.0;
+    range -= 1.0;
     int64_t cLo = m_c2low[c+0];
     double valDecr = range * cLo;
-    // Reduce precision of valDecr in controlled manner, in order to prevent uncontrolled leakage of LS bits
-    valDecr += LO_INCR_OFFSET; valDecr -= LO_INCR_OFFSET;
-    if (_UNLIKELY(valDecr > val_h)) {
+    if (_UNLIKELY(valDecr > val)) {
       cLo = m_c2low[c-1];
       --c;
       valDecr = range * cLo;
-      valDecr += LO_INCR_OFFSET; valDecr -= LO_INCR_OFFSET;
-      if (valDecr > val_h) {
+      if (valDecr > val) {
         return -102; // should never happen
       }
     }
     int64_t cRa = m_c2low[c+1] - cLo;
     range *= cRa;
     dst[i] = c;
-
-    // dual-double style subtraction
-    double nxtVal = val_h - valDecr; valDecr += (nxtVal - val_h); val_l -= valDecr; val_h = nxtVal;
-    nxtVal = val_h + val_l; val_l -= (nxtVal - val_h); val_h = nxtVal;
+    val   -= valDecr;
 
     ++i;
     if (i == dstlen)
@@ -334,41 +324,39 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     // update invRange
     invRange *= m_c2invRange[c];
 
-    // printf("was here A2. %016llx %016llx %016llx\n",  lo, value, hi); fflush(stdout);
     if (range <= MIN_RANGE) {
       // printf("%d: renorm\n", i);
       #ifdef ENABLE_PERF_COUNT
       ++m_renormalizationCount;
       #endif
-      if (srclen < 6) {
+      if (srclen < 3) {
         if (!useTmpbuf) {
           if (srclen > 0)
             memcpy(tmpbuf, src, srclen);
           src = tmpbuf;
           useTmpbuf = true;
         } else {
-          if (src > &tmpbuf[32-6])
+          if (src > &tmpbuf[16-3])
             return i;
         }
       }
-      int64_t sixOctets =
-        (int64_t(src[5])       ) |
-        (int64_t(src[4]) << 1*8) |
-        (int64_t(src[3]) << 2*8) |
-        (int64_t(src[2]) << 3*8) |
-        (int64_t(src[1]) << 4*8) |
-        (int64_t(src[0]) << 5*8);
-      src    += 6;
-      srclen -= 6;
-      double valIncr = sixOctets*TWO_POWn104;
-      { double nxtVal = val_h + val_l; val_l -= nxtVal - val_h; val_h = nxtVal; }
-      val_h *= TWO_POW48;
-      val_l *= TWO_POW48;
-      // dual-double style addition
-      {double nxtVal = val_h + valIncr; valIncr -= nxtVal - val_h; val_h = nxtVal;}
-      val_l += valIncr;
-      invRange *= TWO_POWn48;
-      range    *= TWO_POW48;
+      int32_t threeOctets =
+        (int32_t(src[2])       ) |
+        (int32_t(src[1]) << 1*8) |
+        (int32_t(src[0]) << 2*8);
+      // if (i < 20) {
+        // fesetround(FE_TONEAREST);
+        // printf("%5d: %06x\n", src-src0, threeOctets);
+        // fesetround(FE_TOWARDZERO);
+      // }
+      src    += 2;
+      srclen -= 2;
+      const int32_t MASK16 = (int32_t(1)<<16) - 1;
+      double valIncr = int64_t((threeOctets>>4) & MASK16) * TWO_POWn52;
+      val      *= TWO_POW16;
+      val      += valIncr;
+      invRange *= TWO_POWn16;
+      range    *= TWO_POW16;
     }
 
   }
@@ -396,6 +384,7 @@ int arithmetic_decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen, 
       pInfo[4] = model.m_renormalizationCount;
     }
     #endif
+    // return textlen;
     return textlen <= 0 ? textlen : dstlen;
   }
   fesetround(rdir);
