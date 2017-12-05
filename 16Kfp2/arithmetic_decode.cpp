@@ -413,8 +413,7 @@ int arithmetic_decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen, 
       pInfo[4] = model.m_renormalizationCount;
     }
     #endif
-    return textlen <= 0 ? textlen : dstlen;
-//    return textlen;
+    return textlen;
   }
   fesetround(rdir);
   return modellen;
