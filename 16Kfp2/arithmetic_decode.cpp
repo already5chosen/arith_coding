@@ -13,7 +13,7 @@
 
 static const int RANGE_BITS = 14;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
-static const double VAL_RATIO_ADJ = 1.0+1.0/(uint64_t(1) << 45);
+static const double VAL_RATIO_ADJ = 1.0+1.0/(uint64_t(1) << 32);
 
 // load_ranges
 // return  value:
@@ -244,10 +244,17 @@ void arithmetic_decode_model_t::prepare(uint16_t c2range[256])
   // return value;
 // }
 
+static inline double and_sd(double x, uint64_t mask) {
+  uint64_t u;
+  memcpy(&u, &x, sizeof(u));
+  u &= mask;
+  memcpy(&x, &u, sizeof(u));
+  return x;
+}
+
 int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen)
 {
   const double MIN_RANGE      = 1.0 /(uint64_t(1) << 49); // 2**(-49)
-  const double LO_INCR_OFFSET = MIN_RANGE;                // 2**(-49)
   const double TWO_POW48 = int64_t(1) << 48;
   const double TWO_POWn48 = 1.0/TWO_POW48;
   const double TWO_POWn56 = 1.0/(int64_t(1) << 56);
@@ -292,35 +299,40 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
 
     unsigned c = val2c(val_h*invRange); // can be off by +1
 
-    // if (i < 20) {
-    // fesetround(FE_TONEAREST);
-    // printf("[%2d]=%3d: val_h %.20e val_l %.20e range %.20e. [%5d..%5d) %23.17f  %23.17f %23.17f %23.17f %.20e\n", i, dst[i], val_h, val_l, range, m_c2low[c+0], m_c2low[c+1]
-    // , val_h*invRange*VAL_RANGE
-    // , val_h/range*VAL_RANGE
-    // , val_h/range*VAL_RANGE
-    // , val_h/range*VAL_RANGE*VAL_RATIO_ADJ
-    // , range * invRange
-    // );
-    // fesetround(FE_TOWARDZERO);
+    // if (i >= 0*4600 && i < 4650) {
+      // double ra = range * (1.0/VAL_RANGE);
+      // int64_t cLo = m_c2low[c+0];
+      // double valDecr = ra * cLo;
+      // double valDecrI = (long double)ra * cLo - valDecr;
+      // fesetround(FE_TONEAREST);
+      // printf("[%2d]=%3d: val_h %.20e val_l %.20e range %.20e. [%5d..%5d) %23.17f  %23.17f %23.17f.  %.20e %.20e\n"
+      // , i, c, val_h, val_l, range
+      // , m_c2low[c+0], m_c2low[c+1]
+      // , val_h*invRange
+      // , val_h/range*VAL_RANGE*VAL_RATIO_ADJ
+      // , val_h/range*VAL_RANGE
+      // , valDecr
+      // , valDecrI
+      // );
+      // fesetround(FE_TOWARDZERO);
     // }
 
     // keep decoder in sync with encoder
     range *= (1.0/VAL_RANGE);
     int64_t cLo = m_c2low[c+0];
     double valDecr = range * cLo;
-    // Reduce precision of valDecr in controlled manner, in order to prevent uncontrolled leakage of LS bits
-    valDecr += LO_INCR_OFFSET; valDecr -= LO_INCR_OFFSET;
     if (_UNLIKELY(valDecr > val_h)) {
       cLo = m_c2low[c-1];
       --c;
       valDecr = range * cLo;
-      valDecr += LO_INCR_OFFSET; valDecr -= LO_INCR_OFFSET;
       if (valDecr > val_h) {
         return -102; // should never happen
       }
     }
     int64_t cRa = m_c2low[c+1] - cLo;
     range *= cRa;
+    // Reduce precision of valDecr in controlled manner, in order to prevent uncontrolled leakage of LS bits
+    range = and_sd(range, -int64_t(VAL_RANGE));
     dst[i] = c;
 
     // dual-double style subtraction
@@ -360,6 +372,11 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
         (int64_t(src[0]) << 5*8);
       src    += 6;
       srclen -= 6;
+      // if (i > 4600 && i < 4650) {
+        // fesetround(FE_TONEAREST);
+        // printf("%012llx\n", sixOctets);
+        // fesetround(FE_TOWARDZERO);
+      // }
       double valIncr = sixOctets*TWO_POWn104;
       { double nxtVal = val_h + val_l; val_l -= nxtVal - val_h; val_h = nxtVal; }
       val_h *= TWO_POW48;
@@ -397,6 +414,7 @@ int arithmetic_decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen, 
     }
     #endif
     return textlen <= 0 ? textlen : dstlen;
+//    return textlen;
   }
   fesetround(rdir);
   return modellen;

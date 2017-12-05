@@ -237,6 +237,14 @@ static int store_model(uint8_t* dst, const uint16_t c2low[256], unsigned maxC, d
   // return u;
 // }
 
+static inline double and_sd(double x, uint64_t mask) {
+  uint64_t u;
+  memcpy(&u, &x, sizeof(u));
+  u &= mask;
+  memcpy(&x, &u, sizeof(u));
+  return x;
+}
+
 static void inc_dst(uint8_t* dst) {
   uint8_t val;
   do {
@@ -245,32 +253,9 @@ static void inc_dst(uint8_t* dst) {
   } while (val==0);
 }
 
-int storeLastOctets(uint8_t* dst, double lo, double hi) {
-  const uint64_t MSB_MSK = uint64_t(-1) << 40; // 16 overhead bits + 8 most significant bits
-  uint64_t uLo; memcpy(&uLo, &lo, sizeof(uint64_t));
-  uint64_t uHi; memcpy(&uHi, &hi, sizeof(uint64_t));
-  dst[5] = uHi >> (0*8);
-  dst[4] = uHi >> (1*8);
-  dst[3] = uHi >> (2*8);
-  dst[2] = uHi >> (3*8);
-  dst[1] = uHi >> (4*8);
-  dst[0] = uHi >> (5*8);
-  uint64_t dbits = uLo ^ uHi;
-  if (dbits==0)
-    return 6;
-  int ret = 0;
-  while ((dbits & MSB_MSK)==0) {
-    // lo and hi have the same upper octet
-    ++ret;
-    dbits <<= 8;
-  }
-  return ret + 1;
-}
-
 static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint16_t c2low[257], int maxC)
 {
   const double MIN_RANGE      = 1.0 /(uint64_t(1) << 49); // 2**(-49)
-  const double LO_INCR_OFFSET = MIN_RANGE;                // 2**(-49)
   const double MAX_LO_L       = MIN_RANGE*0.5;            // 2**(-50)
   double lo_h  = 1.0;   // upper part of accumulator + offset
   double lo_l  = 0.0;   // lower part of accumulator
@@ -287,12 +272,9 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
     int64_t cLo = c2low[c+0];
     int64_t cRa = c2low[c+1] - cLo;
     double loIncr = range * cLo;
-    // Reduce precision of loIncr in controlled manner, in order to prevent uncontrolled leakage of LS bits
-    // After reduction loIncr still contains no less than 39 significant bits, so efficiency of compression does not suffer.
-    loIncr += LO_INCR_OFFSET; loIncr -= LO_INCR_OFFSET;
 
     // fesetround(FE_TONEAREST);
-    // printf("[%d]=%3d: lo_h %.20e lo_l %.20e range %.20e. Incr %.20e\n", i, c, lo_h, lo_l, range, loIncr);
+    // printf("[%d]=%3d: lo_h %.20e lo_l %.20e range %.20e. [%5d..%5d) Incr %.20e\n", i, c, lo_h, lo_l, range*VAL_RANGE, c2low[c+0], c2low[c+1], loIncr);
     // fesetround(FE_TOWARDZERO);
 
     // dual-double style addition
@@ -301,6 +283,9 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
     lo_l += loIncr;
     lo_h = nxtLo;
     range *= cRa;
+    // Reduce precision of range in controlled manner, in order to prevent uncontrolled leakage of LS bits
+    // After reduction range still contains no less than 49 significant bits, so efficiency of compression does not suffer.
+    range = and_sd(range, -int64_t(VAL_RANGE));
 
     if (range <= MIN_RANGE) {
       // re-normalize
@@ -312,6 +297,11 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
       range *= double(uint64_t(1) << 48);
       {double nxtLo = lo_h + lo_l; lo_l -= nxtLo - lo_h; lo_h = nxtLo;}
       dstW -= (int64_t(1)<<48);
+      // if (i > 4600 && i < 4650) {
+        // fesetround(FE_TONEAREST);
+        // printf("%013llx %013llx\n", prevDstW, dstW);
+        // fesetround(FE_TOWARDZERO);
+      // }
       if (_LIKELY(prevDstW >= 0)) {
         prevDstW += (dstW >> 48);
         if (_UNLIKELY(prevDstW >= (int64_t(1)<<48)))
