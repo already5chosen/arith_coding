@@ -237,21 +237,6 @@ void arithmetic_decode_model_t::prepare(uint16_t c2range[256])
   // return u;
 // }
 
-// static int64_t load48bits(const uint8_t* src) {
-  // int64_t value = 0;
-  // for (int k = 0; k < 6; ++k)
-    // value = (value << 8) | src[k];
-  // return value;
-// }
-
-static inline double and_sd(double x, uint64_t mask) {
-  uint64_t u;
-  memcpy(&u, &x, sizeof(u));
-  u &= mask;
-  memcpy(&x, &u, sizeof(u));
-  return x;
-}
-
 int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen)
 {
   const double MIN_RANGE      = 1.0 /(uint64_t(1) << 49); // 2**(-49)
@@ -318,7 +303,8 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     // }
 
     // keep decoder in sync with encoder
-    range *= (1.0/VAL_RANGE);
+    // Reduce precision of range in controlled manner, in order to prevent uncontrolled leakage of LS bits
+    range = range*(1.0+1.0/VAL_RANGE) - range;
     int64_t cLo = m_c2low[c+0];
     double valDecr = range * cLo;
     if (_UNLIKELY(valDecr > val_h)) {
@@ -331,8 +317,6 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     }
     int64_t cRa = m_c2low[c+1] - cLo;
     range *= cRa;
-    // Reduce precision of valDecr in controlled manner, in order to prevent uncontrolled leakage of LS bits
-    range = and_sd(range, -int64_t(VAL_RANGE));
     dst[i] = c;
 
     // dual-double style subtraction

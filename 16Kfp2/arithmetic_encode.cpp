@@ -237,14 +237,6 @@ static int store_model(uint8_t* dst, const uint16_t c2low[256], unsigned maxC, d
   // return u;
 // }
 
-static inline double and_sd(double x, uint64_t mask) {
-  uint64_t u;
-  memcpy(&u, &x, sizeof(u));
-  u &= mask;
-  memcpy(&x, &u, sizeof(u));
-  return x;
-}
-
 static void inc_dst(uint8_t* dst) {
   uint8_t val;
   do {
@@ -267,7 +259,9 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
       double nxtLo = lo_h + lo_l; lo_l -= nxtLo - lo_h; lo_h = nxtLo;
     }
 
-    range *= (1.0/VAL_RANGE);
+    // Reduce precision of range in controlled manner, in order to prevent uncontrolled leakage of LS bits
+    // After reduction range still contains no less than 49 significant bits, so efficiency of compression does not suffer.
+    range = range*(1.0+1.0/VAL_RANGE) - range;
     int c = src[i];
     int64_t cLo = c2low[c+0];
     int64_t cRa = c2low[c+1] - cLo;
@@ -283,9 +277,6 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
     lo_l += loIncr;
     lo_h = nxtLo;
     range *= cRa;
-    // Reduce precision of range in controlled manner, in order to prevent uncontrolled leakage of LS bits
-    // After reduction range still contains no less than 49 significant bits, so efficiency of compression does not suffer.
-    range = and_sd(range, -int64_t(VAL_RANGE));
 
     if (range <= MIN_RANGE) {
       // re-normalize
