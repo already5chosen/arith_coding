@@ -1,10 +1,8 @@
-// #include <immintrin.h>
 // #include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <cfenv>
 #include <cmath>
-// #include <cctype>
 
 #include "arithmetic_decode.h"
 
@@ -159,31 +157,35 @@ struct arithmetic_decode_model_t {
   int m_longLookupCount;
   int m_renormalizationCount;
   #endif
-  uint16_t m_c2low[258];
-  double m_c2invRange[256]; // 1/range
+  uint16_t m_ci2lo[258];
+  double   m_ci2invRange[256]; // 1/range
+  uint8_t  m_ci2c[256];
 
   int  load_and_prepare(const uint8_t* src, int srclen, int* pInfo);
   int  decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen);
 private:
-  static const int RANGE2C_NBITS = 9;
-  static const int RANGE2C_SZ = 1 << RANGE2C_NBITS;
-  uint8_t  m_range2c[RANGE2C_SZ+1];
-  unsigned m_maxC;
+  static const int LO2CI_NBITS = 9;
+  static const int LO2CI_SZ = 1 << LO2CI_NBITS;
+  uint8_t  m_lo2ci[LO2CI_SZ+1];
 
-  void prepare(uint16_t c2range[256]);
-  int val2c(double valRatio) {
+  void prepare(const uint16_t c2range[256]);
+  int val2ci(double valRatio)
+  #ifndef ENABLE_PERF_COUNT
+  const
+  #endif
+  {
     int lo = valRatio;
-    unsigned ri = lo >> (RANGE_BITS-RANGE2C_NBITS);
-    unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c] <= (val/32)*32
-    if (m_c2low[c+1] <= lo) {
+    unsigned ri = lo >> (RANGE_BITS-LO2CI_NBITS);
+    unsigned ci = m_lo2ci[ri]; // ci is the biggest character index for which m_ci2lo[ci] <= (lo/32)*32
+    if (m_ci2lo[ci+1] <= lo) {
       do {
         #ifdef ENABLE_PERF_COUNT
         ++m_extLookupCount;
         #endif
-        ++c;
-      } while (m_c2low[c+1] <= lo);
+        ++ci;
+      } while (m_ci2lo[ci+1] <= lo);
     }
-    return c;
+    return ci;
   }
 };
 
@@ -202,33 +204,32 @@ int arithmetic_decode_model_t::load_and_prepare(const uint8_t* src, int srclen, 
   return ret;
 }
 
-void arithmetic_decode_model_t::prepare(uint16_t c2range[256])
+void arithmetic_decode_model_t::prepare(const uint16_t c2range[256])
 {
   // m_c2low -> cumulative sums of ranges
-  unsigned maxC = 255;
-  unsigned lo = 0;
+  unsigned lo   = 0;
   unsigned invI = 0;
+  unsigned ci   = 0;
   for (int c = 0; c < 256; ++c) {
     unsigned range = c2range[c];
     // printf("%3u: %04x %04x\n", c, range, lo);
-    m_c2low[c] = lo;
     if (range != 0) {
-      m_c2invRange[c] = double(VAL_RANGE)/range;
-      // build inverse index m_range2c
-      maxC = c;
+      m_ci2lo[ci] = lo;
+      m_ci2c[ci]  = c;
+      m_ci2invRange[ci] = double(VAL_RANGE)/range;
+      // build inverse index m_lo2ci
       lo += range;
-      for (; invI <= ((lo-1) >> (RANGE_BITS-RANGE2C_NBITS)); ++invI) {
-        m_range2c[invI] = maxC;
+      for (; invI <= ((lo-1) >> (RANGE_BITS-LO2CI_NBITS)); ++invI) {
+        m_lo2ci[invI] = ci;
       }
+      ++ci;
     }
   }
-  m_c2low[maxC + 1] = VAL_RANGE;
-  for (unsigned c = maxC + 2; c < 258; ++c)
-    m_c2low[c] = VAL_RANGE+c;
-  for (; invI < RANGE2C_SZ+1; ++invI) {
-    m_range2c[invI] = maxC;
-  }
-  m_maxC = maxC;
+  m_ci2lo[ci] = VAL_RANGE;
+  for (unsigned i = ci+1; i < 258; ++i)
+    m_ci2lo[i] = VAL_RANGE+i;
+  for (; invI < LO2CI_SZ+1; ++invI)
+    m_lo2ci[invI] = ci-1;
 }
 
 // static uint64_t to_u(double x){
@@ -282,17 +283,17 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     // That's the case of illegal code stream.
     // The case is extremely unlikely, but not impossible.
 
-    unsigned c = val2c(val_h*invRange); // can be off by +1
+    unsigned ci = val2ci(val_h*invRange); // can be off by +1
 
     // if (i >= 0*4600 && i < 4650) {
       // double ra = range * (1.0/VAL_RANGE);
-      // int64_t cLo = m_c2low[c+0];
+      // int64_t cLo = m_ci2lo[c+0];
       // double valDecr = ra * cLo;
       // double valDecrI = (long double)ra * cLo - valDecr;
       // fesetround(FE_TONEAREST);
       // printf("[%2d]=%3d: val_h %.20e val_l %.20e range %.20e. [%5d..%5d) %23.17f  %23.17f %23.17f.  %.20e %.20e\n"
-      // , i, c, val_h, val_l, range
-      // , m_c2low[c+0], m_c2low[c+1]
+      // , i, ci, val_h, val_l, range
+      // , m_ci2lo[c+0], m_ci2lo[ci+1]
       // , val_h*invRange
       // , val_h/range*VAL_RANGE*VAL_RATIO_ADJ
       // , val_h/range*VAL_RANGE
@@ -305,19 +306,22 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     // keep decoder in sync with encoder
     // Reduce precision of range in controlled manner, in order to prevent uncontrolled leakage of LS bits
     range = range*(1.0+1.0/VAL_RANGE) - range;
-    int64_t cLo = m_c2low[c+0];
+    int64_t cLo = m_ci2lo[ci+0];
     double valDecr = range * cLo;
     if (_UNLIKELY(valDecr > val_h)) {
-      cLo = m_c2low[c-1];
-      --c;
+      cLo = m_ci2lo[ci-1];
+      --ci;
       valDecr = range * cLo;
       if (valDecr > val_h) {
         return -102; // should never happen
       }
     }
-    int64_t cRa = m_c2low[c+1] - cLo;
+    int64_t cRa = m_ci2lo[ci+1] - cLo;
     range *= cRa;
-    dst[i] = c;
+    // update invRange
+    invRange *= m_ci2invRange[ci];
+
+    dst[i] = m_ci2c[ci];
 
     // dual-double style subtraction
     double nxtVal = val_h - valDecr; valDecr += (nxtVal - val_h); val_l -= valDecr; val_h = nxtVal;
@@ -326,9 +330,6 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     ++i;
     if (i == dstlen)
       break; // success
-
-    // update invRange
-    invRange *= m_c2invRange[c];
 
     // printf("was here A2. %016llx %016llx %016llx\n",  lo, value, hi); fflush(stdout);
     if (range <= MIN_RANGE) {

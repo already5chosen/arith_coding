@@ -166,7 +166,6 @@ private:
   static const int LO2CI_NBITS = 9;
   static const int LO2CI_SZ = 1 << LO2CI_NBITS;
   uint8_t  m_lo2ci[LO2CI_SZ+1];
-  unsigned m_maxCi;
 
   void prepare(const uint16_t c2range[256]);
   int val2ci(double valRatio)
@@ -229,7 +228,6 @@ void arithmetic_decode_model_t::prepare(const uint16_t c2range[256])
     m_ci2lo[i] = VAL_RANGE;
   for (; invI < LO2CI_SZ+1; ++invI)
     m_lo2ci[invI] = ci-1;
-  m_maxCi = ci-1;
 }
 
 // static uint64_t to_u(double x){
