@@ -1,10 +1,8 @@
-// #include <immintrin.h>
 // #include <cstdio>
 #include <cstdint>
 #include <cstring>
 #include <cfenv>
 #include <cmath>
-// #include <cctype>
 
 #include "arithmetic_decode.h"
 
@@ -13,7 +11,6 @@
 
 static const int RANGE_BITS = 14;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
-static const double VAL_RATIO_ADJ = 1.0+1.0/(uint64_t(1) << 17);
 
 // load_ranges
 // return  value:
@@ -159,7 +156,7 @@ struct arithmetic_decode_model_t {
   int m_longLookupCount;
   int m_renormalizationCount;
   #endif
-  uint16_t m_c2low[258];
+  uint16_t m_c2low[257];
   double m_c2invRange[256]; // 1/range
 
   int  load_and_prepare(const uint8_t* src, int srclen, int* pInfo);
@@ -222,9 +219,8 @@ void arithmetic_decode_model_t::prepare(uint16_t c2range[256])
       }
     }
   }
-  m_c2low[maxC + 1] = VAL_RANGE;
-  for (unsigned c = maxC + 2; c < 258; ++c)
-    m_c2low[c] = VAL_RANGE+c;
+  for (unsigned c = maxC + 1; c < 257; ++c)
+    m_c2low[c] = VAL_RANGE;
   for (; invI < RANGE2C_SZ+1; ++invI) {
     m_range2c[invI] = maxC;
   }
@@ -264,12 +260,12 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
   src    += 6;
   srclen -= 6;
   double range    = 1.0;
-  double invRange = (VAL_RANGE*VAL_RATIO_ADJ);
+  double invRange = (VAL_RANGE);
   for (int i = 0; ; ) {
 
     if ((i & 31)==0) {
       // invRange = 1.0/range;
-      invRange *= 2.0-range*invRange*(1.0/VAL_RATIO_ADJ/VAL_RANGE);
+      invRange *= 2.0-range*invRange*(1.0/VAL_RANGE);
     }
 
     if (val >= range) return -12;
@@ -278,20 +274,17 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     // That's the case of illegal code stream.
     // The case is extremely unlikely, but not impossible.
 
-    unsigned c = val2c(val*invRange); // can be off by +1
+    unsigned c = val2c(val*invRange); // can be off by -1
 
-//    if (i < 20)
-      // {
     // fesetround(FE_TONEAREST);
     // printf("[%2d]=%3d: val %.20e range %.20e. [%5d..%5d) %23.17f  %23.17f %23.17f %.20e\n"
     // , i, c, val, range, m_c2low[c+0], m_c2low[c+1]
     // , val*invRange
     // , val/range*VAL_RANGE
-    // , val/range*VAL_RANGE*VAL_RATIO_ADJ
+    // , val/range*VAL_RANGE
     // , range * invRange
     // );
     // fesetround(FE_TOWARDZERO);
-    // }
 
     //
     // Keep decoder in sync with encoder
@@ -303,19 +296,30 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
     range += 1.0;
     range -= 1.0;
     int64_t cLo = m_c2low[c+0];
+    int64_t cHi = m_c2low[c+1];
     double valDecr = range * cLo;
-    if (_UNLIKELY(valDecr > val)) {
-      cLo = m_c2low[c-1];
-      --c;
-      valDecr = range * cLo;
-      if (valDecr > val) {
+    val   -= valDecr;
+    double nxtRange = range * (cHi-cLo);
+    if (_UNLIKELY(val >= nxtRange)) {
+      #ifdef ENABLE_PERF_COUNT
+      ++m_longLookupCount;
+      #endif
+      // fesetround(FE_TONEAREST);
+      // printf("[%2d]=%3d: val %.20e nxtRange %.20e [%5d..%5d..%5d)\n", i, c, val, nxtRange, m_c2low[c+1], m_c2low[c+2], m_c2low[c+3]);
+      // fesetround(FE_TOWARDZERO);
+      val -= nxtRange;
+      cLo = cHi;
+      do {
+        ++c;
+        cHi = m_c2low[c+1];
+      } while (cHi==cLo);
+      nxtRange = range * (cHi-cLo);
+      if (_UNLIKELY(val >= nxtRange)) {
         return -102; // should never happen
       }
     }
-    int64_t cRa = m_c2low[c+1] - cLo;
-    range *= cRa;
+    range = nxtRange;
     dst[i] = c;
-    val   -= valDecr;
 
     ++i;
     if (i == dstlen)
@@ -384,8 +388,8 @@ int arithmetic_decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen, 
       pInfo[4] = model.m_renormalizationCount;
     }
     #endif
-    // return textlen;
-    return textlen <= 0 ? textlen : dstlen;
+    return textlen;
+    // return textlen <= 0 ? textlen : dstlen;
   }
   fesetround(rdir);
   return modellen;
