@@ -27,6 +27,7 @@ int load_ranges(uint16_t* ranges, const uint8_t* src, int srclen, int* pInfo)
     rem -= hist[i];
   }
   if (rem < 0) return -2; // inconsistent histogram table
+  if (hist[0]==maxC) return -2; // inconsistent histogram table
   if (rem > 0)
     hist[8] = rem;
 
