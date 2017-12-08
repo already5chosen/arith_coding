@@ -62,7 +62,7 @@ int CArithmeticDecoder::put(uint64_t cScale, uint64_t cLo, uint64_t cRange)
     for (int k = 0; k < 3; ++k) {
       threeOctets <<= 8;
       if (m_srclen > 0)
-        value |= *m_src++;
+        threeOctets |= *m_src++;
       --m_srclen;
     }
     value = (value << 24) + threeOctets;
@@ -108,9 +108,8 @@ int load_ranges(uint16_t* ranges, CArithmeticDecoder* pDec)
     unsigned ix = pDec->get(256-c);
     int log2_i;
     unsigned lo = 0;
-    for (log2_i = 0; lo <= ix; ++log2_i)
+    for (log2_i = 0; lo+hist[log2_i] <= ix; ++log2_i)
       lo += hist[log2_i];
-    lo -= hist[log2_i];
     err = pDec->put(256-c, lo, hist[log2_i]);
     if (err)
       return err;
@@ -119,7 +118,7 @@ int load_ranges(uint16_t* ranges, CArithmeticDecoder* pDec)
     unsigned range = 0;
     if (log2_i != 0) {
       ++nRanges;
-      unsigned range = uint32_t(1) << (log2_i-1);
+      range = uint32_t(1) << (log2_i-1);
       if (log2_i > 1) {
         // extract offset within range
         unsigned offset = pDec->get(range);

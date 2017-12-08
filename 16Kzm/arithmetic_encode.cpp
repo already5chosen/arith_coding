@@ -136,15 +136,19 @@ static int store_model(uint8_t* dst, const uint16_t c2low[256], unsigned maxC, d
     }
   }
   hist[0] = 256 - nRanges; // # of zero ranges
+  // for (int i = 0; i< RANGE_BITS+1; ++i)
+    // printf("hist[%2d]=%d\n", i, hist[i]);
+  // for (int i = 0; i< 256; ++i)
+    // printf("range[%3d]=%5d\n", i, c2range[i]);
 
   uint8_t* p = dst;
 
   // store histogram of log2
   p = pEnc->put(255, hist[0], 1, p); // hist[0] in range [0..254]
-  unsigned encScale = 256 - hist[0];
-  for (int i = 1; i < RANGE_BITS && encScale > 0; ++i) {
-    p = pEnc->put(encScale+1, hist[i], 1, p);
-    encScale -= hist[i];
+  unsigned rem = 256 - hist[0];
+  for (int i = 1; i < RANGE_BITS && rem > 0; ++i) {
+    p = pEnc->put(rem+1, hist[i], 1, p);
+    rem -= hist[i];
   }
 
   // store c2range
@@ -194,7 +198,7 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
   const uint64_t MSB_MSK   = uint64_t(255) << 56;
   const uint64_t MIN_RANGE = uint64_t(1) << (33-RANGE_BITS);
   uint64_t lo     = pEnc->m_lo << 1;              // scaled by 2**64
-  uint64_t range  = pEnc->m_lo >> (RANGE_BITS-1); // scaled by 2**50
+  uint64_t range  = pEnc->m_range >> (RANGE_BITS-1); // scaled by 2**50
   uint8_t* dst0   = dst;
   uint64_t prevLo = lo;
   for (unsigned i = 0; i < srclen; ++i) {
