@@ -10,137 +10,141 @@
 static const int RANGE_BITS = 14;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 
+class CArithmeticDecoder {
+public:
+  uint64_t get(uint64_t cScale) const {
+    return (m_val >> 1)/(m_range/cScale);
+  }
+  void init(const uint8_t* src, int srclen);
+  int put(uint64_t cScale, uint64_t cLo, uint64_t cRange); // return 0 on success, negative number on error
+  uint64_t       m_val;   // scaled by 2**64
+  uint64_t       m_range; // scaled by 2**63
+  const uint8_t* m_src;
+  int            m_srclen;
+};
+
+void CArithmeticDecoder::init(const uint8_t* src, int srclen)
+{
+  uint64_t value = 0; // scaled by 2**64
+  for (int k = 0; k < 8; ++k) {
+    value <<= 8;
+    if (srclen > 0)
+      value |= *src++;
+    --srclen;
+  }
+  m_val    = value;
+  m_range  = uint64_t(1) << 63;
+  m_src    = src;
+  m_srclen = srclen;
+}
+
+// return 0 on success,
+// return negative number on error
+int CArithmeticDecoder::put(uint64_t cScale, uint64_t cLo, uint64_t cRange)
+{
+  const uint64_t MIN_RANGE = uint64_t(1) << (33-1);
+  uint64_t value = m_val;      // scaled by 2**64
+  uint64_t range = m_range;    // scaled by 2**63
+  if ((value>>1) >= range)
+    return -13;
+  // That is an input error, rather than internal error of decoder.
+  // Due to way that encoder works, not any bit stream is possible as its output
+  // That's the case of illegal code stream.
+  // The case is extremely unlikely, but not impossible.
+
+  // keep decoder in sync with encoder
+  range /= cScale;
+  value -= range * cLo * 2;
+  range *= cRange;
+
+  if (range <= MIN_RANGE) {
+    uint32_t threeOctets = 0;
+    for (int k = 0; k < 3; ++k) {
+      threeOctets <<= 8;
+      if (m_srclen > 0)
+        value |= *m_src++;
+      --m_srclen;
+    }
+    value = (value << 24) + threeOctets;
+    range <<= 24;
+    if (m_srclen < -7)
+      return -14;
+  }
+  m_val   = value;
+  m_range = range;
+  return 0;
+}
 
 // load_ranges
 // return  value:
-//   on success the # of processed source octets,
+//   on success 0
 //   on parsing error negative error code
 static
-int load_ranges(uint16_t* ranges, const uint8_t* src, int srclen, int* pInfo)
+int load_ranges(uint16_t* ranges, CArithmeticDecoder* pDec)
 {
-  if (srclen == 0) return -1;
-  int maxC = src[0];
-  int srcI = 1;
-  const int HIST_LEN = (RANGE_BITS+1)/2 + 1;
-  int hist[HIST_LEN] = {0};
-  int rem = maxC;
-  for (int i = 0; i < HIST_LEN-1 && rem > 0; ++i) {
-    if (srcI == srclen) return -1;
-    hist[i] = src[srcI++];
+  // load histogram of log2
+  unsigned hist[RANGE_BITS+1] = {0};
+  hist[0] = pDec->get(255); // hist[0] in range [0..254]
+  int err = pDec->put(255, hist[0], 1);
+  if (err)
+    return err;
+  unsigned rem = 256 - hist[0];
+  for (int i = 1; i < RANGE_BITS && rem > 0; ++i) {
+    hist[i] = pDec->get(rem+1); // hist[i] in range [0..rem]
+    err = pDec->put(rem+1, hist[i], 1);
+    if (err)
+      return err;
     rem -= hist[i];
   }
-  if (rem < 0) return -2; // inconsistent histogram table
   if (rem > 0)
-    hist[HIST_LEN-1] = rem;
+    hist[RANGE_BITS] = rem;
 
-  // arithmetic decoder
-  const uint64_t MSK31_0  = (uint64_t(1) << 32)-(uint64_t(1) << 0);
-  const uint64_t MSK39_0  = (uint64_t(1) << 40)-(uint64_t(1) << 0);
-  const uint64_t MSK47_40 = (uint64_t(1) << 48)-(uint64_t(1) << 32);
-  uint64_t lo    = 0;                  // 48 bits
-  uint64_t range = uint64_t(-1) >> 16; // in fact, range-1
+  // load c2range
+  unsigned sum = 0;
+  int nRanges = 0; // count non-zero ranges
+  unsigned maxC = 255;
+  for (unsigned c = 0; sum < VAL_RANGE && c < 255; ++c) {
+    // extract exp.range
+    unsigned ix = pDec->get(256-c);
+    int log2_i;
+    unsigned lo = 0;
+    for (log2_i = 0; lo <= ix; ++log2_i)
+      lo += hist[log2_i];
+    lo -= hist[log2_i];
+    err = pDec->put(256-c, lo, hist[log2_i]);
+    if (err)
+      return err;
+    hist[log2_i] -= 1; // update histogram
 
-  uint64_t value = 0;  // 40 bits
-  for (int i = 0; i < 6; ++i, ++srcI) {
-    uint8_t srcO = srcI < srclen ? src[srcI] : 0;
-    value = (value << 8) | srcO;
+    unsigned range = 0;
+    if (log2_i != 0) {
+      ++nRanges;
+      unsigned range = uint32_t(1) << (log2_i-1);
+      if (log2_i > 1) {
+        // extract offset within range
+        unsigned offset = pDec->get(range);
+        err = pDec->put(range, offset, 1);
+        if (err)
+          return err;
+        range += offset;
+      }
+      sum += range;
+    }
+    ranges[c] = range;
+    maxC = c;
   }
 
-  uint32_t sum    = 0;
-  int ix = 0;
-  int phase0 = 1;
-  for (int c = 0; c < maxC; c += phase0) {
-    // prevent range from becoming too small
-    while (range < (uint64_t(1) << 28)) {
-      // squeeze out all ones in bits[39..32]
-      lo = (lo & MSK47_40) | ((lo & MSK31_0) << 8);
-      range = (range << 8) | 255;
-      value = (value & MSK47_40) | ((value & MSK31_0) << 8);
-      value |= (srcI < srclen) ? src[srcI] : 0;
-      ++srcI;
-      if (value < lo || value > lo + range) return -201; // should not happen
-    }
-
-    uint64_t deltaV = value - lo;
-    if (phase0) {
-      // printf("%3u lo=%010llx ra=%010llx va=%010llx\n", c, lo, range, value); fflush(stdout);
-      // course search
-      uint32_t cnt = 0;
-      for (ix = 0; deltaV*(maxC-c) >= (cnt+hist[ix])*(range+1) ; ++ix)
-        cnt += hist[ix];
-
-      // insert code of ix
-      uint32_t cnt1 = hist[ix];
-      hist[ix] -= 1;
-
-      uint32_t l_num = cnt;  // up to 255
-      uint32_t r_num = cnt1; // up to 255
-      uint32_t den = (maxC-c); // up to 255
-
-      lo   += ((range+1) * l_num + den - 1)/den; // ceil
-      range = ((range+1) * r_num)/den - 1;       // floor
-
+  if (sum < VAL_RANGE) {
+    ranges[255] = VAL_RANGE - sum; // ranges[255] implied
+    ++nRanges;
+  } else if (sum == VAL_RANGE) {
+    for (unsigned c = maxC+1; c < 256; ++c)
       ranges[c] = 0;
-      if (ix != 0)
-        phase0 = 0; // stage look up for specific value within hist[ix] range
-    } else {
-      // fine search
-      int lshift = (ix-1)*2;
-      uint32_t val0   = 1u << lshift; // up to 2^12
-      uint32_t valDen = 3u << lshift; // up to 2^14-2^12
-
-      uint32_t valNum = (deltaV*valDen)/(range+1); // floor
-      // insert code of specific value within hist range
-      lo   += ((range+1) * valNum + valDen - 1)/valDen; // ceil
-      range = (range+1)/valDen - 1;                     // floor
-      phase0 = 1;
-
-      uint32_t val = val0 + valNum;
-      ranges[c] = val;
-      sum += val;
-    }
-
-    uint64_t hi = lo + range;
-    uint64_t dbits = lo ^ hi;
-    while ((dbits >> 40)==0) {
-      // lo and hi have 8 common MS bits
-      lo    = (lo & MSK39_0) << 8;
-      range = (range << 8) | 255;
-      value = (value & MSK39_0) << 8;
-      value |= (srcI < srclen) ? src[srcI] : 0;
-      ++srcI;
-      if (srcI > srclen+5) return -3;
-      if (value < lo || value > lo + range) return -202; // should not happen
-      dbits <<= 8;
-    }
-  }
-
-  srcI -= (6-1);
-  // Imitate encoder's logic for last octets in order to find out
-  // an exact length of encoded stream.
-  uint64_t lastOctet = ((lo + range) >> 40)-1;
-  while (lastOctet == (lo>>40)) {
-    lastOctet = 255;
-    ++srcI;
-    lo = (lo & MSK39_0) << 8;
-  }
-  if (srcI > srclen) return -4;
-
-  if (sum >= VAL_RANGE)
+  } else { // sum > VAL_RANGE
     return -5; // parsing error
+  }
 
-  ranges[maxC] = VAL_RANGE - sum;
-  for (unsigned c = maxC+1; c < 256; ++c)
-    ranges[c] = 0;
-
-  // for (int c = 0; c <= maxC; ++c)
-    // printf("%3u: %04x\n", c, ranges[c]);
-  // printf("len=%d, sum=%04x\n", srcI, sum);
-
-  if (pInfo)
-    pInfo[0] = srcI*8;
-
-  return srcI; // success
+  return 0; // success
 }
 
 static inline uint64_t umulh(uint64_t a, uint64_t b) {
@@ -158,8 +162,8 @@ struct arithmetic_decode_model_t {
   uint16_t m_c2low[257];
   uint32_t m_c2invRange[256]; // floor(2^31/range)
 
-  int  load_and_prepare(const uint8_t* src, int srclen, int* pInfo);
-  int  decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen);
+  int  load_and_prepare(CArithmeticDecoder* pDec);
+  int  decode(uint8_t* dst, int dstlen, CArithmeticDecoder* pDec);
 private:
   static const int RANGE2C_NBITS = 9;
   static const int RANGE2C_SZ = 1 << RANGE2C_NBITS;
@@ -196,14 +200,14 @@ private:
 };
 
 
-int arithmetic_decode_model_t::load_and_prepare(const uint8_t* src, int srclen, int* pInfo)
+int arithmetic_decode_model_t::load_and_prepare(CArithmeticDecoder* pDec)
 {
   #ifdef ENABLE_PERF_COUNT
   m_extLookupCount = 0;
   m_longLookupCount = 0;
   m_renormalizationCount = 0;
   #endif
-  int ret = load_ranges(m_c2low, src, srclen, pInfo);
+  int ret = load_ranges(m_c2low, pDec);
   if (ret >= 0)
     prepare();
   return ret;
@@ -236,28 +240,24 @@ void arithmetic_decode_model_t::prepare()
   m_maxC = maxC;
 }
 
-int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen)
+int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, CArithmeticDecoder* pDec)
 {
   const uint64_t MIN_RANGE = uint64_t(1) << (33-RANGE_BITS);
+  const double TWO_POW83  = double(int64_t(1) << 40) * (int64_t(1) << 43);
 
-  if (srclen < 2)
-    return -11;
+  const uint8_t* src = pDec->m_src;
+  int srclen = pDec->m_srclen;
 
   uint8_t tmpbuf[16] = {0};
   bool useTmpbuf = false;
-  if (srclen < 8) {
-    memcpy(tmpbuf, src, srclen);
+  if (srclen <= 0) {
     src = tmpbuf;
     useTmpbuf = true;
   }
 
-  uint64_t value = 0; // scaled by 2**64
-  for (int k = 0; k < 8; ++k)
-    value = (value << 8) | src[k];
-  src    += 8;
-  srclen -= 8;
-  uint64_t range = uint64_t(1) << (64-RANGE_BITS); // scaled by 2**50.  Maintained in [2**19+1..2*50]
-  uint64_t invRange = uint64_t(1) << 33; // approximation of floor(2**83/range). Maintained in [2**33..2*64)
+  uint64_t value = pDec->m_val;                     // scaled by 2**64
+  uint64_t range = pDec->m_range >> (RANGE_BITS-1); // scaled by 2**50.  Maintained in [2**19+1..2*50]
+  uint64_t invRange = int64_t(TWO_POW83/range);     // approximation of floor(2**83/range). Maintained in [2**33..2*64)
 
   // uint64_t mxProd = 0, mnProd = uint64_t(-1);
   for (int i = 0; ; ) {
@@ -351,12 +351,27 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, const uint8_t* s
 
 int arithmetic_decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen, int* pInfo)
 {
+  if (pInfo) {
+    pInfo[0] = 0;
+    pInfo[1] = 0;
+    pInfo[2] = 0;
+    pInfo[3] = 0;
+    pInfo[4] = 0;
+  }
+  if (srclen < 1)
+    return -1;
+
+  CArithmeticDecoder dec;
+  dec.init(src, srclen);
   arithmetic_decode_model_t model;
-  int modellen = model.load_and_prepare(&src[0], srclen, pInfo);
-  if (modellen >= 0) {
-    if (pInfo)
-      pInfo[1] = srclen-modellen;
-    int textlen = model.decode(dst, dstlen, &src[modellen], srclen-modellen);
+  int err = model.load_and_prepare(&dec);
+  if (err >= 0) {
+    int modellen = srclen - dec.m_srclen;
+    if (pInfo) {
+      pInfo[0] = modellen*8;
+      pInfo[1] = dec.m_srclen;
+    }
+    int textlen = model.decode(dst, dstlen, &dec);
     #ifdef ENABLE_PERF_COUNT
     if (pInfo) {
       pInfo[2] = model.m_extLookupCount;
@@ -366,6 +381,6 @@ int arithmetic_decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen, 
     #endif
     return textlen;
   }
-  return modellen;
+  return err;
 }
 
