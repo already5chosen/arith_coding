@@ -11,7 +11,7 @@ static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 // return value:
 // -1  - source consists of repetition of the same character
 // >=0 - maxC = the character with the biggest numeric value that appears in the source at least once
-static int prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], double* pQuantizedEntropy, double* pInfo)
+static int prepare1(const uint8_t* src, unsigned srclen, uint16_t c2low[257], double* pQuantizedEntropy, double* pInfo)
 {
   // calculated statistics of appearance
   unsigned stat[256]={0};
@@ -90,7 +90,11 @@ static int prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], dou
   *pQuantizedEntropy = entropy;
   if (pInfo)
     pInfo[3] = entropy;
+  return maxC;
+}
 
+static void prepare2(uint16_t c2low[257], unsigned maxC)
+{
   // c2low -> cumulative sums of ranges
   unsigned lo = 0;
   for (unsigned c = 0; c <= maxC; ++c) {
@@ -100,7 +104,6 @@ static int prepare(const uint8_t* src, unsigned srclen, uint16_t c2low[257], dou
     lo += range;
   }
   c2low[maxC+1] = VAL_RANGE;
-  return maxC;
 }
 
 class CArithmeticEncoder {
@@ -121,15 +124,12 @@ static int inline floor_log2(unsigned x)
 }
 
 // return the number of stored octets
-static int store_model(uint8_t* dst, const uint16_t c2low[256], unsigned maxC, double* pNbits, CArithmeticEncoder* pEnc)
+static int store_model(uint8_t* dst, const uint16_t c2range[256], unsigned maxC, double* pNbits, CArithmeticEncoder* pEnc)
 {
-  uint16_t c2range[256];
-  // translate cumulative sums of ranges to individual ranges
   int nRanges = 0;
   unsigned hist[RANGE_BITS+1] = {0};
   for (unsigned c = 0; c <= maxC; ++c) {
-    uint32_t range = c2low[c+1] - c2low[c];
-    c2range[c] = range;
+    uint32_t range = c2range[c];
     if (range > 0) {
       ++nRanges;
       hist[1+floor_log2(range)] += 1;
@@ -286,7 +286,7 @@ int arithmetic_encode(std::vector<uint8_t>* dst, const uint8_t* src, int srclen,
 {
   uint16_t c2low[257];
   double quantizedEntropy;
-  int maxC = prepare(src, srclen, c2low, &quantizedEntropy, pInfo);
+  int maxC = prepare1(src, srclen, c2low, &quantizedEntropy, pInfo);
 
   if (maxC == -1)
     return -1; // source consists of repetition of the same character
@@ -306,6 +306,7 @@ int arithmetic_encode(std::vector<uint8_t>* dst, const uint8_t* src, int srclen,
 
   // printf("ml=%u\n", modellen);
   dst->resize(sz0 + lenEst + 64);
+  prepare2(c2low, maxC);
   int dstlen = encode(&dst->at(sz0+modellen), src, srclen, c2low, &enc);
 
   if (pInfo)
