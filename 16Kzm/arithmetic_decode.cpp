@@ -163,15 +163,7 @@ struct arithmetic_decode_model_t {
   uint16_t m_c2low[257];
   uint32_t m_c2invRange[256]; // floor(2^31/range)
 
-  int  load_and_prepare(CArithmeticDecoder* pDec);
-  int  decode(uint8_t* dst, int dstlen, CArithmeticDecoder* pDec);
-private:
-  static const int RANGE2C_NBITS = 9;
-  static const int RANGE2C_SZ = 1 << RANGE2C_NBITS;
-  uint8_t  m_range2c[RANGE2C_SZ+1];
-  unsigned m_maxC;
-
-  void prepare();
+  int load_and_prepare(CArithmeticDecoder* pDec);
   int val2c_estimate(uint64_t value, uint64_t invRange) {
     uint64_t loEst33b = umulh(value,invRange);
     unsigned ri = loEst33b>>(33-RANGE2C_NBITS);
@@ -198,6 +190,13 @@ private:
     return ret;
     #endif
   }
+private:
+  static const int RANGE2C_NBITS = 9;
+  static const int RANGE2C_SZ = 1 << RANGE2C_NBITS;
+  uint8_t  m_range2c[RANGE2C_SZ+1];
+  unsigned m_maxC;
+
+  void prepare();
 };
 
 
@@ -241,7 +240,7 @@ void arithmetic_decode_model_t::prepare()
   m_maxC = maxC;
 }
 
-int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, CArithmeticDecoder* pDec)
+int decode(arithmetic_decode_model_t* pModel, uint8_t* dst, int dstlen, CArithmeticDecoder* pDec)
 {
   const uint64_t MIN_RANGE = uint64_t(1) << (33-RANGE_BITS);
   const double TWO_POW83  = double(int64_t(1) << 40) * (int64_t(1) << 43);
@@ -282,10 +281,10 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, CArithmeticDecod
     // That's the case of illegal code stream.
     // The case is extremely unlikely, but not impossible.
 
-    unsigned c = val2c_estimate(value, invRange); // can be off by -1, much less likely by -2
+    unsigned c = pModel->val2c_estimate(value, invRange); // can be off by -1, much less likely by -2
     // keep decoder in sync with encoder
-    uint64_t cLo = m_c2low[c+0];
-    uint64_t cHi = m_c2low[c+1];
+    uint64_t cLo = pModel->m_c2low[c+0];
+    uint64_t cHi = pModel->m_c2low[c+1];
     value -= range * cLo;
     uint64_t nxtRange = range * (cHi-cLo);
     // at this point range is scaled by 2**64 - the same scale as value
@@ -295,7 +294,7 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, CArithmeticDecod
       #endif
       value -= nxtRange;
       cLo = cHi;
-      cHi = m_c2low[c+2];
+      cHi = pModel->m_c2low[c+2];
       nxtRange = range * (cHi-cLo);
       ++c;
     }
@@ -336,7 +335,7 @@ int arithmetic_decode_model_t::decode(uint8_t* dst, int dstlen, CArithmeticDecod
     range = nxtRange;
 
     // update invRange
-    invRange = umulh(invRange, uint64_t(m_c2invRange[c]) << (63-31)) << (RANGE_BITS+1);
+    invRange = umulh(invRange, uint64_t(pModel->m_c2invRange[c]) << (63-31)) << (RANGE_BITS+1);
 
     if ((i & 15)==0) {
       // do one NR iteration to increase precision of invRange and assure that invRange*range <= 2**83
@@ -372,7 +371,7 @@ int arithmetic_decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen, 
       pInfo[0] = modellen*8;
       pInfo[1] = dec.m_srclen;
     }
-    int textlen = model.decode(dst, dstlen, &dec);
+    int textlen = decode(&model, dst, dstlen, &dec);
     #ifdef ENABLE_PERF_COUNT
     if (pInfo) {
       pInfo[2] = model.m_extLookupCount;
