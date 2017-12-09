@@ -1,6 +1,6 @@
 #include <cstdint>
 #include <cstring>
-// #include <cstdio>
+#include <cstdio>
 // #include <cmath>
 // #include <cctype>
 
@@ -105,9 +105,9 @@ int load_ranges(uint16_t* ranges, CArithmeticDecoder* pDec)
   unsigned sum = 0;
   int nRanges = 0; // count non-zero ranges
   unsigned maxC = 255;
-  for (unsigned c = 0; sum < VAL_RANGE && c < 255; ++c) {
+  for (unsigned c = 0; sum < VAL_RANGE && c < 256; ++c) {
     // extract exp.range
-    unsigned ix = pDec->get(256-c);
+    unsigned ix = pDec->get(256);
     int log2_i;
     unsigned lo = 0;
     for (log2_i = 0; lo+hist[log2_i] <= ix; ++log2_i)
@@ -115,7 +115,6 @@ int load_ranges(uint16_t* ranges, CArithmeticDecoder* pDec)
     err = pDec->put(lo, hist[log2_i]);
     if (err)
       return err;
-    hist[log2_i] -= 1; // update histogram
 
     unsigned range = 0;
     if (log2_i != 0) {
@@ -135,10 +134,11 @@ int load_ranges(uint16_t* ranges, CArithmeticDecoder* pDec)
     maxC = c;
   }
 
-  if (sum < VAL_RANGE) {
-    ranges[255] = VAL_RANGE - sum; // ranges[255] implied
-    ++nRanges;
-  } else if (sum == VAL_RANGE) {
+  // if (sum < VAL_RANGE) {
+    // ranges[255] = VAL_RANGE - sum; // ranges[255] implied
+    // ++nRanges;
+  // } else
+  if (sum == VAL_RANGE) {
     for (unsigned c = maxC+1; c < 256; ++c)
       ranges[c] = 0;
   } else { // sum > VAL_RANGE

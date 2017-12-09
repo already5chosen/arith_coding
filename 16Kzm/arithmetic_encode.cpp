@@ -152,14 +152,13 @@ static int store_model(uint8_t* dst, const uint16_t c2range[256], unsigned maxC,
   }
 
   // store c2range
-  for (unsigned c = 0; c <= maxC && c < 255; ++c) {
+  for (unsigned c = 0; c <= maxC; ++c) {
     uint32_t range = c2range[c];
     int log2_i = range == 0 ? 0 : 1+floor_log2(range);
     int lo = 0;
     for (int i = 0; i < log2_i; ++i)
       lo += hist[i];
-    p = pEnc->put(256-c, lo, hist[log2_i], p); // exp.range
-    hist[log2_i] -= 1; // update histogram
+    p = pEnc->put(256, lo, hist[log2_i], p); // exp.range
     if (log2_i > 1) {
       uint32_t expRangeSz = uint32_t(1) << (log2_i-1);
       p = pEnc->put(expRangeSz, range-expRangeSz, 1, p); // offset within range
