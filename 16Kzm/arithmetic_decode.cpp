@@ -12,11 +12,12 @@ static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 
 class CArithmeticDecoder {
 public:
-  uint64_t get(uint64_t cScale) const {
-    return (m_val >> 1)/(m_range/cScale);
+  uint64_t get(uint64_t cScale)  {
+    m_range /= cScale;
+    return (m_val >> 1)/m_range;
   }
   void init(const uint8_t* src, int srclen);
-  int put(uint64_t cScale, uint64_t cLo, uint64_t cRange); // return 0 on success, negative number on error
+  int put(uint64_t cLo, uint64_t cRange); // return 0 on success, negative number on error
   uint64_t       m_val;   // scaled by 2**64
   uint64_t       m_range; // scaled by 2**63
   const uint8_t* m_src;
@@ -40,20 +41,13 @@ void CArithmeticDecoder::init(const uint8_t* src, int srclen)
 
 // return 0 on success,
 // return negative number on error
-int CArithmeticDecoder::put(uint64_t cScale, uint64_t cLo, uint64_t cRange)
+int CArithmeticDecoder::put(uint64_t cLo, uint64_t cRange)
 {
   const uint64_t MIN_RANGE = uint64_t(1) << (33-1);
   uint64_t value = m_val;      // scaled by 2**64
   uint64_t range = m_range;    // scaled by 2**63
-  if ((value>>1) >= range)
-    return -13;
-  // That is an input error, rather than internal error of decoder.
-  // Due to way that encoder works, not any bit stream is possible as its output
-  // That's the case of illegal code stream.
-  // The case is extremely unlikely, but not impossible.
 
   // keep decoder in sync with encoder
-  range /= cScale;
   value -= range * cLo * 2;
   range *= cRange;
 
@@ -70,6 +64,14 @@ int CArithmeticDecoder::put(uint64_t cScale, uint64_t cLo, uint64_t cRange)
     if (m_srclen < -7)
       return -14;
   }
+
+  if ((value>>1) >= range)
+    return -13;
+  // That is an input error, rather than internal error of decoder.
+  // Due to way that encoder works, not any bit stream is possible as its output
+  // That's the case of illegal code stream.
+  // The case is extremely unlikely, but not impossible.
+
   m_val   = value;
   m_range = range;
   return 0;
@@ -85,13 +87,13 @@ int load_ranges(uint16_t* ranges, CArithmeticDecoder* pDec)
   // load histogram of log2
   unsigned hist[RANGE_BITS+1] = {0};
   hist[0] = pDec->get(255); // hist[0] in range [0..254]
-  int err = pDec->put(255, hist[0], 1);
+  int err = pDec->put(hist[0], 1);
   if (err)
     return err;
   unsigned rem = 256 - hist[0];
   for (int i = 1; i < RANGE_BITS && rem > 0; ++i) {
     hist[i] = pDec->get(rem+1); // hist[i] in range [0..rem]
-    err = pDec->put(rem+1, hist[i], 1);
+    err = pDec->put(hist[i], 1);
     if (err)
       return err;
     rem -= hist[i];
@@ -110,7 +112,7 @@ int load_ranges(uint16_t* ranges, CArithmeticDecoder* pDec)
     unsigned lo = 0;
     for (log2_i = 0; lo+hist[log2_i] <= ix; ++log2_i)
       lo += hist[log2_i];
-    err = pDec->put(256-c, lo, hist[log2_i]);
+    err = pDec->put(lo, hist[log2_i]);
     if (err)
       return err;
     hist[log2_i] -= 1; // update histogram
@@ -122,7 +124,7 @@ int load_ranges(uint16_t* ranges, CArithmeticDecoder* pDec)
       if (log2_i > 1) {
         // extract offset within range
         unsigned offset = pDec->get(range);
-        err = pDec->put(range, offset, 1);
+        err = pDec->put(offset, 1);
         if (err)
           return err;
         range += offset;
@@ -382,4 +384,3 @@ int arithmetic_decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen, 
   }
   return err;
 }
-
