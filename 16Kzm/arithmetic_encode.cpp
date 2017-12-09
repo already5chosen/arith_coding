@@ -128,14 +128,17 @@ static int store_model(uint8_t* dst, const uint16_t c2range[256], unsigned maxC,
 {
   int nRanges = 0;
   unsigned hist[RANGE_BITS+1] = {0};
-  for (unsigned c = 0; c <= maxC; ++c) {
+  for (unsigned c = 0; c < maxC; ++c) {
     uint32_t range = c2range[c];
     if (range > 0) {
       ++nRanges;
       hist[1+floor_log2(range)] += 1;
     }
   }
-  hist[0] = 256 - nRanges; // # of zero ranges
+  // No need to store a last range.
+  // Decoder will calculated is as VAL_RANGE-sum of previous ranges
+  hist[0] = maxC - nRanges; // # of zero ranges before maxC
+
   // for (int i = 0; i< RANGE_BITS+1; ++i)
     // printf("hist[%2d]=%d\n", i, hist[i]);
   // for (int i = 0; i< 256; ++i)
@@ -143,22 +146,23 @@ static int store_model(uint8_t* dst, const uint16_t c2range[256], unsigned maxC,
 
   uint8_t* p = dst;
 
+  // store maxC
+  p = pEnc->put(256, maxC, 1, p);
   // store histogram of log2
-  p = pEnc->put(255, hist[0], 1, p); // hist[0] in range [0..254]
-  unsigned rem = 256 - hist[0];
-  for (int i = 1; i < RANGE_BITS && rem > 0; ++i) {
+  unsigned rem = maxC;
+  for (int i = 0; i < RANGE_BITS && rem > 0; ++i) {
     p = pEnc->put(rem+1, hist[i], 1, p);
     rem -= hist[i];
   }
 
   // store c2range
-  for (unsigned c = 0; c <= maxC; ++c) {
+  for (unsigned c = 0; c < maxC; ++c) {
     uint32_t range = c2range[c];
     int log2_i = range == 0 ? 0 : 1+floor_log2(range);
     int lo = 0;
     for (int i = 0; i < log2_i; ++i)
       lo += hist[i];
-    p = pEnc->put(256, lo, hist[log2_i], p); // exp.range
+    p = pEnc->put(maxC, lo, hist[log2_i], p); // exp.range
     if (log2_i > 1) {
       uint32_t expRangeSz = uint32_t(1) << (log2_i-1);
       p = pEnc->put(expRangeSz, range-expRangeSz, 1, p); // offset within range

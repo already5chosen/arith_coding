@@ -84,14 +84,16 @@ int CArithmeticDecoder::put(uint64_t cLo, uint64_t cRange)
 static
 int load_ranges(uint16_t* ranges, CArithmeticDecoder* pDec)
 {
-  // load histogram of log2
-  unsigned hist[RANGE_BITS+1] = {0};
-  hist[0] = pDec->get(255); // hist[0] in range [0..254]
-  int err = pDec->put(hist[0], 1);
+  // load maxC
+  unsigned maxC = pDec->get(256);
+  int err = pDec->put(maxC, 1);
   if (err)
     return err;
-  unsigned rem = 256 - hist[0];
-  for (int i = 1; i < RANGE_BITS && rem > 0; ++i) {
+
+  // load histogram of log2
+  unsigned hist[RANGE_BITS+1] = {0};
+  unsigned rem = maxC;
+  for (int i = 0; i < RANGE_BITS && rem > 0; ++i) {
     hist[i] = pDec->get(rem+1); // hist[i] in range [0..rem]
     err = pDec->put(hist[i], 1);
     if (err)
@@ -104,10 +106,9 @@ int load_ranges(uint16_t* ranges, CArithmeticDecoder* pDec)
   // load c2range
   unsigned sum = 0;
   int nRanges = 0; // count non-zero ranges
-  unsigned maxC = 255;
-  for (unsigned c = 0; sum < VAL_RANGE && c < 256; ++c) {
+  for (unsigned c = 0; c < maxC; ++c) {
     // extract exp.range
-    unsigned ix = pDec->get(256);
+    unsigned ix = pDec->get(maxC);
     int log2_i;
     unsigned lo = 0;
     for (log2_i = 0; lo+hist[log2_i] <= ix; ++log2_i)
@@ -131,19 +132,15 @@ int load_ranges(uint16_t* ranges, CArithmeticDecoder* pDec)
       sum += range;
     }
     ranges[c] = range;
-    maxC = c;
   }
 
-  // if (sum < VAL_RANGE) {
-    // ranges[255] = VAL_RANGE - sum; // ranges[255] implied
-    // ++nRanges;
-  // } else
-  if (sum == VAL_RANGE) {
-    for (unsigned c = maxC+1; c < 256; ++c)
-      ranges[c] = 0;
-  } else { // sum > VAL_RANGE
+  if (sum >= VAL_RANGE) {
     return -5; // parsing error
   }
+
+  ranges[maxC] = VAL_RANGE - sum; // ranges[maxC] implied
+  for (unsigned c = maxC+1; c < 256; ++c)
+    ranges[c] = 0;
 
   return 0; // success
 }
