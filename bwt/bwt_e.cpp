@@ -47,7 +47,7 @@ public:
   }
 };
 
-void bwt(uint8_t* dst, const uint8_t* src, int srclen)
+int bwt(uint8_t* dst, const uint8_t* src, int srclen) // return primary index
 {
   int* idx = new int[srclen];
   for (int i = 0; i < srclen; ++i)
@@ -56,18 +56,15 @@ void bwt(uint8_t* dst, const uint8_t* src, int srclen)
   cmp.m_src = src;
   cmp.m_srclen = srclen;
   std::sort(&idx[0], &idx[srclen], cmp);
-  int first_i = 0;
+  int primary_i = 0;
   for (int i = 0; i < srclen; ++i) {
     int k = idx[i];
     if (k == 0)
       k = srclen;
     dst[i] = src[k-1];
     if (k == 1)
-      first_i = i;
+      primary_i = i;
   }
   delete [] idx;
-  dst[srclen+0] = (first_i >> 0) % 256;
-  dst[srclen+1] = (first_i >> 8) % 256;
-  dst[srclen+2] = (first_i >>16) % 256;
-
+  return primary_i;
 }

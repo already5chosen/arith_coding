@@ -43,7 +43,10 @@ int main(int argz, char** argv)
           int ressz = tilelen+3;
           dst.resize(ressz);
           uint64_t t0 = __rdtsc();
-          bwt(&dst.at(0), inptile, tilelen);
+          int primary_i = bwt(&dst.at(0), inptile, tilelen);
+          dst[tilelen+0] = (primary_i >> 0) % 256;
+          dst[tilelen+1] = (primary_i >> 8) % 256;
+          dst[tilelen+2] = (primary_i >>16) % 256;
           uint64_t t1 = __rdtsc();
           if (vFlag)
             printf("%7d chars. %8.0f clocks. %4.1f clocks/char\n"
