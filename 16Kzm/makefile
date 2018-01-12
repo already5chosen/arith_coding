@@ -1,4 +1,4 @@
-CC = g++ -O2 -Wall -DENABLE_PERF_COUNTx
+CC = clang++ -std=c++11 -O2 -Wall -DENABLE_PERF_COUNTx
 
 all: ari_encode.exe ari_decode.exe
 
