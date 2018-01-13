@@ -136,7 +136,7 @@ static int store_model(uint8_t* dst, const uint16_t c2range[256], unsigned maxC,
     }
   }
   // No need to store a last range.
-  // Decoder will calculated is as VAL_RANGE-sum of previous ranges
+  // Decoder will calculate it as VAL_RANGE-sum of previous ranges
   hist[0] = maxC - nRanges; // # of zero ranges before maxC
 
   // for (int i = 0; i< RANGE_BITS+1; ++i)
