@@ -25,6 +25,7 @@ static void tst14(const uint8_t* src, int srclen);
 static void tst15(const uint8_t* src, int srclen);
 static void tst16(const uint8_t* src, int srclen);
 static void tst17(const uint8_t* src, int srclen);
+static void tst18(const uint8_t* src, int srclen);
 int main(int argz, char** argv)
 {
   if (argz < 3) {
@@ -100,6 +101,7 @@ int main(int argz, char** argv)
             tst6(&bwtOut.at(0), tilelen);
             tst7(&bwtOut.at(0), tilelen);
             tst8(&bwtOut.at(0), tilelen);
+            tst18(&bwtOut.at(0), tilelen);
             tst9(&bwtOut.at(0), tilelen);
             tst10(&bwtOut.at(0), tilelen);
             unsigned bwtHistograms[2][260];
@@ -409,7 +411,7 @@ static void tst12(const uint8_t* src, int srclen)
   double e0 = calc_entr(h, 258)/8;
   double e1 = 0/8;
   double e2 = 0/8;
-  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtz2 plain\n", e0, e1, e2, e0+e1+e2);
+  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf2 plain\n", e0, e1, e2, e0+e1+e2);
 }
 
 static void tst13(const uint8_t* src, int srclen)
@@ -457,7 +459,7 @@ static void tst13(const uint8_t* src, int srclen)
   double e0 = calc_entr(hc, 258)/8;
   double e1 = calc_entr(hr, 256)/8;
   double e2 = double(long_cnt_bits)/8;
-  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtz2 zero rle %d\n", e0, e1, e2, e0+e1+e2, hc[256]);
+  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf2 zero rle %d\n", e0, e1, e2, e0+e1+e2, hc[256]);
 }
 
 static void tst14(const uint8_t* src, int srclen)
@@ -485,7 +487,7 @@ static void tst14(const uint8_t* src, int srclen)
   double e0 = calc_entr(h, 259)/8;
   double e1 = 0/8;
   double e2 = 0/8;
-  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtz3 plain\n", e0, e1, e2, e0+e1+e2);
+  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf3 plain\n", e0, e1, e2, e0+e1+e2);
 }
 
 static void tst15(const uint8_t* src, int srclen)
@@ -540,7 +542,7 @@ static void tst15(const uint8_t* src, int srclen)
   double e0 = calc_entr(hc, 259)/8;
   double e1 = calc_entr(hr, 256)/8;
   double e2 = double(long_cnt_bits)/8;
-  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtz3 zero rle\n", e0, e1, e2, e0+e1+e2);
+  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf3 zero rle\n", e0, e1, e2, e0+e1+e2);
 }
 
 static void tst16(const uint8_t* src, int srclen)
@@ -567,7 +569,7 @@ static void tst16(const uint8_t* src, int srclen)
   double e0 = calc_entr(h, 264)/8;
   double e1 = 0/8;
   double e2 = 0/8;
-  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtz8 plain\n", e0, e1, e2, e0+e1+e2);
+  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf8 plain\n", e0, e1, e2, e0+e1+e2);
 }
 
 static void tst17(const uint8_t* src, int srclen)
@@ -621,10 +623,10 @@ static void tst17(const uint8_t* src, int srclen)
   double e0 = calc_entr(hc, 264)/8;
   double e1 = calc_entr(hr, 256)/8;
   double e2 = double(long_cnt_bits)/8;
-  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtz8 zero rle\n", e0, e1, e2, e0+e1+e2);
+  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf8 zero rle\n", e0, e1, e2, e0+e1+e2);
 }
 
-static uint8_t* mtz(const uint8_t* src, int srclen)
+static uint8_t* mtf(const uint8_t* src, int srclen)
 {
   uint8_t t[256];
   for (int i = 0; i < 256; ++i)
@@ -647,7 +649,7 @@ static uint8_t* mtz(const uint8_t* src, int srclen)
 
 static void tst6(const uint8_t* src0, int srclen)
 {
-  uint8_t* src = mtz(src0, srclen);
+  uint8_t* src = mtf(src0, srclen);
   int h[256] = {0};
   for (int i = 0; i < srclen; ++i)
     ++h[src[i]];
@@ -655,12 +657,12 @@ static void tst6(const uint8_t* src0, int srclen)
   double e0 = calc_entr(h, 256)/8;
   double e1 = 0/8;
   double e2 = 0/8;
-  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtz plain\n", e0, e1, e2, e0+e1+e2);
+  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf plain\n", e0, e1, e2, e0+e1+e2);
 }
 
 static void tst7(const uint8_t* src0, int srclen)
 {
-  uint8_t* src = mtz(src0, srclen);
+  uint8_t* src = mtf(src0, srclen);
   int h[2][256] = {{0}};
   int long_cnt_bits = 0;
   int x1 = 0, x2 = 0, x3 = 0;
@@ -687,12 +689,12 @@ static void tst7(const uint8_t* src0, int srclen)
   double e0 = calc_entr(h[0], 256)/8;
   double e1 = calc_entr(h[1], 256)/8;
   double e2 = double(long_cnt_bits)/8;
-  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtz simple rle {%d %d %d}\n", e0, e1, e2, e0+e1+e2, x1, x2, x3);
+  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf simple rle {%d %d %d}\n", e0, e1, e2, e0+e1+e2, x1, x2, x3);
 }
 
 static void tst8(const uint8_t* src0, int srclen)
 {
-  uint8_t* src = mtz(src0, srclen);
+  uint8_t* src = mtf(src0, srclen);
 
   double mne = srclen * 2;
   for (int rlMax = 255; rlMax >= 15; rlMax -= 16) {
@@ -725,7 +727,7 @@ static void tst8(const uint8_t* src0, int srclen)
       double e2 = double(long_cnt_bits)/8;
       double ee = e0 + e1 + e2;
       if (ee < mne) {
-        printf("%11.3f + %11.3f + %8.3f = %11.3f - mtz zeros rle. rlMax = %d. Thr=%d\n", e0, e1, e2, e0+e1+e2, rlMax, rleThr);
+        printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf zeros rle. rlMax = %d. Thr=%d\n", e0, e1, e2, e0+e1+e2, rlMax, rleThr);
         mne = ee;
       }
     }
@@ -734,9 +736,39 @@ static void tst8(const uint8_t* src0, int srclen)
   delete [] src;
 }
 
+static void tst18(const uint8_t* src0, int srclen)
+{
+  uint8_t* src = mtf(src0, srclen);
+
+  int h[257] = {0};
+  for (int i = 0; i < srclen; ) {
+    int c = src[i];
+    ++i;
+    if (c == 0) {
+      int i0 = i;
+      while (src[i] == 0) ++i;
+      unsigned rl = i - i0 + 1;
+      // encode to RUNA=1/RUNB=0
+      do {
+        ++h[rl & 1];
+        rl = (rl - 1) / 2;
+      } while (rl != 0);
+    } else {
+      ++h[c+1];
+    }
+  }
+
+  double e0 = calc_entr(h, 257)/8;
+  double e1 = 0/8;
+  double e2 = 0/8;
+  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf zeros rle encoded with RUNA/RUNB\n", e0, e1, e2, e0+e1+e2);
+
+  delete [] src;
+}
+
 static void tst9(const uint8_t* src0, int srclen)
 {
-  uint8_t* src = mtz(src0, srclen);
+  uint8_t* src = mtf(src0, srclen);
   src[srclen] = 255;
 
   double mne = srclen * 2;
@@ -781,7 +813,7 @@ static void tst9(const uint8_t* src0, int srclen)
       double e2 = double(long_cnt_bits)/8;
       double ee = e0 + e1 + e2;
       if (ee < mne) {
-        printf("%11.3f + %11.3f + %8.3f = %11.3f - mtz zeros rle, others intermixed. Zero RLE Thr=%d %d\n", e0, e1, e2, e0+e1+e2, xrleThr, zrleThr);
+        printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf zeros rle, others intermixed. Zero RLE Thr=%d %d\n", e0, e1, e2, e0+e1+e2, xrleThr, zrleThr);
         mne = ee;
       }
     }
@@ -792,7 +824,7 @@ static void tst9(const uint8_t* src0, int srclen)
 
 static void tst10(const uint8_t* src0, int srclen)
 {
-  uint8_t* src = mtz(src0, srclen);
+  uint8_t* src = mtf(src0, srclen);
 
   double mne = srclen * 2;
   // int mnx = 0, mny = 0;
@@ -838,7 +870,7 @@ static void tst10(const uint8_t* src0, int srclen)
       double e1 = calc_entr(h[1], 256)/8;
       double ee = e0 + e1 + e2 + e3;
      if (ee < mne) {
-        printf("%11.3f + %11.3f + %8.3f + %11.3f = %11.3f - mtz zeros/nzeros rle. Thrs %d %d\n", e0, e1, e2, e3, e0+e1+e2+e3, xrleThr, zrleThr);
+        printf("%11.3f + %11.3f + %8.3f + %11.3f = %11.3f - mtf zeros/nzeros rle. Thrs %d %d\n", e0, e1, e2, e3, e0+e1+e2+e3, xrleThr, zrleThr);
        mne = ee;
      }
     }
@@ -850,7 +882,7 @@ static void tst10(const uint8_t* src0, int srclen)
 
 // static void tst9(const uint8_t* src0, int srclen)
 // {
-  // uint8_t* src = mtz(src0, srclen);
+  // uint8_t* src = mtf(src0, srclen);
   // int h[3][256] = {{0}};
   // for (int i = 0; i < srclen; ) {
     // int c = src[i];
@@ -867,5 +899,5 @@ static void tst10(const uint8_t* src0, int srclen)
   // double e0 = calc_entr(h[0], 256)/8;
   // double e1 = calc_entr(h[1], 256)/8;
   // double e2 = calc_entr(h[2], 256)/8;
-  // printf("%11.3f + %11.3f + %11.3f = %11.3f - mtz zeros & one rle\n", e0, e1, e2, e0+e1+e2);
+  // printf("%11.3f + %11.3f + %11.3f = %11.3f - mtf zeros & one rle\n", e0, e1, e2, e0+e1+e2);
 // }
