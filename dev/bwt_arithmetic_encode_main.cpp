@@ -26,6 +26,8 @@ static void tst15(const uint8_t* src, int srclen);
 static void tst16(const uint8_t* src, int srclen);
 static void tst17(const uint8_t* src, int srclen);
 static void tst18(const uint8_t* src, int srclen);
+static void tst19(const uint8_t* src, int srclen);
+static void tst20(const uint8_t* src, int srclen);
 int main(int argz, char** argv)
 {
   if (argz < 3) {
@@ -102,6 +104,8 @@ int main(int argz, char** argv)
             tst7(&bwtOut.at(0), tilelen);
             tst8(&bwtOut.at(0), tilelen);
             tst18(&bwtOut.at(0), tilelen);
+            tst19(&bwtOut.at(0), tilelen);
+            tst20(&bwtOut.at(0), tilelen);
             tst9(&bwtOut.at(0), tilelen);
             tst10(&bwtOut.at(0), tilelen);
             unsigned bwtHistograms[2][260];
@@ -762,6 +766,89 @@ static void tst18(const uint8_t* src0, int srclen)
   double e1 = 0/8;
   double e2 = 0/8;
   printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf zeros rle encoded with RUNA/RUNB\n", e0, e1, e2, e0+e1+e2);
+
+  delete [] src;
+}
+
+static void tst19(const uint8_t* src0, int srclen)
+{
+  uint8_t* src = mtf(src0, srclen);
+
+  int h[259] = {0};
+  for (int i = 0; i < srclen; ) {
+    int c = src[i];
+    ++i;
+    if (c == 0) {
+      int i0 = i;
+      while (src[i] == 0) ++i;
+      unsigned rl = i - i0 + 1;
+      // encode to RUNA=1/RUNB=0
+      do {
+        ++h[rl & 1];
+        rl = (rl - 1) / 2;
+      } while (rl != 0);
+    } else {
+      ++h[c+3];
+      int i0 = i;
+      while (src[i] == c) ++i;
+      unsigned rl = i - i0;
+      if (rl > 0) {
+        // encode to RUNC=3/RUND=2
+        do {
+          ++h[(rl & 1)+2];
+          rl = (rl - 1) / 2;
+        } while (rl != 0);
+      }
+    }
+  }
+
+  double e0 = calc_entr(h, 259)/8;
+  double e1 = 0/8;
+  double e2 = 0/8;
+  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf zeros rle encoded with RUNA/RUNB. Non-zero repetitions encoded with  RUNC/RUND\n", e0, e1, e2, e0+e1+e2);
+
+  delete [] src;
+}
+
+static void tst20(const uint8_t* src0, int srclen)
+{
+  uint8_t* src = mtf(src0, srclen);
+
+  int h[259] = {0};
+  for (int i = 0; i < srclen; ) {
+    int c = src[i];
+    ++i;
+    if (c == 0) {
+      int i0 = i;
+      while (src[i] == 0) ++i;
+      unsigned rl = i - i0 + 1;
+      // encode to RUNA=1/RUNB=0
+      do {
+        ++h[rl & 1];
+        rl = (rl - 1) / 2;
+      } while (rl != 0);
+    } else {
+      ++h[c+3];
+      int i0 = i;
+      while (src[i] == c) ++i;
+      unsigned rl = i - i0;
+      if (rl > 0) {
+        // encode first bit to RUNC=3/RUND=2
+        ++h[(rl & 1)+2];
+        rl = (rl - 1) / 2;
+        // encode remaining bits to RUNA=1/RUNB=0
+        while (rl != 0) {
+          ++h[rl & 1];
+          rl = (rl - 1) / 2;
+        }
+      }
+    }
+  }
+
+  double e0 = calc_entr(h, 259)/8;
+  double e1 = 0/8;
+  double e2 = 0/8;
+  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf zeros rle encoded with RUNA/RUNB. Non-zero repetitions encoded with  RUNC/RUND/RUNA/RUNB\n", e0, e1, e2, e0+e1+e2);
 
   delete [] src;
 }
