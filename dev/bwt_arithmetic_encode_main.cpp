@@ -28,6 +28,9 @@ static void tst17(const uint8_t* src, int srclen);
 static void tst18(const uint8_t* src, int srclen);
 static void tst19(const uint8_t* src, int srclen);
 static void tst20(const uint8_t* src, int srclen);
+static void tst21(const uint8_t* src, int srclen);
+static void tst22(const uint8_t* src, int srclen);
+static void tst23(const uint8_t* src, int srclen);
 int main(int argz, char** argv)
 {
   if (argz < 3) {
@@ -91,6 +94,8 @@ int main(int argz, char** argv)
             tst1(&bwtOut.at(0), tilelen);
             tst11(&bwtOut.at(0), tilelen);
             tst2(&bwtOut.at(0), tilelen);
+            tst21(&bwtOut.at(0), tilelen);
+            tst22(&bwtOut.at(0), tilelen);
             tst3(&bwtOut.at(0), tilelen);
             tst4(&bwtOut.at(0), tilelen);
             tst5(&bwtOut.at(0), tilelen);
@@ -104,6 +109,7 @@ int main(int argz, char** argv)
             tst7(&bwtOut.at(0), tilelen);
             tst8(&bwtOut.at(0), tilelen);
             tst18(&bwtOut.at(0), tilelen);
+            tst23(&bwtOut.at(0), tilelen);
             tst19(&bwtOut.at(0), tilelen);
             tst20(&bwtOut.at(0), tilelen);
             tst9(&bwtOut.at(0), tilelen);
@@ -298,6 +304,54 @@ static void tst2(const uint8_t* src, int srclen)
       mne = ee;
     }
   }
+}
+
+static void tst21(const uint8_t* src, int srclen)
+{
+  int h[257] = {0};
+  for (int i = 0; i < srclen; ) {
+    int c = src[i];
+    int i0 = i;
+    do ++i; while (src[i] == c);
+    int rl = i - i0;
+    int cnt0 = h[0];
+    int cnt1 = h[c+1];
+    do {
+      if (rl & 1)
+        ++cnt1;
+      else
+        ++cnt0;
+      rl >>= 1;
+    } while (rl != 0);
+    h[0]   = cnt0;
+    h[c+1] = cnt1;
+  }
+
+  double e0 = calc_entr(h, 257)/8;
+  double e1 = 0/8;
+  double e2 = 0/8;
+  printf("%11.3f + %11.3f + %8.3f = %11.3f - rle. Similar to RUNA/RUNB\n", e0, e1, e2, e0+e1+e2);
+}
+
+static void tst22(const uint8_t* src, int srclen)
+{
+  int h[258] = {0};
+  for (int i = 0; i < srclen; ) {
+    int c = src[i];
+    ++h[c+2];
+    int i0 = i;
+    do ++i; while (src[i] == c);
+    int rl = i - i0 - 1;
+    while (rl != 0) {
+      ++h[rl & 1];
+      rl >>= 1;
+    }
+  }
+
+  double e0 = calc_entr(h, 258)/8;
+  double e1 = 0/8;
+  double e2 = 0/8;
+  printf("%11.3f + %11.3f + %8.3f = %11.3f - rle. Intermixed RUNA/RUNB. %d %d\n", e0, e1, e2, e0+e1+e2, h[0], h[1]);
 }
 
 static void tst11(const uint8_t* src, int srclen)
@@ -766,6 +820,42 @@ static void tst18(const uint8_t* src0, int srclen)
   double e1 = 0/8;
   double e2 = 0/8;
   printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf zeros rle encoded with RUNA/RUNB\n", e0, e1, e2, e0+e1+e2);
+
+  delete [] src;
+}
+
+static void tst23(const uint8_t* src0, int srclen)
+{
+  const int CHUNK_SZ = 8192;
+  uint8_t* src = mtf(src0, srclen);
+
+  int nChunks = 0;
+  double e0 = 0;
+  for (int i = 0; i < srclen; ) {
+    int h[257] = {0};
+    for (int nsym = 0; i < srclen && nsym < CHUNK_SZ; ++nsym) {
+      int c = src[i];
+      ++i;
+      if (c == 0) {
+        int i0 = i;
+        while (src[i] == 0) ++i;
+        unsigned rl = i - i0 + 1;
+        // encode to RUNA=1/RUNB=0
+        do {
+          ++h[rl & 1];
+          rl = (rl - 1) / 2;
+        } while (rl != 0);
+      } else {
+        ++h[c+1];
+      }
+    }
+    e0 += calc_entr(h, 257)/8;
+    ++nChunks;
+  }
+
+  double e1 = 0/8;
+  double e2 = 0/8;
+  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf zeros rle encoded with RUNA/RUNB. %d 8K chunks\n", e0, e1, e2, e0+e1+e2, nChunks);
 
   delete [] src;
 }
