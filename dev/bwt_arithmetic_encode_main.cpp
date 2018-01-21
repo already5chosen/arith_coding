@@ -824,13 +824,75 @@ static void tst18(const uint8_t* src0, int srclen)
   delete [] src;
 }
 
+static const int VAL_RANGE = 1 << 14;
+static void quantize_histogram(int* q, const int* h, int len)
+{
+  // find sum and maximum of h
+  int maxH   = 0;
+  int totCnt = 0;
+  for (int i = 0; i < len; ++i) {
+    totCnt += h[i];
+    if (maxH < h[i])
+      maxH = h[i];
+  }
+
+  // 1st pass - translate characters with counts that are significantly lower than maxCnt
+  unsigned thr = maxH - maxH/8;
+  unsigned remCnt   = totCnt;
+  unsigned remRange = VAL_RANGE;
+  for (int c = 0; c < len; ++c) {
+    unsigned cnt = h[c];
+    if (cnt < thr) {
+      unsigned range = 0;
+      if (cnt != 0) {
+        // calculate range from full histogram
+        range = (uint64_t(cnt)*(VAL_RANGE*2) + totCnt)/(totCnt*2);
+        if (range == 0)
+          range = 1;
+        remCnt   -= cnt;
+        remRange -= range;
+      }
+      q[c] = range;
+    }
+  }
+  // 2nd pass - translate characters with higher counts
+  for (int c = 0; remCnt != 0; ++c) {
+    unsigned cnt = h[c];
+    if (cnt >= thr) {
+      // Calculate range from the remaining range and count
+      // It is non-ideal, but this way we distribute the worst rounding errors
+      // relatively evenly among higher ranges, where it has the smallest impact
+      unsigned range = (uint64_t(cnt)*(remRange*2) + remCnt)/(remCnt*2);
+      // (range < VAL_RANGE) is guaranteed , because we already handled the case of repetition of the same character
+      remCnt   -= cnt;
+      remRange -= range;
+      q[c] = range;
+    }
+  }
+}
+
+static double calc_quantize_entropy(const int* q, const int* h, int len)
+{
+  // calculate entropy after quantization
+  double e = 0;
+  for (int c = 0; c < 257; ++c) {
+    unsigned cnt = h[c];
+    if (cnt)
+      e -= log2(q[c]/double(VAL_RANGE))*cnt;
+  }
+  return e;
+}
+
 static void tst23(const uint8_t* src0, int srclen)
 {
   const int CHUNK_SZ = 8192;
   uint8_t* src = mtf(src0, srclen);
 
   int nChunks = 0;
+  double e00 = 0;
   double e0 = 0;
+  double e1 = 0;
+  int q0[257] = {0};
   for (int i = 0; i < srclen; ) {
     int h[257] = {0};
     for (int nsym = 0; i < srclen && nsym < CHUNK_SZ; ++nsym) {
@@ -849,13 +911,35 @@ static void tst23(const uint8_t* src0, int srclen)
         ++h[c+1];
       }
     }
-    e0 += calc_entr(h, 257)/8;
+
+    e00 += calc_entr(h, 257)/8;
+
+    int q[257];
+    quantize_histogram(q, h, 257);
+    e0 += calc_quantize_entropy(q, h, 257)/8;
+
+    // encode q[] - q0[] with code, similar to RUNA/RUNB
+    int hd[4] = {0};
+    for (int c = 0; c < 257; ++c) {
+      int dq = q[c];
+      if (q0[c] > 31 || q0[c] < -31)
+        dq -= q0[c];
+      q0[c] = q[c];
+      ++hd[dq >= 0];
+      dq = dq < 0 ? -dq : dq;
+      dq += 1;
+      while (dq != 1) {
+        ++hd[(dq&1) + 2];
+        dq >>= 1;
+      }
+    }
+    e1 += calc_entr(hd, 4)/8;
+
     ++nChunks;
   }
 
-  double e1 = 0/8;
   double e2 = 0/8;
-  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf zeros rle encoded with RUNA/RUNB. %d 8K chunks\n", e0, e1, e2, e0+e1+e2, nChunks);
+  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf zeros rle encoded with RUNA/RUNB. %d * %dB chunks  %11.3f\n", e0, e1, e2, e0+e1+e2, nChunks, CHUNK_SZ, e00);
 
   delete [] src;
 }
