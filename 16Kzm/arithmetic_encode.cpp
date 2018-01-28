@@ -8,6 +8,44 @@
 static const int RANGE_BITS = 14;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 
+static void histogram_to_range(uint16_t* c2range, unsigned maxC, const unsigned* h, unsigned srclen, unsigned maxCnt)
+{
+  // translate counts to ranges and store in c2range
+  // 1st pass - translate characters with counts that are significantly lower than maxCnt
+  unsigned thr = maxCnt - maxCnt/8;
+  unsigned remCnt   = srclen;
+  unsigned remRange = VAL_RANGE;
+  for (unsigned c = 0; c <= maxC; ++c) {
+    unsigned cnt = h[c];
+    if (cnt < thr) {
+      unsigned range = 0;
+      if (cnt != 0) {
+        // calculate range from full statistics
+        range = (uint64_t(cnt)*(VAL_RANGE*2) + srclen)/(srclen*2);
+        if (range == 0)
+          range = 1;
+        remCnt   -= cnt;
+        remRange -= range;
+      }
+      c2range[c] = range;
+    }
+  }
+  // 2nd pass - translate characters with higher counts
+  for (unsigned c = 0; remCnt != 0; ++c) {
+    unsigned cnt = h[c];
+    if (cnt >= thr) {
+      // Calculate range from the remaining range and count
+      // It is non-ideal, but this way we distribute the worst rounding errors
+      // relatively evenly among higher ranges, where it hase the smallest impact
+      unsigned range = (uint64_t(cnt)*(remRange*2) + remCnt)/(remCnt*2);
+      // (range < VAL_RANGE) is guaranteed , because we already handled the case of repetition of the same character
+      remCnt   -= cnt;
+      remRange -= range;
+      c2range[c] = range;
+    }
+  }
+}
+
 // return value:
 // -1  - source consists of repetition of the same character
 // >=0 - maxC = the character with the biggest numeric value that appears in the source at least once
@@ -45,40 +83,7 @@ static int prepare1(const uint8_t* src, unsigned srclen, uint16_t c2low[257], do
   if (maxCnt==srclen)
     return -1; // source consists of repetition of the same character
 
-  // translate counts to ranges and store in c2low
-  // 1st pass - translate characters with counts that are significantly lower than maxCnt
-  unsigned thr = maxCnt - maxCnt/8;
-  unsigned remCnt   = srclen;
-  unsigned remRange = VAL_RANGE;
-  for (unsigned c = 0; c <= maxC; ++c) {
-    unsigned cnt = stat[c];
-    if (cnt < thr) {
-      unsigned range = 0;
-      if (cnt != 0) {
-        // calculate range from full statistics
-        range = (uint64_t(cnt)*(VAL_RANGE*2) + srclen)/(srclen*2);
-        if (range == 0)
-          range = 1;
-        remCnt   -= cnt;
-        remRange -= range;
-      }
-      c2low[c] = range;
-    }
-  }
-  // 2nd pass - translate characters with higher counts
-  for (unsigned c = 0; remCnt != 0; ++c) {
-    unsigned cnt = stat[c];
-    if (cnt >= thr) {
-      // Calculate range from the remaining range and count
-      // It is non-ideal, but this way we distribute the worst rounding errors
-      // relatively evenly among higher ranges, where it hase the smallest impact
-      unsigned range = (uint64_t(cnt)*(remRange*2) + remCnt)/(remCnt*2);
-      // (range < VAL_RANGE) is guaranteed , because we already handled the case of repetition of the same character
-      remCnt   -= cnt;
-      remRange -= range;
-      c2low[c] = range;
-    }
-  }
+  histogram_to_range(c2low, maxC, stat, srclen, maxCnt);
 
   // calculate entropy after quantization
   double entropy = 0;
