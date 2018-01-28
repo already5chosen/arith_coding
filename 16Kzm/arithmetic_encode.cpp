@@ -10,7 +10,7 @@
 static const int RANGE_BITS = 14;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 
-static void histogram_to_range(uint16_t* c2range, unsigned maxC, const unsigned* h, unsigned srclen, unsigned )
+static void histogram_to_range(uint16_t* c2range, unsigned maxC, const unsigned* h, unsigned srclen)
 {
   // translate counts to ranges and store in c2range
   // 1st pass - translate characters that map to range==0 and 1
@@ -118,7 +118,7 @@ static int prepare1(const uint8_t* src, unsigned srclen, uint16_t c2low[257], do
   if (maxCnt==srclen)
     return -1; // source consists of repetition of the same character
 
-  histogram_to_range(c2low, maxC, stat, srclen, maxCnt);
+  histogram_to_range(c2low, maxC, stat, srclen);
 
   // calculate entropy after quantization
   double entropy = 0;
