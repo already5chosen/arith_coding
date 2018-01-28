@@ -1,6 +1,8 @@
 // #include <cstdio>
 #include <cmath>
+#include <cfloat>
 #include <cstring>
+#include <algorithm>
 
 #include "arithmetic_encode.h"
 
@@ -8,40 +10,73 @@
 static const int RANGE_BITS = 14;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 
-static void histogram_to_range(uint16_t* c2range, unsigned maxC, const unsigned* h, unsigned srclen, unsigned maxCnt)
+static void histogram_to_range(uint16_t* c2range, unsigned maxC, const unsigned* h, unsigned srclen, unsigned )
 {
   // translate counts to ranges and store in c2range
-  // 1st pass - translate characters with counts that are significantly lower than maxCnt
-  unsigned thr = maxCnt - maxCnt/8;
+  // 1st pass - translate characters that map to range==0 and 1
   unsigned remCnt   = srclen;
   unsigned remRange = VAL_RANGE;
   for (unsigned c = 0; c <= maxC; ++c) {
     unsigned cnt = h[c];
-    if (cnt < thr) {
-      unsigned range = 0;
-      if (cnt != 0) {
-        // calculate range from full statistics
-        range = (uint64_t(cnt)*(VAL_RANGE*2) + srclen)/(srclen*2);
+    // unsigned range = (uint64_t(cnt)*VAL_RANGE)/srclen;
+    unsigned range = 0;
+    if (cnt != 0) {
+      if (uint64_t(cnt)*VAL_RANGE < srclen) {
+        range     = 1;;
+        remCnt   -= cnt;
+        remRange -= 1;
+      }
+    }
+    c2range[c] = range;
+  }
+
+  // 2nd pass - translate remaining characters while rounding toward zero
+  int remRange2 = VAL_RANGE;
+  for (unsigned c = 0; c <= maxC; ++c) {
+    unsigned cnt = h[c];
+    if (cnt != 0) {
+      unsigned range = c2range[c];
+      if (range == 0) {
+        range = (uint64_t(cnt)*remRange)/remCnt;
         if (range == 0)
           range = 1;
-        remCnt   -= cnt;
-        remRange -= range;
+        c2range[c] = range;
       }
-      c2range[c] = range;
+      remRange2 -= range;
     }
   }
-  // 2nd pass - translate characters with higher counts
-  for (unsigned c = 0; remCnt != 0; ++c) {
-    unsigned cnt = h[c];
-    if (cnt >= thr) {
-      // Calculate range from the remaining range and count
-      // It is non-ideal, but this way we distribute the worst rounding errors
-      // relatively evenly among higher ranges, where it hase the smallest impact
-      unsigned range = (uint64_t(cnt)*(remRange*2) + remCnt)/(remCnt*2);
-      // (range < VAL_RANGE) is guaranteed , because we already handled the case of repetition of the same character
-      remCnt   -= cnt;
-      remRange -= range;
-      c2range[c] = range;
+
+  while (remRange2 != 0) {
+    // calculate effect of increment/decrement of range on entropy
+    struct delta_e_t {
+      double   d;
+      unsigned c;
+      bool operator<(const delta_e_t& a) const { return d < a.d; }
+    };
+    delta_e_t de[256];
+    int incrDecr = remRange2 > 0 ? 1 : -1;
+    for (unsigned c = 0; c <= maxC; ++c) {
+      double deltaE = DBL_MAX;
+      unsigned cnt = h[c];
+      if (cnt != 0) {
+        int range = c2range[c];
+        int nxtRange = range+incrDecr;
+        if (nxtRange != 0)
+          deltaE = log2(double(range)/nxtRange)*cnt;
+      }
+      de[c].d = deltaE;
+      de[c].c = c;
+    }
+
+    std::sort(&de[0], &de[maxC+1]);
+
+    // increment ranges that will have maximal effect on entropy
+    // or decrement ranges that will have minimal effect on entropy
+    for (unsigned c = 0; de[c].d != DBL_MAX; ++c) {
+      c2range[de[c].c] += incrDecr;
+      remRange2 -= incrDecr;
+      if (remRange2==0)
+        break;
     }
   }
 }
