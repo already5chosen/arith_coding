@@ -15,68 +15,107 @@ static void histogram_to_range(uint16_t* c2range, unsigned maxC, const unsigned*
   // translate counts to ranges and store in c2range
   // 1st pass - translate characters that map to range==0 and 1
   unsigned remCnt   = srclen;
-  unsigned remRange = VAL_RANGE;
+  unsigned remRange0 = VAL_RANGE;
   for (unsigned c = 0; c <= maxC; ++c) {
     unsigned cnt = h[c];
-    // unsigned range = (uint64_t(cnt)*VAL_RANGE)/srclen;
     unsigned range = 0;
     if (cnt != 0) {
       if (uint64_t(cnt)*VAL_RANGE < srclen) {
         range     = 1;;
         remCnt   -= cnt;
-        remRange -= 1;
+        remRange0 -= 1;
       }
     }
     c2range[c] = range;
   }
 
   // 2nd pass - translate remaining characters while rounding toward zero
-  int remRange2 = VAL_RANGE;
+  int remRange = VAL_RANGE;
+  int n1cnt = 0; // count # of character with exact range >= 1
+  int n2cnt = 0; // count # of character with exact range >= 2
   for (unsigned c = 0; c <= maxC; ++c) {
     unsigned cnt = h[c];
     if (cnt != 0) {
       unsigned range = c2range[c];
       if (range == 0) {
-        range = (uint64_t(cnt)*remRange)/remCnt;
-        if (range == 0)
-          range = 1;
+        n1cnt += 1;
+        range = 1;
+        if (uint64_t(cnt)*remRange0 >= remCnt) {
+          range = (uint64_t(cnt)*remRange0)/remCnt;
+          n2cnt += (range > 1);
+        }
         c2range[c] = range;
       }
-      remRange2 -= range;
+      remRange -= range;
     }
   }
 
-  while (remRange2 != 0) {
+  if (remRange < 0) {
+    while (-remRange >= n2cnt) {
+      // very unlikely case when all ranges >1 have to be decremented
+      n2cnt = 0;
+      remRange = VAL_RANGE;
+      for (unsigned c = 0; c <= maxC; ++c) {
+        unsigned range = c2range[c];
+        if (range > 1) {
+          c2range[c] = (range -= 1);
+          n2cnt += (range > 1);
+        }
+        remRange -= range;
+      }
+    }
+  } else if (remRange > 0) {
+    while (remRange >= n1cnt) {
+      // very unlikely case when all ranges with exact value >= 0 have to be incremented
+      remRange = VAL_RANGE;
+      for (unsigned c = 0; c <= maxC; ++c) {
+        unsigned cnt = h[c];
+        unsigned range = c2range[c];
+        if (uint64_t(cnt)*VAL_RANGE >= srclen)
+          c2range[c] = (range += 1);
+        remRange -= range;
+      }
+    }
+  }
+
+  if (remRange != 0) {
     // calculate effect of increment/decrement of range on entropy
-    struct delta_e_t {
-      double   d;
-      unsigned c;
-      bool operator<(const delta_e_t& a) const { return d < a.d; }
-    };
-    delta_e_t de[256];
-    int incrDecr = remRange2 > 0 ? 1 : -1;
+    double de[256], denz[256];
+    int incrDecr = remRange > 0 ? 1 : -1;
+    int denzLen = 0;
     for (unsigned c = 0; c <= maxC; ++c) {
-      double deltaE = DBL_MAX;
+      double deltaE = 0;
       unsigned cnt = h[c];
       if (cnt != 0) {
         int range = c2range[c];
         int nxtRange = range+incrDecr;
-        if (nxtRange != 0)
-          deltaE = log2(double(range)/nxtRange)*cnt;
+        if (nxtRange != 0) {
+          denz[denzLen] = deltaE = log2(double(range)/nxtRange)*cnt;
+          ++denzLen;
+        }
       }
-      de[c].d = deltaE;
-      de[c].c = c;
+      de[c] = deltaE;
     }
 
-    std::sort(&de[0], &de[maxC+1]);
+    int indx = remRange > 0 ? remRange - 1 : -remRange - 1;
+    std::nth_element(&denz[0], &denz[indx], &denz[denzLen]);
+    double thr = denz[indx];
 
-    // increment ranges that will have maximal effect on entropy
-    // or decrement ranges that will have minimal effect on entropy
-    for (unsigned c = 0; de[c].d != DBL_MAX; ++c) {
-      c2range[de[c].c] += incrDecr;
-      remRange2 -= incrDecr;
-      if (remRange2==0)
-        break;
+    // when remRange > 0 increment ranges that will have maximal effect on entropy
+    // when remRange > 0 decrement ranges that will have minimal effect on entropy
+    for (unsigned c = 0; c <= maxC; ++c) {
+      double deltaE = de[c];
+      if (deltaE != 0 && deltaE < thr) {
+        c2range[c] += incrDecr;
+        remRange   -= incrDecr;
+      }
+    }
+    for (unsigned c = 0; remRange != 0; ++c) {
+      double deltaE = de[c];
+      if (deltaE == thr) {
+        c2range[c] += incrDecr;
+        remRange   -= incrDecr;
+      }
     }
   }
 }
