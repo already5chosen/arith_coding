@@ -7,7 +7,7 @@
 #include "arithmetic_decode.h"
 
 
-static const int RANGE_BITS = 14;
+static const int RANGE_BITS = 10;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 
 class CArithmeticDecoder {
@@ -161,36 +161,14 @@ struct arithmetic_decode_model_t {
   uint32_t m_c2invRange[256]; // floor(2^31/range)
 
   int load_and_prepare(CArithmeticDecoder* pDec);
-  int val2c_estimate(uint64_t value, uint64_t invRange) {
+  int val2c(uint64_t value, uint64_t invRange, uint64_t range) {
     uint64_t loEst33b = umulh(value,invRange);
-    unsigned ri = loEst33b>>(33-RANGE2C_NBITS);
     unsigned lo = loEst33b>>(33-RANGE_BITS);
-    unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c] <= (lo/32)*32
-    if (__builtin_expect(m_c2low[c+1] <= lo, 0)) {
-      do {
-        #ifdef ENABLE_PERF_COUNT
-        ++m_extLookupCount;
-        #endif
-        ++c;
-      } while (m_c2low[c+1] <= lo);
-    }
-    return c;
-    #if 0
-    int ret;
-    do {
-      #ifdef ENABLE_PERF_COUNT
-      ++m_extLookupCount;
-      #endif
-      ret = c;
-      ++c;
-    } while (m_c2low[c] <= lo);
-    return ret;
-    #endif
+    lo += (value-lo*range >= range);
+    return m_lo2c[lo]; // c is the biggest character for which m_c2low[c] <= lo
   }
 private:
-  static const int RANGE2C_NBITS = 9;
-  static const int RANGE2C_SZ = 1 << RANGE2C_NBITS;
-  uint8_t  m_range2c[RANGE2C_SZ+1];
+  uint8_t  m_lo2c[VAL_RANGE+1];
   unsigned m_maxC;
 
   void prepare();
@@ -222,17 +200,17 @@ void arithmetic_decode_model_t::prepare()
     m_c2low[c] = lo;
     if (range != 0) {
       m_c2invRange[c] = (1u << 31)/range; // floor(2^31/range)
-      // build inverse index m_range2c
+      // build inverse index m_lo2c
       maxC = c;
       lo += range;
-      for (; invI <= ((lo-1) >> (RANGE_BITS-RANGE2C_NBITS)); ++invI) {
-        m_range2c[invI] = maxC;
+      for (; invI < lo; ++invI) {
+        m_lo2c[invI] = maxC;
       }
     }
   }
   m_c2low[256] = VAL_RANGE;
-  for (; invI <= RANGE2C_SZ; ++invI) {
-    m_range2c[invI] = maxC;
+  for (; invI <= VAL_RANGE; ++invI) {
+    m_lo2c[invI] = maxC;
   }
   m_maxC = maxC;
 }
@@ -240,7 +218,7 @@ void arithmetic_decode_model_t::prepare()
 int decode(arithmetic_decode_model_t* pModel, uint8_t* dst, int dstlen, CArithmeticDecoder* pDec)
 {
   const uint64_t MIN_RANGE = uint64_t(1) << (33-RANGE_BITS);
-  const double TWO_POW83  = double(int64_t(1) << 40) * (int64_t(1) << 43);
+  const double TWO_POW87   = double(int64_t(1) << 40) * (int64_t(1) << 47);
 
   const uint8_t* src = pDec->m_src;
   int srclen = pDec->m_srclen;
@@ -253,15 +231,15 @@ int decode(arithmetic_decode_model_t* pModel, uint8_t* dst, int dstlen, CArithme
   }
 
   uint64_t value = pDec->m_val;                     // scaled by 2**64
-  uint64_t range = pDec->m_range >> (RANGE_BITS-1); // scaled by 2**50.  Maintained in [2**19+1..2*50]
-  uint64_t invRange = int64_t(TWO_POW83/range);     // approximation of floor(2**83/range). Maintained in [2**33..2*64)
+  uint64_t range = pDec->m_range >> (RANGE_BITS-1); // scaled by 2**54.  Maintained in [2**23+1..2*54]
+  uint64_t invRange = uint64_t(TWO_POW87/range);     // approximation of floor(2**87/range). Maintained in [2**33..2*64)
 
   // uint64_t mxProd = 0, mnProd = uint64_t(-1);
   for (int i = 0; ; ) {
     #if 0
     uint64_t prod = umulh(invRange, range);
     if (prod > mxProd || prod < mnProd) {
-      const int64_t PROD_ONE = int64_t(1) << 19;
+      const int64_t PROD_ONE = int64_t(1) << 23;
       if (prod > mxProd) mxProd=prod;
       if (prod < mnProd) mnProd=prod;
       printf("%016llx*%016llx=%3lld [%3lld..%3lld] %d (%d)\n"
@@ -278,22 +256,23 @@ int decode(arithmetic_decode_model_t* pModel, uint8_t* dst, int dstlen, CArithme
     // That's the case of illegal code stream.
     // The case is extremely unlikely, but not impossible.
 
-    unsigned c = pModel->val2c_estimate(value, invRange); // can be off by -1, much less likely by -2
+    unsigned c = pModel->val2c(value, invRange, range); // can be off by -1
     // keep decoder in sync with encoder
     uint64_t cLo = pModel->m_c2low[c+0];
     uint64_t cHi = pModel->m_c2low[c+1];
     value -= range * cLo;
     uint64_t nxtRange = range * (cHi-cLo);
     // at this point range is scaled by 2**64 - the same scale as value
-    while (__builtin_expect(value >= nxtRange, 0)) {
+    if (__builtin_expect(value >= nxtRange, 0)) {
       #ifdef ENABLE_PERF_COUNT
-      ++m_longLookupCount;
+      ++pModel->m_longLookupCount;
       #endif
       value -= nxtRange;
       cLo = cHi;
       cHi = pModel->m_c2low[c+2];
       nxtRange = range * (cHi-cLo);
       ++c;
+      if (__builtin_expect(value >= nxtRange, 0)) return -104;
     }
     range = nxtRange;
     dst[i] = c;
@@ -304,7 +283,7 @@ int decode(arithmetic_decode_model_t* pModel, uint8_t* dst, int dstlen, CArithme
     nxtRange = range >> RANGE_BITS;
     if (nxtRange <= MIN_RANGE) {
       #ifdef ENABLE_PERF_COUNT
-      ++m_renormalizationCount;
+      ++pModel->m_renormalizationCount;
       #endif
       if (srclen < 8) {
         if (!useTmpbuf && srclen > 0) {
@@ -335,10 +314,10 @@ int decode(arithmetic_decode_model_t* pModel, uint8_t* dst, int dstlen, CArithme
     invRange = umulh(invRange, uint64_t(pModel->m_c2invRange[c]) << (63-31)) << (RANGE_BITS+1);
 
     if ((i & 15)==0) {
-      // do one NR iteration to increase precision of invRange and assure that invRange*range <= 2**83
-      const uint64_t PROD_ONE = uint64_t(1) << 19;
-      uint64_t prod = umulh(invRange, range); // scaled to 2^20
-      invRange = umulh(invRange, (PROD_ONE*2-1-prod)<<44)<<1;
+      // do one NR iteration to increase precision of invRange and assure that invRange*range <= 2**87
+      const uint64_t PROD_ONE = uint64_t(1) << 23;
+      uint64_t prod = umulh(invRange, range); // scaled to 2^23
+      invRange = umulh(invRange, (PROD_ONE*2-1-prod)<<40)<<1;
     }
   }
   return dstlen;

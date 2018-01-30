@@ -287,7 +287,7 @@ int decode(arithmetic_decode_model_t* pModel, uint8_t* dst, int dstlen, CArithme
     // at this point range is scaled by 2**64 - the same scale as value
     while (__builtin_expect(value >= nxtRange, 0)) {
       #ifdef ENABLE_PERF_COUNT
-      ++m_longLookupCount;
+      ++pModel->m_longLookupCount;
       #endif
       value -= nxtRange;
       cLo = cHi;
@@ -304,7 +304,7 @@ int decode(arithmetic_decode_model_t* pModel, uint8_t* dst, int dstlen, CArithme
     nxtRange = range >> RANGE_BITS;
     if (nxtRange <= MIN_RANGE) {
       #ifdef ENABLE_PERF_COUNT
-      ++m_renormalizationCount;
+      ++pModel->m_renormalizationCount;
       #endif
       if (srclen < 8) {
         if (!useTmpbuf && srclen > 0) {

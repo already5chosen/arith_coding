@@ -7,7 +7,7 @@
 #include "arithmetic_encode.h"
 
 
-static const int RANGE_BITS = 14;
+static const int RANGE_BITS = 10;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 
 static void histogram_to_range(uint16_t* c2range, unsigned maxC, const unsigned* h, unsigned srclen)
