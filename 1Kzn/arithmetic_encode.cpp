@@ -1,4 +1,4 @@
-// #include <cstdio>
+#include <cstdio>
 #include <cmath>
 #include <cfloat>
 #include <cstring>
@@ -10,44 +10,56 @@
 static const int RANGE_BITS = 10;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 
-static void histogram_to_range(uint16_t* c2range, unsigned maxC, const unsigned* h, unsigned srclen)
+typedef struct {
+  unsigned firstSmallI; // index of the first small range
+  unsigned smallSubrangeVal;
+  struct {
+    uint16_t val;
+    uint8_t  alias; // 0..254 = index small range group, 255 - normal range
+  } ar[257];
+} c2range_t;
+
+// return # of small ranges
+static unsigned histogram_to_range(c2range_t* c2range, unsigned maxC, const unsigned* h, unsigned srclen)
 {
   // translate counts to ranges and store in c2range
-  // 1st pass - translate characters that map to range==0 and 1
-  unsigned remCnt   = srclen;
-  unsigned remRange0 = VAL_RANGE;
+  // 1st pass - find small ranges, those that should be rounded up to reach 1
+  unsigned nSmallRanges   = 0;
+  unsigned smallRangesTot = 0;
   for (unsigned c = 0; c <= maxC; ++c) {
     unsigned cnt = h[c];
-    unsigned range = 0;
+    unsigned alias = 255;
     if (cnt != 0) {
       if (uint64_t(cnt)*VAL_RANGE < srclen) {
-        range     = 1;;
-        remCnt   -= cnt;
-        remRange0 -= 1;
+        smallRangesTot += cnt;
+        alias = nSmallRanges;
+        if (nSmallRanges == 0)
+          c2range->firstSmallI = c; // save index of the first small range
+        ++nSmallRanges;
       }
     }
-    c2range[c] = range;
+    c2range->ar[c].alias = alias;
   }
+
 
   // 2nd pass - translate remaining characters while rounding toward zero
   int remRange = VAL_RANGE;
   int n1cnt = 0; // count # of character with exact range >= 1
   int n2cnt = 0; // count # of character with exact range >= 2
   for (unsigned c = 0; c <= maxC; ++c) {
-    unsigned cnt = h[c];
+    unsigned alias = c2range->ar[c].alias;
+    unsigned cnt = alias==255 ? h[c] : (alias==0 ? smallRangesTot : 0);
+    unsigned range = 0;
     if (cnt != 0) {
-      unsigned range = c2range[c];
-      if (range == 0) {
-        n1cnt += 1;
-        range = 1;
-        if (uint64_t(cnt)*remRange0 >= remCnt) {
-          range = (uint64_t(cnt)*remRange0)/remCnt;
-          n2cnt += (range > 1);
-        }
-        c2range[c] = range;
+      n1cnt += 1;
+      range = 1;
+      if (uint64_t(cnt)*VAL_RANGE >= srclen) {
+        range = (uint64_t(cnt)*VAL_RANGE)/srclen;
+        n2cnt += (range > 1);
       }
       remRange -= range;
     }
+    c2range->ar[c].val = range;
   }
 
   if (remRange < 0) {
@@ -56,9 +68,9 @@ static void histogram_to_range(uint16_t* c2range, unsigned maxC, const unsigned*
       n2cnt = 0;
       remRange = VAL_RANGE;
       for (unsigned c = 0; c <= maxC; ++c) {
-        unsigned range = c2range[c];
+        unsigned range = c2range->ar[c].val;
         if (range > 1) {
-          c2range[c] = (range -= 1);
+          c2range->ar[c].val = (range -= 1);
           n2cnt += (range > 1);
         }
         remRange -= range;
@@ -66,13 +78,12 @@ static void histogram_to_range(uint16_t* c2range, unsigned maxC, const unsigned*
     }
   } else if (remRange > 0) {
     while (remRange >= n1cnt) {
-      // very unlikely case when all ranges with exact value >= 0 have to be incremented
+      // very unlikely case when all ranges > 0 have to be incremented
       remRange = VAL_RANGE;
       for (unsigned c = 0; c <= maxC; ++c) {
-        unsigned cnt = h[c];
-        unsigned range = c2range[c];
-        if (uint64_t(cnt)*VAL_RANGE >= srclen)
-          c2range[c] = (range += 1);
+        unsigned range = c2range->ar[c].val;
+        if (range > 0)
+          c2range->ar[c].val = (range += 1);
         remRange -= range;
       }
     }
@@ -85,9 +96,10 @@ static void histogram_to_range(uint16_t* c2range, unsigned maxC, const unsigned*
     int denzLen = 0;
     for (unsigned c = 0; c <= maxC; ++c) {
       double deltaE = 0;
-      unsigned cnt = h[c];
+      unsigned alias = c2range->ar[c].alias;
+      unsigned cnt = alias==255 ? h[c] : (alias==0 ? smallRangesTot : 0);
       if (cnt != 0) {
-        int range = c2range[c];
+        int range = c2range->ar[c].val;
         int nxtRange = range+incrDecr;
         if (nxtRange != 0) {
           denz[denzLen] = deltaE = log2(double(range)/nxtRange)*cnt;
@@ -106,24 +118,25 @@ static void histogram_to_range(uint16_t* c2range, unsigned maxC, const unsigned*
     for (unsigned c = 0; c <= maxC; ++c) {
       double deltaE = de[c];
       if (deltaE != 0 && deltaE < thr) {
-        c2range[c] += incrDecr;
+        c2range->ar[c].val += incrDecr;
         remRange   -= incrDecr;
       }
     }
     for (unsigned c = 0; remRange != 0; ++c) {
       double deltaE = de[c];
       if (deltaE == thr) {
-        c2range[c] += incrDecr;
+        c2range->ar[c].val += incrDecr;
         remRange   -= incrDecr;
       }
     }
   }
+  return nSmallRanges;
 }
 
 // return value:
 // -1  - source consists of repetition of the same character
 // >=0 - maxC = the character with the biggest numeric value that appears in the source at least once
-static int prepare1(const uint8_t* src, unsigned srclen, uint16_t c2low[257], double* pQuantizedEntropy, double* pInfo)
+static int prepare1(const uint8_t* src, unsigned srclen, c2range_t* c2low, double* pQuantizedEntropy, double* pInfo)
 {
   // calculated statistics of appearance
   unsigned stat[256]={0};
@@ -157,14 +170,23 @@ static int prepare1(const uint8_t* src, unsigned srclen, uint16_t c2low[257], do
   if (maxCnt==srclen)
     return -1; // source consists of repetition of the same character
 
-  histogram_to_range(c2low, maxC, stat, srclen);
+  unsigned nSmallRanges = histogram_to_range(c2low, maxC, stat, srclen);
+  unsigned smallSubrangeVal = 0;
+  double smallRangeNbits = 0;
+  if (nSmallRanges > 0) {
+    smallSubrangeVal = VAL_RANGE/nSmallRanges;
+    smallRangeNbits  = log2(double(VAL_RANGE)/c2low->ar[c2low->firstSmallI].val*double(VAL_RANGE)/smallSubrangeVal);
+  }
+  c2low->smallSubrangeVal = smallSubrangeVal;
 
   // calculate entropy after quantization
   double entropy = 0;
   for (unsigned c = 0; c <= maxC; ++c) {
     unsigned cnt = stat[c];
-    if (cnt)
-      entropy += log2(double(VAL_RANGE)/c2low[c])*cnt;
+    if (cnt) {
+      double nbits = c2low->ar[c].alias == 255 ? log2(double(VAL_RANGE)/c2low->ar[c].val) : smallRangeNbits;
+      entropy += nbits*cnt;
+    }
   }
   *pQuantizedEntropy = entropy;
   if (pInfo)
@@ -172,17 +194,17 @@ static int prepare1(const uint8_t* src, unsigned srclen, uint16_t c2low[257], do
   return maxC;
 }
 
-static void prepare2(uint16_t c2low[257], unsigned maxC)
+static void prepare2(c2range_t* c2low, unsigned maxC)
 {
   // c2low -> cumulative sums of ranges
   unsigned lo = 0;
   for (unsigned c = 0; c <= maxC; ++c) {
-    unsigned range = c2low[c];
+    unsigned range = c2low->ar[c].val;
     // printf("%3u: %04x\n", c, range);
-    c2low[c] = lo;
+    c2low->ar[c].val = lo;
     lo += range;
   }
-  c2low[maxC+1] = VAL_RANGE;
+  c2low->ar[maxC+1].val = VAL_RANGE;
 }
 
 class CArithmeticEncoder {
@@ -203,12 +225,12 @@ static int inline floor_log2(unsigned x)
 }
 
 // return the number of stored octets
-static int store_model(uint8_t* dst, const uint16_t c2range[256], unsigned maxC, double* pNbits, CArithmeticEncoder* pEnc)
+static int store_model(uint8_t* dst, const c2range_t* c2range, unsigned maxC, double* pNbits, CArithmeticEncoder* pEnc)
 {
   int nRanges = 0;
   unsigned hist[RANGE_BITS+1] = {0};
   for (unsigned c = 0; c < maxC; ++c) {
-    uint32_t range = c2range[c];
+    uint32_t range = c2range->ar[c].val;
     if (range > 0) {
       ++nRanges;
       hist[1+floor_log2(range)] += 1;
@@ -236,7 +258,7 @@ static int store_model(uint8_t* dst, const uint16_t c2range[256], unsigned maxC,
 
   // store c2range
   for (unsigned c = 0; c < maxC; ++c) {
-    uint32_t range = c2range[c];
+    uint32_t range = c2range->ar[c].val;
     int log2_i = range == 0 ? 0 : 1+floor_log2(range);
     int lo = 0;
     for (int i = 0; i < log2_i; ++i)
@@ -275,7 +297,7 @@ static void inc_dst(uint8_t* dst) {
   } while (val==0);
 }
 
-static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint16_t c2low[257], CArithmeticEncoder* pEnc)
+static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const c2range_t* c2low, CArithmeticEncoder* pEnc)
 {
   const uint64_t MSB_MSK   = uint64_t(255) << 56;
   const uint64_t MIN_RANGE = uint64_t(1) << (33-RANGE_BITS);
@@ -283,10 +305,25 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
   uint64_t range  = pEnc->m_range >> (RANGE_BITS-1); // scaled by 2**50
   uint8_t* dst0   = dst;
   uint64_t prevLo = lo;
-  for (unsigned i = 0; i < srclen; ++i) {
-    int c = src[i];
-    uint64_t cLo = c2low[c+0];
-    uint64_t cRa = c2low[c+1] - cLo;
+  int alias = 255;
+  for (unsigned i = 0; i < srclen; ) {
+    int c;
+    uint64_t cLo, cRa;
+    if (alias == 255) {
+      // process next input character
+      int c0 = c = src[i];
+      alias = c2low->ar[c0].alias;
+      if (alias != 255)
+        c = c2low->firstSmallI; // remap all 'small' characters to the first small character
+      ++i;
+      cLo = c2low->ar[c+0].val;
+      cRa = c2low->ar[c+1].val - cLo;
+    } else {
+      // complete processing of 'small' character
+      cLo = c2low->smallSubrangeVal*alias;
+      cRa = c2low->smallSubrangeVal;
+      alias = 255;
+    }
     lo   += range * cLo;
     range = range * cRa;
 
@@ -366,9 +403,9 @@ void CArithmeticEncoder::spillOverflow(uint8_t* dst)
 // >0 - the length of compressed buffer
 int arithmetic_encode(std::vector<uint8_t>* dst, const uint8_t* src, int srclen, double* pInfo)
 {
-  uint16_t c2low[257];
+  c2range_t c2low;
   double quantizedEntropy;
-  int maxC = prepare1(src, srclen, c2low, &quantizedEntropy, pInfo);
+  int maxC = prepare1(src, srclen, &c2low, &quantizedEntropy, pInfo);
 
   if (maxC == -1)
     return -1; // source consists of repetition of the same character
@@ -378,7 +415,7 @@ int arithmetic_encode(std::vector<uint8_t>* dst, const uint8_t* src, int srclen,
   CArithmeticEncoder enc;
   enc.init();
   double modelLenBits;
-  unsigned modellen = store_model(&dst->at(sz0), c2low, maxC, &modelLenBits, &enc);
+  unsigned modellen = store_model(&dst->at(sz0), &c2low, maxC, &modelLenBits, &enc);
   if (pInfo)
     pInfo[1] = modelLenBits;
 
@@ -388,8 +425,8 @@ int arithmetic_encode(std::vector<uint8_t>* dst, const uint8_t* src, int srclen,
 
   // printf("ml=%u\n", modellen);
   dst->resize(sz0 + lenEst + 64);
-  prepare2(c2low, maxC);
-  int dstlen = encode(&dst->at(sz0+modellen), src, srclen, c2low, &enc);
+  prepare2(&c2low, maxC);
+  int dstlen = encode(&dst->at(sz0+modellen), src, srclen, &c2low, &enc);
 
   if (pInfo)
     pInfo[2] = dstlen*8.0;
