@@ -11,6 +11,7 @@ static const int RANGE_BITS = 10;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 
 typedef struct {
+  unsigned nSmallRanges;
   unsigned firstSmallI; // index of the first small range
   unsigned smallSubrangeVal;
   struct {
@@ -19,18 +20,17 @@ typedef struct {
   } ar[257];
 } c2range_t;
 
-// return # of small ranges
-static unsigned histogram_to_range(c2range_t* c2range, unsigned maxC, const unsigned* h, unsigned srclen)
+static void histogram_to_range(c2range_t* c2range, unsigned maxC, const unsigned* h, unsigned srclen)
 {
   // translate counts to ranges and store in c2range
-  // 1st pass - find small ranges, those that should be rounded up to reach 1
+  // 1st pass - find small ranges, those that should be rounded up to reach 1 or those that are just a little bigger
   unsigned nSmallRanges   = 0;
   unsigned smallRangesTot = 0;
   for (unsigned c = 0; c <= maxC; ++c) {
     unsigned cnt = h[c];
     unsigned alias = 255;
     if (cnt != 0) {
-      if (uint64_t(cnt)*VAL_RANGE < srclen) {
+      if (uint64_t(cnt)*(VAL_RANGE-1) < srclen) {
         smallRangesTot += cnt;
         alias = nSmallRanges;
         if (nSmallRanges == 0)
@@ -38,99 +38,79 @@ static unsigned histogram_to_range(c2range_t* c2range, unsigned maxC, const unsi
         ++nSmallRanges;
       }
     }
+    c2range->ar[c].val = 0;
     c2range->ar[c].alias = alias;
   }
 
+  unsigned valRange0 = VAL_RANGE;
+  unsigned srclen0   = srclen;
+  if (smallRangesTot > 0) {
+    unsigned range = (uint64_t(smallRangesTot)*VAL_RANGE)/srclen;
+    if (range == 0) {
+      range      = 1;
+      valRange0 -= 1;
+      srclen0   -= smallRangesTot;
+    }
+    c2range->ar[c2range->firstSmallI].val = range;
+    if (nSmallRanges == 1) {
+      // A single small range is same as no small ranges - no grouping done
+      nSmallRanges = 0;
+      c2range->ar[c2range->firstSmallI].alias = 255; // non-aliased
+    }
+  }
+  c2range->nSmallRanges = nSmallRanges;
 
   // 2nd pass - translate remaining characters while rounding toward zero
   int remRange = VAL_RANGE;
-  int n1cnt = 0; // count # of character with exact range >= 1
-  int n2cnt = 0; // count # of character with exact range >= 2
   for (unsigned c = 0; c <= maxC; ++c) {
-    unsigned alias = c2range->ar[c].alias;
-    unsigned cnt = alias==255 ? h[c] : (alias==0 ? smallRangesTot : 0);
-    unsigned range = 0;
-    if (cnt != 0) {
-      n1cnt += 1;
-      range = 1;
-      if (uint64_t(cnt)*VAL_RANGE >= srclen) {
-        range = (uint64_t(cnt)*VAL_RANGE)/srclen;
-        n2cnt += (range > 1);
-      }
-      remRange -= range;
+    unsigned range = c2range->ar[c].val;
+    if (range == 0 && c2range->ar[c].alias == 255) {
+      // not processed yet
+      unsigned cnt = h[c];
+      if (cnt != 0)
+        range = (uint64_t(cnt)*valRange0)/srclen0; // guaranteed to be >= 1, because we already handled those that are smaller
+      c2range->ar[c].val = range;
     }
-    c2range->ar[c].val = range;
+    remRange -= range;
   }
 
-  if (remRange < 0) {
-    while (-remRange >= n2cnt) {
-      // very unlikely case when all ranges >1 have to be decremented
-      n2cnt = 0;
-      remRange = VAL_RANGE;
-      for (unsigned c = 0; c <= maxC; ++c) {
-        unsigned range = c2range->ar[c].val;
-        if (range > 1) {
-          c2range->ar[c].val = (range -= 1);
-          n2cnt += (range > 1);
-        }
-        remRange -= range;
-      }
-    }
-  } else if (remRange > 0) {
-    while (remRange >= n1cnt) {
-      // very unlikely case when all ranges > 0 have to be incremented
-      remRange = VAL_RANGE;
-      for (unsigned c = 0; c <= maxC; ++c) {
-        unsigned range = c2range->ar[c].val;
-        if (range > 0)
-          c2range->ar[c].val = (range += 1);
-        remRange -= range;
-      }
-    }
-  }
-
-  if (remRange != 0) {
-    // calculate effect of increment/decrement of range on entropy
+  // remRange is in range [0..maxC+1]
+  if (remRange > 0) {
+    // calculate effect of increment of each range on entropy
     double de[256], denz[256];
-    int incrDecr = remRange > 0 ? 1 : -1;
     int denzLen = 0;
     for (unsigned c = 0; c <= maxC; ++c) {
       double deltaE = 0;
-      unsigned alias = c2range->ar[c].alias;
-      unsigned cnt = alias==255 ? h[c] : (alias==0 ? smallRangesTot : 0);
-      if (cnt != 0) {
-        int range = c2range->ar[c].val;
-        int nxtRange = range+incrDecr;
-        if (nxtRange != 0) {
-          denz[denzLen] = deltaE = log2(double(range)/nxtRange)*cnt;
-          ++denzLen;
-        }
+      int range = c2range->ar[c].val;
+      if (range > 0) {
+        unsigned cnt = c2range->ar[c].alias==255 ? h[c] : smallRangesTot;
+        denz[denzLen] = deltaE = log2(double(range)/(range+1))*cnt;
+        ++denzLen;
       }
       de[c] = deltaE;
     }
 
-    int indx = remRange > 0 ? remRange - 1 : -remRange - 1;
+    int indx = remRange - 1;
     std::nth_element(&denz[0], &denz[indx], &denz[denzLen]);
     double thr = denz[indx];
+    // printf("[%.4f] ", (thr*VAL_RANGE)/srclen);
 
-    // when remRange > 0 increment ranges that will have maximal effect on entropy
-    // when remRange > 0 decrement ranges that will have minimal effect on entropy
+    // Increment ranges that will have maximal effect on entropy
     for (unsigned c = 0; c <= maxC; ++c) {
       double deltaE = de[c];
       if (deltaE != 0 && deltaE < thr) {
-        c2range->ar[c].val += incrDecr;
-        remRange   -= incrDecr;
+        ++c2range->ar[c].val;
+        --remRange;
       }
     }
     for (unsigned c = 0; remRange != 0; ++c) {
       double deltaE = de[c];
       if (deltaE == thr) {
-        c2range->ar[c].val += incrDecr;
-        remRange   -= incrDecr;
+        ++c2range->ar[c].val;
+        --remRange;
       }
     }
   }
-  return nSmallRanges;
 }
 
 // return value:
@@ -170,9 +150,10 @@ static int prepare1(const uint8_t* src, unsigned srclen, c2range_t* c2low, doubl
   if (maxCnt==srclen)
     return -1; // source consists of repetition of the same character
 
-  unsigned nSmallRanges = histogram_to_range(c2low, maxC, stat, srclen);
+  histogram_to_range(c2low, maxC, stat, srclen);
   unsigned smallSubrangeVal = 0;
   double smallRangeNbits = 0;
+  unsigned nSmallRanges = c2low->nSmallRanges;
   if (nSmallRanges > 0) {
     smallSubrangeVal = VAL_RANGE/nSmallRanges;
     smallRangeNbits  = log2(double(VAL_RANGE)/c2low->ar[c2low->firstSmallI].val*double(VAL_RANGE)/smallSubrangeVal);
@@ -227,18 +208,24 @@ static int inline floor_log2(unsigned x)
 // return the number of stored octets
 static int store_model(uint8_t* dst, const c2range_t* c2range, unsigned maxC, double* pNbits, CArithmeticEncoder* pEnc)
 {
+  // Find maxValC - index of last non-zero range
+  // It is not always equal to maxC because of grouping of small ranges
+  unsigned maxValC = maxC;
+  while (c2range->ar[maxValC].val == 0)
+    --maxValC;
+
   int nRanges = 0;
   unsigned hist[RANGE_BITS+1] = {0};
-  for (unsigned c = 0; c < maxC; ++c) {
+  for (unsigned c = 0; c < maxValC; ++c) {
     uint32_t range = c2range->ar[c].val;
     if (range > 0) {
       ++nRanges;
       hist[1+floor_log2(range)] += 1;
     }
   }
-  // No need to store a last range.
+  // No need to store a last non-zero range.
   // Decoder will calculate it as VAL_RANGE-sum of previous ranges
-  hist[0] = maxC - nRanges; // # of zero ranges before maxC
+  hist[0] = maxValC - nRanges; // # of zero ranges before maxValC
 
   // for (int i = 0; i< RANGE_BITS+1; ++i)
     // printf("hist[%2d]=%d\n", i, hist[i]);
@@ -247,26 +234,53 @@ static int store_model(uint8_t* dst, const c2range_t* c2range, unsigned maxC, do
 
   uint8_t* p = dst;
 
-  // store maxC
-  p = pEnc->put(256, maxC, 1, p);
+  // store maxValC
+  p = pEnc->put(256, maxValC, 1, p);
   // store histogram of log2
-  unsigned rem = maxC;
+  unsigned rem = maxValC;
   for (int i = 0; i < RANGE_BITS && rem > 0; ++i) {
     p = pEnc->put(rem+1, hist[i], 1, p);
     rem -= hist[i];
   }
 
-  // store c2range
-  for (unsigned c = 0; c < maxC; ++c) {
+  // store c2range[].val
+  for (unsigned c = 0; c < maxValC; ++c) {
     uint32_t range = c2range->ar[c].val;
     int log2_i = range == 0 ? 0 : 1+floor_log2(range);
     int lo = 0;
     for (int i = 0; i < log2_i; ++i)
       lo += hist[i];
-    p = pEnc->put(maxC, lo, hist[log2_i], p); // exp.range
+    p = pEnc->put(maxValC, lo, hist[log2_i], p); // exp.range
     if (log2_i > 1) {
       uint32_t expRangeSz = uint32_t(1) << (log2_i-1);
       p = pEnc->put(expRangeSz, range-expRangeSz, 1, p); // offset within range
+    }
+  }
+
+  // store information about small groups
+  unsigned nZeros = hist[0] + 255 - maxValC; // total number of zero ranges (known to decoder)
+  if (nZeros > 0) {
+    unsigned nSmallRanges = c2range->nSmallRanges;
+    unsigned nSmallZeroRanges = nSmallRanges == 0 ? 0 : nSmallRanges-1;
+    p = pEnc->put(nZeros+1, nSmallZeroRanges, 1, p);
+    if (nSmallZeroRanges > 0) {
+      // small ranges present
+      if (maxValC < 255)
+        p = pEnc->put(256-maxValC, maxC-maxValC, 1, p); // store # of zeros after maxValC
+      if (nSmallZeroRanges < nZeros) {
+        // store alias flags
+        for (unsigned c = 0; c <= maxC; ++c) {
+          if (c2range->ar[c].val == 0) {
+            unsigned cLo    = 0; // regular zero range
+            unsigned cRange = nZeros - nSmallZeroRanges;
+            if (c2range->ar[c].alias != 255) {
+              cLo    = cRange; // alias range
+              cRange = nSmallZeroRanges;
+            }
+            p = pEnc->put(nZeros, cLo, cRange, p); // store # of zeros after maxValC
+          }
+        }
+      }
     }
   }
   pEnc->spillOverflow(p);
