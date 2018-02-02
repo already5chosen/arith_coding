@@ -14,6 +14,7 @@ typedef struct {
   unsigned nSmallRanges;
   unsigned firstSmallI; // index of the first small range
   unsigned smallSubrangeVal;
+  unsigned lastSmallSubrangeVal;
   struct {
     uint16_t val;
     uint8_t  alias; // 0..254 = index small range group, 255 - normal range
@@ -159,6 +160,7 @@ static int prepare1(const uint8_t* src, unsigned srclen, c2range_t* c2low, doubl
     smallRangeNbits  = log2(double(VAL_RANGE)/c2low->ar[c2low->firstSmallI].val*double(VAL_RANGE)/smallSubrangeVal);
   }
   c2low->smallSubrangeVal = smallSubrangeVal;
+  c2low->lastSmallSubrangeVal = VAL_RANGE - smallSubrangeVal*(nSmallRanges-1);
 
   // calculate entropy after quantization
   double entropy = 0;
@@ -215,10 +217,13 @@ static int store_model(uint8_t* dst, const c2range_t* c2range, unsigned maxC, do
     --maxValC;
 
   int nRanges = 0;
+  int masterSmallRangeI = 0; // index within non-zero ranges
   unsigned hist[RANGE_BITS+1] = {0};
   for (unsigned c = 0; c < maxValC; ++c) {
     uint32_t range = c2range->ar[c].val;
     if (range > 0) {
+      if (c == c2range->firstSmallI)
+        masterSmallRangeI = nRanges;
       ++nRanges;
       hist[1+floor_log2(range)] += 1;
     }
@@ -257,7 +262,7 @@ static int store_model(uint8_t* dst, const c2range_t* c2range, unsigned maxC, do
     }
   }
 
-  // store information about small groups
+  // store information about small ranges
   unsigned nZeros = hist[0] + 255 - maxValC; // total number of zero ranges (known to decoder)
   if (nZeros > 0) {
     unsigned nSmallRanges = c2range->nSmallRanges;
@@ -265,19 +270,35 @@ static int store_model(uint8_t* dst, const c2range_t* c2range, unsigned maxC, do
     p = pEnc->put(nZeros+1, nSmallZeroRanges, 1, p);
     if (nSmallZeroRanges > 0) {
       // small ranges present
-      if (maxValC < 255)
-        p = pEnc->put(256-maxValC, maxC-maxValC, 1, p); // store # of zeros after maxValC
-      if (nSmallZeroRanges < nZeros) {
-        // store alias flags
-        for (unsigned c = 0; c <= maxC; ++c) {
-          if (c2range->ar[c].val == 0) {
-            unsigned cLo    = 0; // regular zero range
-            unsigned cRange = nZeros - nSmallZeroRanges;
-            if (c2range->ar[c].alias != 255) {
-              cLo    = cRange; // alias range
-              cRange = nSmallZeroRanges;
+
+      // store position of 'master' small range
+      p = pEnc->put(nRanges+1, masterSmallRangeI, 1, p);
+
+      // calculate # of zeros and # of small ranges between firstSmallI and maxValC
+      nZeros = 0;
+      nSmallZeroRanges = 0;
+      for (unsigned c = c2range->firstSmallI+1; c < maxValC; ++c) {
+        if (c2range->ar[c].val == 0) {
+          ++nZeros;
+          nSmallZeroRanges += (c2range->ar[c].alias != 255);
+        }
+      }
+
+      if (nZeros > 0) {
+        // store # of small ranges between firstSmallI and maxValC
+        p = pEnc->put(nZeros+1, nSmallZeroRanges, 1, p);
+        if (nSmallZeroRanges > 0 && nSmallZeroRanges < nZeros) {
+          // store alias flags
+          for (unsigned c = c2range->firstSmallI+1; c < maxValC; ++c) {
+            if (c2range->ar[c].val == 0) {
+              unsigned cLo    = 0; // regular zero range
+              unsigned cRange = nZeros - nSmallZeroRanges;
+              if (c2range->ar[c].alias != 255) {
+                cLo    = cRange; // alias range
+                cRange = nSmallZeroRanges;
+              }
+              p = pEnc->put(nZeros, cLo, cRange, p);
             }
-            p = pEnc->put(nZeros, cLo, cRange, p); // store # of zeros after maxValC
           }
         }
       }
@@ -332,10 +353,12 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const c2ran
       ++i;
       cLo = c2low->ar[c+0].val;
       cRa = c2low->ar[c+1].val - cLo;
+      printf("%3u%c %3u %3d\n", c, alias!=255 ? '*' : '.', c0, alias);
     } else {
       // complete processing of 'small' character
       cLo = c2low->smallSubrangeVal*alias;
-      cRa = c2low->smallSubrangeVal;
+      cRa = alias != c2low->nSmallRanges-1 ? c2low->smallSubrangeVal : c2low->lastSmallSubrangeVal;
+      printf("! %u*%u=%llu %llu [%u]\n", c2low->smallSubrangeVal, alias, cLo, cRa, c2low->nSmallRanges);
       alias = 255;
     }
     lo   += range * cLo;
