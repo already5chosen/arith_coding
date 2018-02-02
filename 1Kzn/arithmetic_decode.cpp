@@ -14,8 +14,7 @@ static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 typedef struct {
   unsigned nSmallRanges;
   unsigned firstSmallI; // index of the first small range
-  unsigned smallSubrangeVal;
-  unsigned lastSmallSubrangeVal;
+  uint32_t smallSubrangeScale;
   uint16_t val[257];     // ranges/lo
   uint8_t  small2c[256]; // map index of cmall range to character
 } c2range_t;
@@ -165,8 +164,7 @@ int load_ranges(c2range_t* ranges, CArithmeticDecoder* pDec)
     if (nSmallZeroRanges > 0) {
       // small ranges present
       ranges->nSmallRanges = nSmallZeroRanges + 1;
-      ranges->smallSubrangeVal = VAL_RANGE/(nSmallZeroRanges+1);
-      ranges->lastSmallSubrangeVal = VAL_RANGE - ranges->smallSubrangeVal*nSmallZeroRanges;
+      ranges->smallSubrangeScale = (VAL_RANGE*256)/(nSmallZeroRanges+1);
 
       // load position of 'master' small range
       unsigned masterSmallRangeI = pDec->get(nRanges+1);
@@ -185,42 +183,83 @@ int load_ranges(c2range_t* ranges, CArithmeticDecoder* pDec)
       ranges->small2c[0] = firstSmallI;
 
       // calculate # of zeros between firstSmallI and maxValC
-      nZeros = 0;
+      unsigned nZerosA = 0;
       for (unsigned c = firstSmallI+1; c < maxValC; ++c)
-        nZeros += (ranges->val[c] == 0);
+        nZerosA += (ranges->val[c] == 0);
 
       unsigned aliasI = 1;
-      if (nZeros > 0) {
+      if (nZerosA > 0) {
         // load # of small ranges between firstSmallI and maxValC
-        unsigned nSmallZeroRangesA = pDec->get(nZeros+1);
+        unsigned nSmallZeroRangesA = pDec->get(nZerosA+1);
         int err = pDec->put(nSmallZeroRangesA, 1);
         if (err)
           return err;
-        if (nSmallZeroRangesA > 0 && nSmallZeroRangesA < nZeros) {
-          // load alias flags
-          for (unsigned c = firstSmallI+1; c < maxValC; ++c) {
-            if (ranges->val[c] == 0) {
-              unsigned cVal = pDec->get(nZeros);
-              unsigned cLo    = 0; // regular zero range
-              unsigned cRange = nZeros - nSmallZeroRangesA;
-              if (cVal >= cRange) {
-                ranges->small2c[aliasI] = c;
-                ++aliasI;
-                cLo    = cRange; // alias range
-                cRange = nSmallZeroRangesA;
+        if (nSmallZeroRangesA > 0) {
+          if (nSmallZeroRangesA < nZerosA) {
+            // load alias flags
+            unsigned rem = nSmallZeroRangesA;
+            for (unsigned c = firstSmallI+1; rem > 0; ++c) {
+              if (ranges->val[c] == 0) {
+                unsigned cVal = pDec->get(nZerosA);
+                unsigned cLo    = 0; // regular zero range
+                unsigned cRange = nZerosA - nSmallZeroRangesA;
+                if (cVal >= cRange) {
+                  ranges->small2c[aliasI] = c;
+                  printf("[%3d]=%3u\n", aliasI, c);
+                  ++aliasI;
+                  cLo    = cRange; // alias range
+                  cRange = nSmallZeroRangesA;
+                  --rem;
+                }
+                int err = pDec->put(cLo, cRange);
+                if (err)
+                  return err;
               }
-              int err = pDec->put(cLo, cRange);
-              if (err)
-                return err;
+            }
+          } else {
+            // mark all zeros as aliases
+            for (unsigned c = firstSmallI+1; c < maxValC; ++c) {
+              if (ranges->val[c] == 0) {
+                ranges->small2c[aliasI] = c;
+                printf("[%3d]=%3u\n", aliasI, c);
+                ++aliasI;
+              }
             }
           }
+          nSmallZeroRanges -= nSmallZeroRangesA;
         }
-        nSmallZeroRanges -= nSmallZeroRangesA;
       }
 
-      // map small ranges that follow last non-zero range
-      for (unsigned c = 0; c < nSmallZeroRanges; ++c) {
-        ranges->small2c[aliasI + c] = maxValC+1+c;
+      if (nSmallZeroRanges > 0) {
+        // map small ranges that follow last non-zero range
+        unsigned nZerosB = 255 - maxValC;
+        if (nSmallZeroRanges < nZerosB) {
+          // load alias flags
+          unsigned rem = nSmallZeroRanges;
+          for (unsigned c = maxValC+1; rem > 0; ++c) {
+            unsigned cVal = pDec->get(nZerosB);
+            unsigned cLo    = 0; // regular zero range
+            unsigned cRange = nZerosB - nSmallZeroRanges;
+            if (cVal >= cRange) {
+              ranges->small2c[aliasI] = c;
+              printf("[%3d]=%3u.\n", aliasI, c);
+              ++aliasI;
+              cLo    = cRange; // alias range
+              cRange = nSmallZeroRanges;
+              --rem;
+            }
+            int err = pDec->put(cLo, cRange);
+            if (err)
+              return err;
+          }
+        } else {
+          // mark all zeros as aliases
+          for (unsigned c = maxValC+1; c < maxValC+nSmallZeroRanges; ++c) {
+            ranges->small2c[aliasI] = c;
+            printf("[%3d]=%3u.\n", aliasI, c);
+            ++aliasI;
+          }
+        }
       }
     }
   }
@@ -253,15 +292,9 @@ struct arithmetic_decode_model_t {
   int val2smallI(uint64_t value, uint64_t invRange, uint64_t range) {
     uint64_t loEst33b = umulh(value,invRange);
     unsigned idx = (loEst33b*m_c2low.nSmallRanges) >> 33;
-    unsigned lo  = idx*m_c2low.smallSubrangeVal;
-    while (lo*range > value) {
-      --idx;
-      lo -= m_c2low.smallSubrangeVal;
-    }
+    unsigned lo  = (idx*m_c2low.smallSubrangeScale)/256;
+    idx -= (lo*range > value);
     return idx;
-  }
-  unsigned smallIdx2Range(unsigned idx) {
-    return idx != m_c2low.nSmallRanges-1 ? m_c2low.smallSubrangeVal : m_c2low.lastSmallSubrangeVal;
   }
 private:
   uint8_t  m_lo2c[VAL_RANGE+1];
@@ -355,6 +388,7 @@ int decode(arithmetic_decode_model_t* pModel, uint8_t* dst, int dstlen, CArithme
 
     unsigned c;
     uint64_t nxtRange;
+    uint32_t cInvRange;
 
     if (__builtin_expect(!alias, 1)) {
       c = pModel->val2c(value, invRange, range); // can be off by -1
@@ -375,16 +409,21 @@ int decode(arithmetic_decode_model_t* pModel, uint8_t* dst, int dstlen, CArithme
         ++c;
         if (__builtin_expect(value >= nxtRange, 0)) return -104;
       }
+      cInvRange = pModel->m_c2invRange[c];
       alias = (c == pModel->m_c2low.firstSmallI);
       printf("%3u%c\n", c, alias ? '*' : '.');
     } else {
       alias = false;
       unsigned idx = pModel->val2smallI(value, invRange, range); // can be off by -1
       // keep decoder in sync with encoder
-      uint64_t cLo = pModel->m_c2low.smallSubrangeVal * idx;
-      uint64_t cRa = pModel->smallIdx2Range(idx);
+      uint64_t cLo_x = pModel->m_c2low.smallSubrangeScale * idx;
+      uint64_t cHi_x = cLo_x + pModel->m_c2low.smallSubrangeScale;
+      uint64_t cLo = cLo_x / 256;
+      uint64_t cHi = cHi_x / 256;
+      if (idx+1==pModel->m_c2low.nSmallRanges)
+        cHi = VAL_RANGE;
       value -= range * cLo;
-      nxtRange = range * cRa;
+      nxtRange = range * (cHi-cLo);
       // at this point range is scaled by 2**64 - the same scale as value
       if (__builtin_expect(value >= nxtRange, 0)) {
         #ifdef ENABLE_PERF_COUNT
@@ -392,13 +431,17 @@ int decode(arithmetic_decode_model_t* pModel, uint8_t* dst, int dstlen, CArithme
         #endif
         ++idx;
         value -= nxtRange;
-        cLo += cRa;
-        cRa = pModel->smallIdx2Range(idx);
-        nxtRange = range * cRa;
+        cLo = cHi;
+        cHi = (cHi_x + pModel->m_c2low.smallSubrangeScale) / 256;
+        if (idx+2==pModel->m_c2low.nSmallRanges)
+          cHi = VAL_RANGE;
+        nxtRange = range * (cHi-cLo);
         if (__builtin_expect(value >= nxtRange, 0)) return -105;
       }
       c = pModel->m_c2low.small2c[idx];
-      printf("%3u(%3d) %lld %lld\n", c, idx, cLo, cRa);
+      printf("%3u(%3d) %lld %lld\n", c, idx, cLo, cHi-cLo);
+      //TODO - proper update of invRange
+      cInvRange = pModel->m_c2invRange[c];
     }
 
     range = nxtRange;
@@ -441,7 +484,7 @@ int decode(arithmetic_decode_model_t* pModel, uint8_t* dst, int dstlen, CArithme
     range = nxtRange;
 
     // update invRange
-    invRange = umulh(invRange, uint64_t(pModel->m_c2invRange[c]) << (63-31)) << (RANGE_BITS+1);
+    invRange = umulh(invRange, uint64_t(cInvRange) << (63-31)) << (RANGE_BITS+1);
 
     if ((i & 15)==0) {
       // do one NR iteration to increase precision of invRange and assure that invRange*range <= 2**87
