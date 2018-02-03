@@ -1,7 +1,7 @@
 #include <cstdint>
 #include <cstring>
-#include <cstdio>
 #include <climits>
+// #include <cstdio>
 // #include <cmath>
 // #include <cctype>
 
@@ -10,13 +10,16 @@
 
 static const int RANGE_BITS = 10;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
+static const uint32_t SUBRANGE_SCALE = 1u << (31-RANGE_BITS);
 
 typedef struct {
   unsigned nSmallRanges;
-  unsigned firstSmallI; // index of the first small range
-  uint32_t smallSubrangeScale;
   uint16_t val[257];     // ranges/lo
-  uint8_t  small2c[256]; // map index of cmall range to character
+  uint8_t  small2c[256]; // map index of small range to character
+
+  unsigned GetFirstSmallI() const {  // index of the first small range
+    return nSmallRanges != 0 ? small2c[0] : UINT_MAX;
+  }
 } c2range_t;
 
 class CArithmeticDecoder {
@@ -153,7 +156,6 @@ int load_ranges(c2range_t* ranges, CArithmeticDecoder* pDec)
 
   // load information about small ranges
   ranges->nSmallRanges = 0;
-  ranges->firstSmallI = UINT_MAX;
   unsigned nZeros = hist[0] + 255 - maxValC; // total number of zero ranges
   if (nZeros > 0) {
     // load nSmallZeroRanges
@@ -164,7 +166,6 @@ int load_ranges(c2range_t* ranges, CArithmeticDecoder* pDec)
     if (nSmallZeroRanges > 0) {
       // small ranges present
       ranges->nSmallRanges = nSmallZeroRanges + 1;
-      ranges->smallSubrangeScale = (VAL_RANGE*256)/(nSmallZeroRanges+1);
 
       // load position of 'master' small range
       unsigned masterSmallRangeI = pDec->get(nRanges+1);
@@ -179,7 +180,6 @@ int load_ranges(c2range_t* ranges, CArithmeticDecoder* pDec)
         if (nnz > masterSmallRangeI)
           break;
       }
-      ranges->firstSmallI = firstSmallI;
       ranges->small2c[0] = firstSmallI;
 
       // calculate # of zeros between firstSmallI and maxValC
@@ -205,7 +205,6 @@ int load_ranges(c2range_t* ranges, CArithmeticDecoder* pDec)
                 unsigned cRange = nZerosA - nSmallZeroRangesA;
                 if (cVal >= cRange) {
                   ranges->small2c[aliasI] = c;
-                  printf("[%3d]=%3u\n", aliasI, c);
                   ++aliasI;
                   cLo    = cRange; // alias range
                   cRange = nSmallZeroRangesA;
@@ -221,7 +220,6 @@ int load_ranges(c2range_t* ranges, CArithmeticDecoder* pDec)
             for (unsigned c = firstSmallI+1; c < maxValC; ++c) {
               if (ranges->val[c] == 0) {
                 ranges->small2c[aliasI] = c;
-                printf("[%3d]=%3u\n", aliasI, c);
                 ++aliasI;
               }
             }
@@ -242,7 +240,6 @@ int load_ranges(c2range_t* ranges, CArithmeticDecoder* pDec)
             unsigned cRange = nZerosB - nSmallZeroRanges;
             if (cVal >= cRange) {
               ranges->small2c[aliasI] = c;
-              printf("[%3d]=%3u.\n", aliasI, c);
               ++aliasI;
               cLo    = cRange; // alias range
               cRange = nSmallZeroRanges;
@@ -256,7 +253,6 @@ int load_ranges(c2range_t* ranges, CArithmeticDecoder* pDec)
           // mark all zeros as aliases
           for (unsigned c = maxValC+1; c < maxValC+nSmallZeroRanges; ++c) {
             ranges->small2c[aliasI] = c;
-            printf("[%3d]=%3u.\n", aliasI, c);
             ++aliasI;
           }
         }
@@ -279,6 +275,8 @@ struct arithmetic_decode_model_t {
   int m_longLookupCount;
   int m_renormalizationCount;
   #endif
+  uint32_t  m_smallSubrangeScale;
+  uint32_t  m_invSmallSubrange[2]; // indexed my (cRa % 2)
   c2range_t m_c2low;
   uint32_t  m_c2invRange[256]; // floor(2^31/range)
 
@@ -292,7 +290,7 @@ struct arithmetic_decode_model_t {
   int val2smallI(uint64_t value, uint64_t invRange, uint64_t range) {
     uint64_t loEst33b = umulh(value,invRange);
     unsigned idx = (loEst33b*m_c2low.nSmallRanges) >> 33;
-    unsigned lo  = (idx*m_c2low.smallSubrangeScale)/256;
+    unsigned lo  = (idx*m_smallSubrangeScale)/SUBRANGE_SCALE;
     idx -= (lo*range > value);
     return idx;
   }
@@ -325,7 +323,6 @@ void arithmetic_decode_model_t::prepare()
   unsigned invI = 0;
   for (int c = 0; c < 256; ++c) {
     unsigned range = m_c2low.val[c];
-    // printf("%3u: %04x %04x\n", c, range, lo);
     m_c2low.val[c] = lo;
     if (range != 0) {
       m_c2invRange[c] = (1u << 31)/range; // floor(2^31/range)
@@ -342,6 +339,13 @@ void arithmetic_decode_model_t::prepare()
     m_lo2c[invI] = maxC;
   }
   m_maxC = maxC;
+
+  if (m_c2low.nSmallRanges) {
+    m_smallSubrangeScale = (VAL_RANGE*SUBRANGE_SCALE)/m_c2low.nSmallRanges;
+    unsigned cRa = VAL_RANGE/m_c2low.nSmallRanges;
+    for (unsigned i = 0; i < 2; ++i)
+      m_invSmallSubrange[(cRa+i) % 2] = (1u << 31)/(cRa+i); // floor(2^31/range)
+  }
 }
 
 int decode(arithmetic_decode_model_t* pModel, uint8_t* dst, int dstlen, CArithmeticDecoder* pDec)
@@ -362,6 +366,7 @@ int decode(arithmetic_decode_model_t* pModel, uint8_t* dst, int dstlen, CArithme
   uint64_t value = pDec->m_val;                     // scaled by 2**64
   uint64_t range = pDec->m_range >> (RANGE_BITS-1); // scaled by 2**54.  Maintained in [2**23+1..2*54]
   uint64_t invRange = uint64_t(TWO_POW87/range);    // approximation of floor(2**87/range). Maintained in [2**33..2*64)
+  unsigned firstSmallI = pModel->m_c2low.GetFirstSmallI();
 
   // uint64_t mxProd = 0, mnProd = uint64_t(-1);
   bool alias = false;
@@ -409,17 +414,17 @@ int decode(arithmetic_decode_model_t* pModel, uint8_t* dst, int dstlen, CArithme
         ++c;
         if (__builtin_expect(value >= nxtRange, 0)) return -104;
       }
+      // printf("%7d: %3u%c\n", i, c, alias ? '*' : '.');
       cInvRange = pModel->m_c2invRange[c];
-      alias = (c == pModel->m_c2low.firstSmallI);
-      printf("%3u%c\n", c, alias ? '*' : '.');
+      alias = (c == firstSmallI);
     } else {
       alias = false;
       unsigned idx = pModel->val2smallI(value, invRange, range); // can be off by -1
       // keep decoder in sync with encoder
-      uint64_t cLo_x = pModel->m_c2low.smallSubrangeScale * idx;
-      uint64_t cHi_x = cLo_x + pModel->m_c2low.smallSubrangeScale;
-      uint64_t cLo = cLo_x / 256;
-      uint64_t cHi = cHi_x / 256;
+      uint64_t cLo_x = pModel->m_smallSubrangeScale * idx;
+      uint64_t cHi_x = cLo_x + pModel->m_smallSubrangeScale;
+      uint64_t cLo = cLo_x / SUBRANGE_SCALE;
+      uint64_t cHi = cHi_x / SUBRANGE_SCALE;
       if (idx+1==pModel->m_c2low.nSmallRanges)
         cHi = VAL_RANGE;
       value -= range * cLo;
@@ -432,16 +437,15 @@ int decode(arithmetic_decode_model_t* pModel, uint8_t* dst, int dstlen, CArithme
         ++idx;
         value -= nxtRange;
         cLo = cHi;
-        cHi = (cHi_x + pModel->m_c2low.smallSubrangeScale) / 256;
-        if (idx+2==pModel->m_c2low.nSmallRanges)
+        cHi = (cHi_x + pModel->m_smallSubrangeScale) / SUBRANGE_SCALE;
+        if (idx+1==pModel->m_c2low.nSmallRanges)
           cHi = VAL_RANGE;
         nxtRange = range * (cHi-cLo);
         if (__builtin_expect(value >= nxtRange, 0)) return -105;
       }
       c = pModel->m_c2low.small2c[idx];
-      printf("%3u(%3d) %lld %lld\n", c, idx, cLo, cHi-cLo);
-      //TODO - proper update of invRange
-      cInvRange = pModel->m_c2invRange[c];
+      // printf("%7d: %3u(%3d) %lld %lld !\n", i, c, idx, cLo, cHi-cLo);
+      cInvRange = pModel->m_invSmallSubrange[(cHi-cLo)%2];
     }
 
     range = nxtRange;

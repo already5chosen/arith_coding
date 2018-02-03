@@ -1,4 +1,4 @@
-#include <cstdio>
+// #include <cstdio>
 #include <cmath>
 #include <cfloat>
 #include <cstring>
@@ -9,6 +9,7 @@
 
 static const int RANGE_BITS = 10;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
+static const uint32_t SUBRANGE_SCALE = 1u << (31-RANGE_BITS);
 
 typedef struct {
   unsigned nSmallRanges;
@@ -155,8 +156,8 @@ static int prepare1(const uint8_t* src, unsigned srclen, c2range_t* c2low, doubl
   double smallRangeNbits = 0;
   unsigned nSmallRanges = c2low->nSmallRanges;
   if (nSmallRanges > 0) {
-    smallSubrangeScale = (VAL_RANGE*256)/nSmallRanges;
-    smallRangeNbits  = log2(double(VAL_RANGE)/c2low->ar[c2low->firstSmallI].val*double(VAL_RANGE*256)/smallSubrangeScale);
+    smallSubrangeScale = (VAL_RANGE*SUBRANGE_SCALE)/nSmallRanges;
+    smallRangeNbits  = log2(double(VAL_RANGE)/c2low->ar[c2low->firstSmallI].val*double(VAL_RANGE*SUBRANGE_SCALE)/smallSubrangeScale);
   }
   c2low->smallSubrangeScale = smallSubrangeScale;
 
@@ -296,7 +297,6 @@ static int store_model(uint8_t* dst, const c2range_t* c2range, unsigned maxC, do
                 cLo    = cRange; // alias range
                 cRange = nSmallZeroRangesA;
                 --rem;
-                printf("[%3d]=%3u\n", c2range->ar[c].alias, c);
               }
               p = pEnc->put(nZerosA, cLo, cRange, p);
             }
@@ -317,7 +317,6 @@ static int store_model(uint8_t* dst, const c2range_t* c2range, unsigned maxC, do
             cLo    = cRange; // alias range
             cRange = nSmallZeroRangesB;
             --rem;
-            printf("[%3d]=%3u.\n", c2range->ar[c].alias, c);
           }
           p = pEnc->put(nZerosB, cLo, cRange, p);
         }
@@ -373,17 +372,15 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const c2ran
       ++i;
       cLo = c2low->ar[c+0].val;
       cRa = c2low->ar[c+1].val - cLo;
-      printf("%3u%c %3u %3d\n", c, alias!=255 ? '*' : '.', c0, alias);
     } else {
       // complete processing of 'small' character
       cLo = c2low->smallSubrangeScale*alias;
       uint64_t cHi = cLo + c2low->smallSubrangeScale;
-      cLo /= 256;
-      cHi /= 256;
+      cLo /= SUBRANGE_SCALE;
+      cHi /= SUBRANGE_SCALE;
       if (alias+1==c2low->nSmallRanges)
         cHi = VAL_RANGE;
       cRa = cHi - cLo;
-      printf("! %u*%u=%llu %llu [%u]\n", c2low->smallSubrangeScale, alias, cLo, cRa, c2low->nSmallRanges);
       alias = 255;
     }
     lo   += range * cLo;
