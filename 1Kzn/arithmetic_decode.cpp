@@ -117,7 +117,9 @@ int load_ranges(c2range_t* ranges, CArithmeticDecoder* pDec)
 
   // load c2range
   unsigned sum = 0;
-  int nRanges = 0; // count non-zero ranges
+  int nLeadZeros = 0;     // count zeros that precede the first non-zero
+  int nLastInnerZero = 0; // last zero followed by non-zero
+  int nRanges = 0;        // count non-zero ranges
   for (unsigned c = 0; c < maxValC; ++c) {
     // extract exp.range
     unsigned ix = pDec->get(maxValC);
@@ -131,6 +133,8 @@ int load_ranges(c2range_t* ranges, CArithmeticDecoder* pDec)
 
     unsigned range = 0;
     if (log2_i != 0) {
+      if (nRanges == 0)
+        nLeadZeros = c;
       ++nRanges;
       range = uint32_t(1) << (log2_i-1);
       if (log2_i > 1) {
@@ -142,6 +146,8 @@ int load_ranges(c2range_t* ranges, CArithmeticDecoder* pDec)
         range += offset;
       }
       sum += range;
+    } else {
+      nLastInnerZero = c;
     }
     ranges->val[c] = range;
   }
@@ -157,24 +163,21 @@ int load_ranges(c2range_t* ranges, CArithmeticDecoder* pDec)
   // load information about small ranges
   ranges->nSmallRanges = 0;
   unsigned nZeros = hist[0] + 255 - maxValC; // total number of zero ranges
-  if (nZeros > 0) {
-    // load nSmallZeroRanges
-    unsigned nSmallZeroRanges = pDec->get(nZeros+1);
-    int err = pDec->put(nSmallZeroRanges, 1);
+  if (nZeros > nLeadZeros) {
+    unsigned nTrailingNonZeros = (maxValC == 255) ? 255 - nLastInnerZero : 0;
+
+    // load position of 'master' small range
+    unsigned nMasterSmallRangeIOptions = nRanges+1-nTrailingNonZeros;
+    unsigned masterSmallRangeI = pDec->get(nMasterSmallRangeIOptions+1);
+    int err = pDec->put(masterSmallRangeI, 1);
     if (err)
       return err;
-    if (nSmallZeroRanges > 0) {
-      // small ranges present
-      ranges->nSmallRanges = nSmallZeroRanges + 1;
 
-      // load position of 'master' small range
-      unsigned masterSmallRangeI = pDec->get(nRanges+1);
-      int err = pDec->put(masterSmallRangeI, 1);
-      if (err)
-        return err;
+    if (masterSmallRangeI < nMasterSmallRangeIOptions) {
+      // masterSmallRangeI==nMasterSmallRangeIOptions is used as indication that there are no small ranges
 
       // find firstSmallI
-      unsigned firstSmallI = 0;
+      unsigned firstSmallI = nLeadZeros;
       for (unsigned nnz = 0; ; ++firstSmallI) {
         nnz += (ranges->val[firstSmallI] != 0);
         if (nnz > masterSmallRangeI)
@@ -182,83 +185,59 @@ int load_ranges(c2range_t* ranges, CArithmeticDecoder* pDec)
       }
       ranges->small2c[0] = firstSmallI;
 
-      // calculate # of zeros between firstSmallI and maxValC
-      unsigned nZerosA = 0;
-      for (unsigned c = firstSmallI+1; c < maxValC; ++c)
-        nZerosA += (ranges->val[c] == 0);
-
-      unsigned aliasI = 1;
-      if (nZerosA > 0) {
-        // load # of small ranges between firstSmallI and maxValC
-        unsigned nSmallZeroRangesA = pDec->get(nZerosA+1);
-        int err = pDec->put(nSmallZeroRangesA, 1);
+      int nPreMasterZeros = firstSmallI - masterSmallRangeI; // # of zeros that precede the first (i.e. master) small range
+      unsigned nPastMasterZeros = nZeros - nPreMasterZeros;
+      unsigned nSmallRanges = 2;
+      if (nPastMasterZeros > 1) {
+        // Load # of small ranges - 2
+        unsigned nSmallRangesMinus2 = pDec->get(nPastMasterZeros);
+        int err = pDec->put(nSmallRangesMinus2, 1);
         if (err)
           return err;
-        if (nSmallZeroRangesA > 0) {
-          if (nSmallZeroRangesA < nZerosA) {
-            // load alias flags
-            unsigned rem = nSmallZeroRangesA;
-            for (unsigned c = firstSmallI+1; rem > 0; ++c) {
-              if (ranges->val[c] == 0) {
-                unsigned cVal = pDec->get(nZerosA);
-                unsigned cLo    = 0; // regular zero range
-                unsigned cRange = nZerosA - nSmallZeroRangesA;
-                if (cVal >= cRange) {
-                  ranges->small2c[aliasI] = c;
-                  ++aliasI;
-                  cLo    = cRange; // alias range
-                  cRange = nSmallZeroRangesA;
-                  --rem;
-                }
-                int err = pDec->put(cLo, cRange);
-                if (err)
-                  return err;
-              }
-            }
-          } else {
-            // mark all zeros as aliases
-            for (unsigned c = firstSmallI+1; c < maxValC; ++c) {
-              if (ranges->val[c] == 0) {
-                ranges->small2c[aliasI] = c;
-                ++aliasI;
-              }
-            }
-          }
-          nSmallZeroRanges -= nSmallZeroRangesA;
-        }
-      }
 
-      if (nSmallZeroRanges > 0) {
-        // map small ranges that follow last non-zero range
-        unsigned nZerosB = 255 - maxValC;
-        if (nSmallZeroRanges < nZerosB) {
-          // load alias flags
-          unsigned rem = nSmallZeroRanges;
-          for (unsigned c = maxValC+1; rem > 0; ++c) {
-            unsigned cVal = pDec->get(nZerosB);
+        // load alias flags
+        unsigned remTot   = nPastMasterZeros;
+        unsigned remSmall = nSmallRangesMinus2+1;
+        nSmallRanges = nSmallRangesMinus2 + 2;
+        unsigned c;
+        for (c = firstSmallI+1; remSmall > 0 && remSmall < remTot; ++c) {
+          if (ranges->val[c] == 0) {
+            unsigned cVal = pDec->get(remTot);
             unsigned cLo    = 0; // regular zero range
-            unsigned cRange = nZerosB - nSmallZeroRanges;
+            unsigned cRange = remTot - remSmall;
             if (cVal >= cRange) {
-              ranges->small2c[aliasI] = c;
-              ++aliasI;
+              ranges->small2c[nSmallRanges-remSmall] = c;
               cLo    = cRange; // alias range
-              cRange = nSmallZeroRanges;
-              --rem;
+              cRange = remSmall;
+              --remSmall;
             }
             int err = pDec->put(cLo, cRange);
             if (err)
               return err;
-          }
-        } else {
-          // mark all zeros as aliases
-          for (unsigned c = maxValC+1; c < maxValC+nSmallZeroRanges; ++c) {
-            ranges->small2c[aliasI] = c;
-            ++aliasI;
+            --remTot;
           }
         }
+
+        // mark remaining aliases
+        for (; remSmall > 0; ++c) {
+          if (ranges->val[c] == 0) {
+            ranges->small2c[nSmallRanges-remSmall] = c;
+            --remSmall;
+          }
+        }
+      } else {
+        // one small zero range
+        unsigned c;
+        for (c = firstSmallI+1; ranges->val[c] != 0; ++c) ;
+        ranges->small2c[1] = c;
       }
+      ranges->nSmallRanges = nSmallRanges;
     }
   }
+
+  // for (int i = 0; i < ranges->nSmallRanges; ++i)
+    // printf("%3d %3d\n", i, ranges->small2c[i]);
+  // printf("nZeros - %d\n", nZeros);
 
   return 0; // success
 }

@@ -215,16 +215,25 @@ static int store_model(uint8_t* dst, const c2range_t* c2range, unsigned maxC, do
   while (c2range->ar[maxValC].val == 0)
     --maxValC;
 
-  int nRanges = 0;
+  int nRanges = 0;           // # of non-zero ranges - 1
+  int nLeadZeros = 0;        // # of zeros that precede the first non-zero (can't be small ranges)
+  int lastInnerZero = 0;     // last zero followed by non-zero
   int masterSmallRangeI = 0; // index within non-zero ranges
+  int nPreMasterZeros = 0;   // # of zeros that precede the first (i.e. master) small range
   unsigned hist[RANGE_BITS+1] = {0};
   for (unsigned c = 0; c < maxValC; ++c) {
     uint32_t range = c2range->ar[c].val;
     if (range > 0) {
-      if (c == c2range->firstSmallI)
+      if (nRanges == 0)
+        nLeadZeros = c;
+      if (c == c2range->firstSmallI) {
         masterSmallRangeI = nRanges;
+        nPreMasterZeros = c - nRanges;
+      }
       ++nRanges;
       hist[1+floor_log2(range)] += 1;
+    } else {
+      lastInnerZero = c;
     }
   }
   // No need to store a last non-zero range.
@@ -263,66 +272,42 @@ static int store_model(uint8_t* dst, const c2range_t* c2range, unsigned maxC, do
 
   // store information about small ranges
   unsigned nZeros = hist[0] + 255 - maxValC; // total number of zero ranges (known to decoder)
-  if (nZeros > 0) {
+  if (nZeros > nLeadZeros) {
+    unsigned nTrailingNonZeros = (maxValC == 255) ? 255 - lastInnerZero : 0;
     unsigned nSmallRanges = c2range->nSmallRanges;
     unsigned nSmallZeroRanges = nSmallRanges == 0 ? 0 : nSmallRanges-1;
-    p = pEnc->put(nZeros+1, nSmallZeroRanges, 1, p);
-    if (nSmallZeroRanges > 0) {
-      // small ranges present
 
-      // store position of 'master' small range
-      p = pEnc->put(nRanges+1, masterSmallRangeI, 1, p);
+    // Store position of 'master' small range
+    // Use impossible position to indicate an absence of small ranges
+    unsigned nMasterSmallRangeIOptions = nRanges+1-nTrailingNonZeros;
+    p = pEnc->put(nMasterSmallRangeIOptions+1, nSmallRanges != 0 ? masterSmallRangeI : nMasterSmallRangeIOptions, 1, p);
 
-      // calculate # of zeros and # of small ranges between firstSmallI and maxValC
-      unsigned nZerosA = 0;
-      unsigned nSmallZeroRangesA = 0;
-      for (unsigned c = c2range->firstSmallI+1; c < maxValC; ++c) {
-        if (c2range->ar[c].val == 0) {
-          ++nZerosA;
-          nSmallZeroRangesA += (c2range->ar[c].alias != 255);
-        }
-      }
+    if (nSmallRanges > 0) {
+      unsigned nPastMasterZeros = nZeros - nPreMasterZeros;
+      if (nPastMasterZeros > 1) {
+        // Store # of small ranges - 2
+        p = pEnc->put(nPastMasterZeros, nSmallRanges-2, 1, p);
 
-      if (nZerosA > 0) {
-        // store # of small ranges between firstSmallI and maxValC
-        p = pEnc->put(nZerosA+1, nSmallZeroRangesA, 1, p);
-        if (nSmallZeroRangesA < nZerosA) {
-          // store alias flags
-          unsigned rem = nSmallZeroRangesA;
-          for (unsigned c = c2range->firstSmallI+1; rem > 0; ++c) {
-            if (c2range->ar[c].val == 0) {
-              unsigned cLo    = 0; // regular zero range
-              unsigned cRange = nZerosA - nSmallZeroRangesA;
-              if (c2range->ar[c].alias != 255) {
-                cLo    = cRange; // alias range
-                cRange = nSmallZeroRangesA;
-                --rem;
-              }
-              p = pEnc->put(nZerosA, cLo, cRange, p);
-            }
-          }
-        }
-      }
-
-      // calculate # of zeros and # of small ranges after maxValC
-      unsigned nZerosB = 255 - maxValC;
-      unsigned nSmallZeroRangesB = nSmallZeroRanges - nSmallZeroRangesA;
-      if (nSmallZeroRangesB < nZerosB) {
         // store alias flags
-        unsigned rem = nSmallZeroRangesB;
-        for (unsigned c = maxValC+1; rem > 0; ++c) {
-          unsigned cLo    = 0; // regular zero range
-          unsigned cRange = nZerosB - nSmallZeroRangesB;
-          if (c2range->ar[c].alias != 255) {
-            cLo    = cRange; // alias range
-            cRange = nSmallZeroRangesB;
-            --rem;
+        unsigned remTot   = nPastMasterZeros;
+        unsigned remSmall = nSmallRanges-1;
+        for (unsigned c = c2range->firstSmallI+1; remSmall > 0 && remSmall < remTot; ++c) {
+          if (c2range->ar[c].val == 0) {
+            unsigned cLo    = 0; // regular zero range
+            unsigned cRange = remTot - remSmall;
+            if (c2range->ar[c].alias != 255) {
+              cLo    = cRange; // alias range
+              cRange = remSmall;
+              --remSmall;
+            }
+            p = pEnc->put(remTot, cLo, cRange, p);
+            --remTot;
           }
-          p = pEnc->put(nZerosB, cLo, cRange, p);
         }
       }
     }
   }
+
   pEnc->spillOverflow(p);
 
   int len = p - dst;
