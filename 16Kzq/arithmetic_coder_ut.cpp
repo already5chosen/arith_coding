@@ -1,5 +1,5 @@
 // #include <cstdio>
-#include <cmath>
+// #include <cmath>
 #include <cstring>
 #include <algorithm>
 
@@ -73,6 +73,84 @@ static const uint32_t dequantization_tab[256] =
  16767112, 16771532, 16774690, 16776584,
 };
 
+static const uint32_t logEst_tab[256] =
+{ // round(log((i+2)/(i+1))*(2**31-1))
+ 2977044471, 1741459379, 1235585093,  958394255,
+  783065124,  662072128,  573512964,  505874286,
+  452519969,  409354105,  373711018,  343780812,
+  318291317,  296322127,  277190838,  260380768,
+  245493518,  232216947,  220303022,  209552159,
+  199801946,  190918866,  182792152,  175329131,
+  168451680,  162093474,  156197842,  150716071,
+  145606056,  140831217,  136359621,  132163268,
+  128217500,  124500523,  120992995,  117677698,
+  114539249,  111563865,  108739157,  106053964,
+  103498196,  101062717,   98739229,   96520181,
+   94398686,   92368448,   90423704,   88559164,
+   86769967,   85051637,   83400044,   81811374,
+   80282100,   78808950,   77388892,   76019105,
+   74696966,   73420032,   72186023,   70992811,
+   69838405,   68720943,   67638678,   66589974,
+   65573293,   64587191,   63630309,   62701366,
+   61799157,   60922543,   60070452,   59241867,
+   58435831,   57651433,   56887816,   56144163,
+   55419702,   54713699,   54025458,   53354317,
+   52699646,   52060847,   51437349,   50828609,
+   50234108,   49653354,   49085875,   48531220,
+   47988961,   47458685,   46940001,   46432531,
+   45935917,   45449813,   44973890,   44507831,
+   44051333,   43604103,   43165864,   42736346,
+   42315291,   41902452,   41497591,   41100479,
+   40710895,   40328628,   39953472,   39585232,
+   39223718,   38868748,   38520144,   38177738,
+   37841366,   37510870,   37186096,   36866898,
+   36553134,   36244665,   35941359,   35643087,
+   35349725,   35061152,   34777253,   34497915,
+   34223028,   33952487,   33686191,   33424039,
+   33165935,   32911788,   32661506,   32415001,
+   32172190,   31932989,   31697319,   31465103,
+   31236263,   31010729,   30788428,   30569291,
+   30353252,   30140245,   29930207,   29723076,
+   29518792,   29317297,   29118534,   28922448,
+   28728985,   28538094,   28349722,   28163821,
+   27980342,   27799238,   27620464,   27443974,
+   27269725,   27097675,   26927783,   26760007,
+   26594310,   26430651,   26268995,   26109304,
+   25951543,   25795677,   25641672,   25489495,
+   25339114,   25190496,   25043612,   24898431,
+   24754923,   24613060,   24472814,   24334157,
+   24197063,   24061504,   23927456,   23794894,
+   23663792,   23534126,   23405874,   23279013,
+   23153519,   23029370,   22906547,   22785026,
+   22664788,   22545812,   22428079,   22311569,
+   22196263,   22082143,   21969190,   21857387,
+   21746716,   21637161,   21528703,   21421328,
+   21315018,   21209758,   21105533,   21002327,
+   20900125,   20798914,   20698678,   20599403,
+   20501076,   20403683,   20307212,   20211648,
+   20116980,   20023194,   19930278,   19838221,
+   19747011,   19656635,   19567083,   19478343,
+   19390404,   19303256,   19216888,   19131289,
+   19046449,   18962359,   18879008,   18796386,
+   18714484,   18633293,   18552803,   18473006,
+   18393892,   18315453,   18237680,   18160565,
+   18084100,   18008275,   17933084,   17858518,
+   17784569,   17711230,   17638494,   17566353,
+   17494799,   17423826,   17353427,   17283594,
+   17214321,   17145601,   17077427,   17009794,
+   16942694,   16876121,   16810070,   16744533,
+};
+
+// log_estimate - approximate round(log((x+1)/x)*(2**31-1))
+// where x in range [1..2^16]
+static uint32_t log_estimate(uint32_t x)
+{
+  if (x <= 256)
+    return logEst_tab[x-1];
+  else
+    return uint32_t(-1)/x;
+}
+
 static void histogram_to_range(uint16_t* ranges, unsigned maxC, const uint32_t* h, uint32_t hTot, unsigned range_scale)
 {
   // translate counts to ranges and store in ranges
@@ -115,16 +193,17 @@ static void histogram_to_range(uint16_t* ranges, unsigned maxC, const uint32_t* 
   if (rangeSum < range_scale) {
     remRange = range_scale - rangeSum;
     // calculate effect of increment of range on entropy
-    double de[256], denz[256];
+    int64_t de[256], denz[256];
     int denzLen = 0;
     for (unsigned c = 0; c <= maxC; ++c) {
-      double deltaE = 0;
+      int64_t deltaE = 0;
       unsigned cnt = h[c];
       if (cnt != 0) {
         int range = ranges[c];
         int nxtRange = range+1;
         if (nxtRange != 0) {
-          denz[denzLen] = deltaE = log2(double(range)/nxtRange)*cnt;
+          // use integer approximation of log(), bit-precise because repeatability is more important than absolute precision
+          denz[denzLen] = deltaE = -int64_t(log_estimate(range))*cnt;
           ++denzLen;
         }
       }
@@ -133,18 +212,18 @@ static void histogram_to_range(uint16_t* ranges, unsigned maxC, const uint32_t* 
 
     int indx = remRange - 1;
     std::nth_element(&denz[0], &denz[indx], &denz[denzLen]);
-    double thr = denz[indx];
+    int64_t thr = denz[indx];
 
     // increment ranges that will have maximal effect on entropy
     for (unsigned c = 0; c <= maxC; ++c) {
-      double deltaE = de[c];
+      int64_t deltaE = de[c];
       if (deltaE != 0 && deltaE < thr) {
         ranges[c] += 1;
         remRange   -= 1;
       }
     }
     for (unsigned c = 0; remRange != 0; ++c) {
-      double deltaE = de[c];
+      int64_t deltaE = de[c];
       if (deltaE == thr) {
         ranges[c] += 1;
         remRange   -= 1;
@@ -160,7 +239,7 @@ void quantized_histogram_to_range(uint16_t* ranges, unsigned maxC, const uint8_t
   uint32_t qhrTot = 0;
   for (unsigned c = 0; c <= maxC; ++c)
     qhrTot += (qhr[c] = dequantization_tab[qh[c]]);
- 
+
   histogram_to_range(ranges, maxC, qhr, qhrTot, range_scale);
 }
 
