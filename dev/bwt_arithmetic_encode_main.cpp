@@ -31,6 +31,7 @@ static void tst20(const uint8_t* src, int srclen);
 static void tst21(const uint8_t* src, int srclen);
 static void tst22(const uint8_t* src, int srclen);
 static void tst23(const uint8_t* src, int srclen);
+static void tst24(const uint8_t* src, int srclen);
 int main(int argz, char** argv)
 {
   if (argz < 3) {
@@ -111,6 +112,7 @@ int main(int argz, char** argv)
             tst18(&bwtOut.at(0), tilelen);
             tst23(&bwtOut.at(0), tilelen);
             tst19(&bwtOut.at(0), tilelen);
+            tst24(&bwtOut.at(0), tilelen);
             tst20(&bwtOut.at(0), tilelen);
             tst9(&bwtOut.at(0), tilelen);
             tst10(&bwtOut.at(0), tilelen);
@@ -980,6 +982,41 @@ static void tst19(const uint8_t* src0, int srclen)
   double e1 = 0/8;
   double e2 = 0/8;
   printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf zeros rle encoded with RUNA/RUNB. Non-zero repetitions encoded with  RUNC/RUND\n", e0, e1, e2, e0+e1+e2);
+
+  delete [] src;
+}
+
+static void tst24(const uint8_t* src0, int srclen)
+{
+  uint8_t* src = mtf(src0, srclen);
+
+  int h[258] = {0};
+  for (int i = 0; i < srclen; ) {
+    int c = src[i];
+    int i0 = i;
+    ++i;
+    while (src[i] == c) ++i;
+    unsigned rl = i - i0;
+    if (c == 0) {
+      // encode to RUNA=1/RUNB=0
+      do {
+        ++h[rl & 1];
+        rl = (rl - 1) / 2;
+      } while (rl != 0);
+    } else {
+      // encode to ci=c+2/RUNC=2
+      do {
+        int idx = (rl & 1) != 0 ? c + 2: 2;
+        ++h[idx];
+        rl /= 2;
+      } while (rl != 0);
+    }
+  }
+
+  double e0 = calc_entr(h, 258)/8;
+  double e1 = 0/8;
+  double e2 = 0/8;
+  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf zeros rle encoded with RUNA/RUNB. Non-zero repetitions encoded with  c/RUNC %d/%d\n", e0, e1, e2, e0+e1+e2, h[3], h[2]);
 
   delete [] src;
 }
