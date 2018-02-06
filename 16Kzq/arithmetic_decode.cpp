@@ -5,6 +5,7 @@
 // #include <cctype>
 
 #include "arithmetic_decode.h"
+#include "arithmetic_coder_ut.h"
 
 
 static const int RANGE_BITS = 14;
@@ -77,12 +78,12 @@ int CArithmeticDecoder::put(uint64_t cLo, uint64_t cRange)
   return 0;
 }
 
-// load_ranges
+// load_quantized_histogram
 // return  value:
-//   on success 0
+//   on success maxC >= 0
 //   on parsing error negative error code
 static
-int load_ranges(uint16_t* ranges, CArithmeticDecoder* pDec)
+int load_quantized_histogram(uint8_t* qh, CArithmeticDecoder* pDec)
 {
   // load maxC
   unsigned maxC = pDec->get(256);
@@ -91,9 +92,10 @@ int load_ranges(uint16_t* ranges, CArithmeticDecoder* pDec)
     return err;
 
   // load histogram of log2
-  unsigned hist[RANGE_BITS+1] = {0};
-  unsigned rem = maxC;
-  for (int i = 0; i < RANGE_BITS && rem > 0; ++i) {
+  const int QH_BITS  = 8;
+  unsigned hist[QH_BITS+1] = {0};
+  unsigned rem = maxC+1;
+  for (int i = 0; i < QH_BITS && rem > 0; ++i) {
     hist[i] = pDec->get(rem+1); // hist[i] in range [0..rem]
     err = pDec->put(hist[i], 1);
     if (err)
@@ -101,14 +103,13 @@ int load_ranges(uint16_t* ranges, CArithmeticDecoder* pDec)
     rem -= hist[i];
   }
   if (rem > 0)
-    hist[RANGE_BITS] = rem;
+    hist[QH_BITS] = rem;
 
   // load c2range
-  unsigned sum = 0;
   int nRanges = 0; // count non-zero ranges
-  for (unsigned c = 0; c < maxC; ++c) {
+  for (unsigned c = 0; c <= maxC; ++c) {
     // extract exp.range
-    unsigned ix = pDec->get(maxC);
+    unsigned ix = pDec->get(maxC+1);
     int log2_i;
     unsigned lo = 0;
     for (log2_i = 0; lo+hist[log2_i] <= ix; ++log2_i)
@@ -129,20 +130,11 @@ int load_ranges(uint16_t* ranges, CArithmeticDecoder* pDec)
           return err;
         range += offset;
       }
-      sum += range;
     }
-    ranges[c] = range;
+    qh[c] = range;
   }
 
-  if (sum >= VAL_RANGE) {
-    return -5; // parsing error
-  }
-
-  ranges[maxC] = VAL_RANGE - sum; // ranges[maxC] implied
-  for (unsigned c = maxC+1; c < 256; ++c)
-    ranges[c] = 0;
-
-  return 0; // success
+  return maxC; // success
 }
 
 static inline uint64_t umulh(uint64_t a, uint64_t b) {
@@ -204,10 +196,15 @@ int arithmetic_decode_model_t::load_and_prepare(CArithmeticDecoder* pDec)
   m_longLookupCount = 0;
   m_renormalizationCount = 0;
   #endif
-  int ret = load_ranges(m_c2low, pDec);
-  if (ret >= 0)
+  uint8_t qh[256];
+  int maxC = load_quantized_histogram(qh, pDec);
+  if (maxC >= 0) {
+    quantized_histogram_to_range(m_c2low, maxC, qh, VAL_RANGE);
+    for (unsigned c = maxC+1; c < 256; ++c)
+      m_c2low[c] = 0;
     prepare();
-  return ret;
+  }
+  return maxC;
 }
 
 void arithmetic_decode_model_t::prepare()

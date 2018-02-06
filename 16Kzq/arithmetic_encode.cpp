@@ -1,140 +1,37 @@
-// #include <cstdio>
+#include <cstdio>
 #include <cmath>
 #include <cfloat>
 #include <cstring>
 #include <algorithm>
 
 #include "arithmetic_encode.h"
+#include "arithmetic_coder_ut.h"
 
 
+static const int QH_BITS  = 8;
 static const int RANGE_BITS = 14;
+static const int      QH_SCALE  = 1 << QH_BITS;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
-
-static void histogram_to_range(uint16_t* c2range, unsigned maxC, const unsigned* h, unsigned srclen)
-{
-  // translate counts to ranges and store in c2range
-  // 1st pass - translate characters that map to range==0 and 1
-  unsigned remCnt   = srclen;
-  unsigned remRange0 = VAL_RANGE;
-  for (unsigned c = 0; c <= maxC; ++c) {
-    unsigned cnt = h[c];
-    unsigned range = 0;
-    if (cnt != 0) {
-      if (uint64_t(cnt)*VAL_RANGE < srclen) {
-        range     = 1;;
-        remCnt   -= cnt;
-        remRange0 -= 1;
-      }
-    }
-    c2range[c] = range;
-  }
-
-  // 2nd pass - translate remaining characters while rounding toward zero
-  int remRange = VAL_RANGE;
-  int n1cnt = 0; // count # of character with exact range >= 1
-  int n2cnt = 0; // count # of character with exact range >= 2
-  for (unsigned c = 0; c <= maxC; ++c) {
-    unsigned cnt = h[c];
-    if (cnt != 0) {
-      unsigned range = c2range[c];
-      if (range == 0) {
-        n1cnt += 1;
-        range = 1;
-        if (uint64_t(cnt)*remRange0 >= remCnt) {
-          range = (uint64_t(cnt)*remRange0)/remCnt;
-          n2cnt += (range > 1);
-        }
-        c2range[c] = range;
-      }
-      remRange -= range;
-    }
-  }
-
-  if (remRange < 0) {
-    while (-remRange >= n2cnt) {
-      // very unlikely case when all ranges >1 have to be decremented
-      n2cnt = 0;
-      remRange = VAL_RANGE;
-      for (unsigned c = 0; c <= maxC; ++c) {
-        unsigned range = c2range[c];
-        if (range > 1) {
-          c2range[c] = (range -= 1);
-          n2cnt += (range > 1);
-        }
-        remRange -= range;
-      }
-    }
-  } else if (remRange > 0) {
-    while (remRange >= n1cnt) {
-      // very unlikely case when all ranges with exact value >= 0 have to be incremented
-      remRange = VAL_RANGE;
-      for (unsigned c = 0; c <= maxC; ++c) {
-        unsigned cnt = h[c];
-        unsigned range = c2range[c];
-        if (uint64_t(cnt)*VAL_RANGE >= srclen)
-          c2range[c] = (range += 1);
-        remRange -= range;
-      }
-    }
-  }
-
-  if (remRange != 0) {
-    // calculate effect of increment/decrement of range on entropy
-    double de[256], denz[256];
-    int incrDecr = remRange > 0 ? 1 : -1;
-    int denzLen = 0;
-    for (unsigned c = 0; c <= maxC; ++c) {
-      double deltaE = 0;
-      unsigned cnt = h[c];
-      if (cnt != 0) {
-        int range = c2range[c];
-        int nxtRange = range+incrDecr;
-        if (nxtRange != 0) {
-          denz[denzLen] = deltaE = log2(double(range)/nxtRange)*cnt;
-          ++denzLen;
-        }
-      }
-      de[c] = deltaE;
-    }
-
-    int indx = remRange > 0 ? remRange - 1 : -remRange - 1;
-    std::nth_element(&denz[0], &denz[indx], &denz[denzLen]);
-    double thr = denz[indx];
-
-    // when remRange > 0 increment ranges that will have maximal effect on entropy
-    // when remRange > 0 decrement ranges that will have minimal effect on entropy
-    for (unsigned c = 0; c <= maxC; ++c) {
-      double deltaE = de[c];
-      if (deltaE != 0 && deltaE < thr) {
-        c2range[c] += incrDecr;
-        remRange   -= incrDecr;
-      }
-    }
-    for (unsigned c = 0; remRange != 0; ++c) {
-      double deltaE = de[c];
-      if (deltaE == thr) {
-        c2range[c] += incrDecr;
-        remRange   -= incrDecr;
-      }
-    }
-  }
-}
 
 // return value:
 // -1  - source consists of repetition of the same character
 // >=0 - maxC = the character with the biggest numeric value that appears in the source at least once
-static int prepare1(const uint8_t* src, unsigned srclen, uint16_t c2low[257], double* pQuantizedEntropy, double* pInfo)
+static int prepare1(
+  unsigned * __restrict h,
+  uint8_t*   __restrict qh, // quantized histogram
+  const uint8_t*    src, unsigned srclen,
+  double* pInfo)
 {
   // calculated statistics of appearance
-  unsigned stat[256]={0};
+  memset(h, 0, sizeof(h[0])*256);
   for (unsigned i = 0; i < srclen; ++i)
-    ++stat[src[i]];
+    ++h[src[i]];
 
   // find maximal frequency and highest-numbered character that occurred at least once
   unsigned maxC = 255;
   unsigned maxCnt = 0;
   for (unsigned c = 0; c < 256; ++c) {
-    unsigned cnt = stat[c];
+    unsigned cnt = h[c];
     if (cnt != 0) {
       maxC = c;
       if (maxCnt < cnt)
@@ -146,7 +43,7 @@ static int prepare1(const uint8_t* src, unsigned srclen, uint16_t c2low[257], do
     // calculate source entropy
     double entropy = 0;
     for (unsigned c = 0; c <= maxC; ++c) {
-      unsigned cnt = stat[c];
+      unsigned cnt = h[c];
       if (cnt)
         entropy += log2(double(srclen)/cnt)*cnt;
     }
@@ -157,23 +54,41 @@ static int prepare1(const uint8_t* src, unsigned srclen, uint16_t c2low[257], do
   if (maxCnt==srclen)
     return -1; // source consists of repetition of the same character
 
-  histogram_to_range(c2low, maxC, stat, srclen);
+  double invhLen = 2.0/srclen;
+  double M_PI = 3.1415926535897932384626433832795;
+  for (unsigned c = 0; c <= maxC; ++c) {
+    unsigned val = 0;
+    unsigned cnt = h[c];
+    if (cnt != 0) {
+      val = round((asin(cnt*invhLen - 1.0)/M_PI + 0.5)*QH_SCALE);
+      if (val < 1)
+        val = 1;
+      else if (val >= QH_SCALE)
+        val = QH_SCALE-1;
+    }
+    qh[c] = val;
+  }
+
+  return maxC;
+}
+
+static void prepare2(
+  uint16_t* __restrict c2low, unsigned maxC,
+  const unsigned       h[256],
+  const uint8_t        qh[256],
+  double*              pQuantizedEntropy)
+{
+  quantized_histogram_to_range(c2low, maxC, qh, VAL_RANGE);
 
   // calculate entropy after quantization
   double entropy = 0;
   for (unsigned c = 0; c <= maxC; ++c) {
-    unsigned cnt = stat[c];
+    unsigned cnt = h[c];
     if (cnt)
       entropy += log2(double(VAL_RANGE)/c2low[c])*cnt;
   }
   *pQuantizedEntropy = entropy;
-  if (pInfo)
-    pInfo[3] = entropy;
-  return maxC;
-}
 
-static void prepare2(uint16_t c2low[257], unsigned maxC)
-{
   // c2low -> cumulative sums of ranges
   unsigned lo = 0;
   for (unsigned c = 0; c <= maxC; ++c) {
@@ -203,22 +118,20 @@ static int inline floor_log2(unsigned x)
 }
 
 // return the number of stored octets
-static int store_model(uint8_t* dst, const uint16_t c2range[256], unsigned maxC, double* pNbits, CArithmeticEncoder* pEnc)
+static int store_model(uint8_t* dst, const uint8_t qh[256], unsigned maxC, double* pNbits, CArithmeticEncoder* pEnc)
 {
   int nRanges = 0;
-  unsigned hist[RANGE_BITS+1] = {0};
-  for (unsigned c = 0; c < maxC; ++c) {
-    uint32_t range = c2range[c];
+  unsigned hist[QH_BITS+1] = {0};
+  for (unsigned c = 0; c <= maxC; ++c) {
+    uint32_t range = qh[c];
     if (range > 0) {
       ++nRanges;
       hist[1+floor_log2(range)] += 1;
     }
   }
-  // No need to store a last range.
-  // Decoder will calculate it as VAL_RANGE-sum of previous ranges
-  hist[0] = maxC - nRanges; // # of zero ranges before maxC
+  hist[0] = maxC + 1 - nRanges; // # of zero ranges before maxC
 
-  // for (int i = 0; i< RANGE_BITS+1; ++i)
+  // for (int i = 0; i< QH_BITS+1; ++i)
     // printf("hist[%2d]=%d\n", i, hist[i]);
   // for (int i = 0; i< 256; ++i)
     // printf("range[%3d]=%5d\n", i, c2range[i]);
@@ -228,20 +141,20 @@ static int store_model(uint8_t* dst, const uint16_t c2range[256], unsigned maxC,
   // store maxC
   p = pEnc->put(256, maxC, 1, p);
   // store histogram of log2
-  unsigned rem = maxC;
-  for (int i = 0; i < RANGE_BITS && rem > 0; ++i) {
+  unsigned rem = maxC + 1;
+  for (int i = 0; i < QH_BITS && rem > 0; ++i) {
     p = pEnc->put(rem+1, hist[i], 1, p);
     rem -= hist[i];
   }
 
   // store c2range
-  for (unsigned c = 0; c < maxC; ++c) {
-    uint32_t range = c2range[c];
+  for (unsigned c = 0; c <= maxC; ++c) {
+    uint32_t range = qh[c];
     int log2_i = range == 0 ? 0 : 1+floor_log2(range);
     int lo = 0;
     for (int i = 0; i < log2_i; ++i)
       lo += hist[i];
-    p = pEnc->put(maxC, lo, hist[log2_i], p); // exp.range
+    p = pEnc->put(maxC+1, lo, hist[log2_i], p); // exp.range
     if (log2_i > 1) {
       uint32_t expRangeSz = uint32_t(1) << (log2_i-1);
       p = pEnc->put(expRangeSz, range-expRangeSz, 1, p); // offset within range
@@ -366,9 +279,10 @@ void CArithmeticEncoder::spillOverflow(uint8_t* dst)
 // >0 - the length of compressed buffer
 int arithmetic_encode(std::vector<uint8_t>* dst, const uint8_t* src, int srclen, double* pInfo)
 {
-  uint16_t c2low[257];
-  double quantizedEntropy;
-  int maxC = prepare1(src, srclen, c2low, &quantizedEntropy, pInfo);
+  unsigned h[256];  // histogram
+  uint8_t  qh[256]; // quantized histogram
+  int maxC = prepare1(h, qh, src, srclen, pInfo);
+
 
   if (maxC == -1)
     return -1; // source consists of repetition of the same character
@@ -378,17 +292,22 @@ int arithmetic_encode(std::vector<uint8_t>* dst, const uint8_t* src, int srclen,
   CArithmeticEncoder enc;
   enc.init();
   double modelLenBits;
-  unsigned modellen = store_model(&dst->at(sz0), c2low, maxC, &modelLenBits, &enc);
+  unsigned modellen = store_model(&dst->at(sz0), qh, maxC, &modelLenBits, &enc);
   if (pInfo)
     pInfo[1] = modelLenBits;
 
+  uint16_t c2low[257];
+  double quantizedEntropy;
+  prepare2(c2low, maxC, h, qh, &quantizedEntropy);
+
   int lenEst = (modelLenBits+quantizedEntropy+7)/8;
+  if (pInfo)
+    pInfo[3] = quantizedEntropy;
   if (lenEst >= srclen)
     return 0; // not compressible
 
   // printf("ml=%u\n", modellen);
   dst->resize(sz0 + lenEst + 64);
-  prepare2(c2low, maxC);
   int dstlen = encode(&dst->at(sz0+modellen), src, srclen, c2low, &enc);
 
   if (pInfo)
