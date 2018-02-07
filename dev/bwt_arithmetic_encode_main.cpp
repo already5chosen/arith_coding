@@ -32,6 +32,8 @@ static void tst21(const uint8_t* src, int srclen);
 static void tst22(const uint8_t* src, int srclen);
 static void tst23(const uint8_t* src, int srclen);
 static void tst24(const uint8_t* src, int srclen);
+static void tst25(const uint8_t* src, int srclen);
+static void tst26(const uint8_t* src, int srclen);
 int main(int argz, char** argv)
 {
   if (argz < 3) {
@@ -110,6 +112,8 @@ int main(int argz, char** argv)
             tst7(&bwtOut.at(0), tilelen);
             tst8(&bwtOut.at(0), tilelen);
             tst18(&bwtOut.at(0), tilelen);
+            tst25(&bwtOut.at(0), tilelen);
+            tst26(&bwtOut.at(0), tilelen);
             tst23(&bwtOut.at(0), tilelen);
             tst19(&bwtOut.at(0), tilelen);
             tst24(&bwtOut.at(0), tilelen);
@@ -216,7 +220,7 @@ int main(int argz, char** argv)
   return ret;
 }
 
-static double calc_entr(int* h, int hlen)
+static double calc_entr(int* h, int hlen, int* pTot = 0)
 {
   int tot = 0;
   double res = 0;
@@ -229,6 +233,8 @@ static double calc_entr(int* h, int hlen)
   }
   if (tot > 0)
     res += log2(tot)*tot;
+  if (pTot)
+    *pTot = tot;
   return res;
 }
 
@@ -818,10 +824,86 @@ static void tst18(const uint8_t* src0, int srclen)
     }
   }
 
-  double e0 = calc_entr(h, 257)/8;
+  int tot;
+  double e0 = calc_entr(h, 257, &tot)/8;
   double e1 = 0/8;
   double e2 = 0/8;
-  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf zeros rle encoded with RUNA/RUNB\n", e0, e1, e2, e0+e1+e2);
+  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf zeros rle encoded with RUNA/RUNB %.3f %.3f %.3f %.3f  %.2f\n", e0, e1, e2, e0+e1+e2
+    , double(h[0])/tot
+    , double(h[1])/tot
+    , double(h[3])/tot
+    , double(h[4])/tot
+    , double(srclen)/tot
+    );
+
+  delete [] src;
+}
+
+static void tst25(const uint8_t* src0, int srclen)
+{
+  uint8_t* src = mtf(src0, srclen);
+
+  int h[2][257] = {{0}};
+  int tIdx = 0;
+  for (int i = 0; i < srclen; ) {
+    int c = src[i];
+    ++i;
+    if (c == 0) {
+      int i0 = i;
+      while (src[i] == 0) ++i;
+      unsigned rl = i - i0 + 1;
+      // encode to RUNA=1/RUNB=0
+      do {
+        ++h[tIdx][rl & 1];
+        rl = (rl - 1) / 2;
+        tIdx = 1;
+      } while (rl != 0);
+    } else {
+      ++h[tIdx][c+1];
+      tIdx = 0;
+    }
+  }
+
+  double e0 = calc_entr(h[0], 257)/8;
+  double e1 = calc_entr(h[1], 257)/8;
+  double e2 = 0/8;
+  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf zeros rle encoded with RUNA/RUNB. 2 tables.\n", e0, e1, e2, e0+e1+e2
+    );
+
+  delete [] src;
+}
+
+static void tst26(const uint8_t* src0, int srclen)
+{
+  uint8_t* src = mtf(src0, srclen);
+
+  int h[3][257] = {{0}};
+  int tIdx = 2;
+  for (int i = 0; i < srclen; ) {
+    int c = src[i];
+    ++i;
+    if (c == 0) {
+      int i0 = i;
+      while (src[i] == 0) ++i;
+      unsigned rl = i - i0 + 1;
+      // encode to RUNA=1/RUNB=0
+      do {
+        int idx = rl & 1;
+        ++h[tIdx][idx];
+        tIdx = idx;
+        rl = (rl - 1) / 2;
+      } while (rl != 0);
+    } else {
+      ++h[tIdx][c+1];
+      tIdx = 2;
+    }
+  }
+
+  double e0 = calc_entr(h[2], 257)/8;
+  double e1 = calc_entr(h[1], 257)/8;
+  double e2 = calc_entr(h[0], 257)/8;
+  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf zeros rle encoded with RUNA/RUNB. 3 tables.\n", e0, e1, e2, e0+e1+e2
+    );
 
   delete [] src;
 }
