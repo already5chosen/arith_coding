@@ -7,6 +7,7 @@
 
 #include "bwt_e.h"
 #include "arithmetic_encode.h"
+#include "arithmetic_coder_ut.h"
 
 static void tst1(const uint8_t* src, int srclen);
 static void tst2(const uint8_t* src, int srclen);
@@ -32,8 +33,14 @@ static void tst21(const uint8_t* src, int srclen);
 static void tst22(const uint8_t* src, int srclen);
 static void tst23(const uint8_t* src, int srclen);
 static void tst24(const uint8_t* src, int srclen);
+#if 0
 static void tst25(const uint8_t* src, int srclen);
 static void tst26(const uint8_t* src, int srclen);
+#endif
+static void tst27(const uint8_t* src, int srclen);
+static void tst28(const uint8_t* src, int srclen);
+static void tst29(const uint8_t* src, int srclen);
+
 int main(int argz, char** argv)
 {
   if (argz < 3) {
@@ -112,9 +119,14 @@ int main(int argz, char** argv)
             tst7(&bwtOut.at(0), tilelen);
             tst8(&bwtOut.at(0), tilelen);
             tst18(&bwtOut.at(0), tilelen);
+            #if 0
             tst25(&bwtOut.at(0), tilelen);
             tst26(&bwtOut.at(0), tilelen);
+            #endif
+            tst27(&bwtOut.at(0), tilelen);
             tst23(&bwtOut.at(0), tilelen);
+            tst28(&bwtOut.at(0), tilelen);
+            tst29(&bwtOut.at(0), tilelen);
             tst19(&bwtOut.at(0), tilelen);
             tst24(&bwtOut.at(0), tilelen);
             tst20(&bwtOut.at(0), tilelen);
@@ -825,8 +837,9 @@ static void tst18(const uint8_t* src0, int srclen)
   }
 
   int tot;
-  double e0 = calc_entr(h, 257, &tot)/8;
-  double e1 = 0/8;
+  double e0 = calc_entr(&h[7], 257-7, &tot)/8;
+  h[7] = tot;
+  double e1 = calc_entr(&h[0], 8, &tot)/8;
   double e2 = 0/8;
   printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf zeros rle encoded with RUNA/RUNB %.3f %.3f %.3f %.3f  %.2f\n", e0, e1, e2, e0+e1+e2
     , double(h[0])/tot
@@ -839,6 +852,107 @@ static void tst18(const uint8_t* src0, int srclen)
   delete [] src;
 }
 
+static void quantize_histogram_by_asin(uint8_t* qh, const int* h, int len, int QH_SCALE, int* pTot = 0)
+{
+  int tot = 0;
+  for (int c = 0; c < len; ++c)
+    tot += h[c];
+
+  if (pTot)
+    *pTot = tot;
+
+  double invhTot = 2.0/tot;
+  double M_PI = 3.1415926535897932384626433832795;
+  for (unsigned c = 0; c < len; ++c) {
+    unsigned val = 0;
+    unsigned cnt = h[c];
+    if (cnt != 0) {
+      val = round((asin(cnt*invhTot - 1.0)/M_PI + 0.5)*QH_SCALE);
+      if (val < 1)
+        val = 1;
+      else if (val >= QH_SCALE)
+        val = QH_SCALE-1;
+    }
+    qh[c] = val;
+  }
+}
+
+template <typename q_t>
+static double calc_quantized_entropy(const q_t* q, const int* h, int len, int valRange)
+{
+  // calculate entropy after quantization
+  double e = 0;
+  for (int c = 0; c < len; ++c) {
+    unsigned cnt = h[c];
+    if (cnt)
+      e -= log2(q[c]/double(valRange))*cnt;
+  }
+  return e;
+}
+
+static double calc_entropy_of_quantized_histogram(const uint8_t* qh, int len)
+{
+  // encode qh with code, similar to RUNA/RUNB
+  int h[3] = {0};
+  for (int c = 0; c < len; ++c) {
+    unsigned cnt = qh[c] + 1;
+    while (cnt > 1) {
+      ++h[cnt % 2];
+      cnt /= 2;
+    }
+  }
+  h[2] = len;
+  return calc_entr(h, 3);
+}
+
+static void tst27(const uint8_t* src0, int srclen)
+{
+  uint8_t* src = mtf(src0, srclen);
+
+  int h[257] = {0};
+  for (int i = 0; i < srclen; ) {
+    int c = src[i];
+    ++i;
+    if (c == 0) {
+      int i0 = i;
+      while (src[i] == 0) ++i;
+      unsigned rl = i - i0 + 1;
+      // encode to RUNA=1/RUNB=0
+      do {
+        ++h[rl & 1];
+        rl = (rl - 1) / 2;
+      } while (rl != 0);
+    } else {
+      ++h[c+1];
+    }
+  }
+
+  int hh[8];
+  for (int i = 0; i < 7; ++i)
+    hh[i] = h[i];
+
+  uint8_t qh_l[257-7];
+  quantize_histogram_by_asin(qh_l, &h[7], 257-7, 256, &hh[7]);
+  uint8_t qh_h[8];
+  quantize_histogram_by_asin(qh_h, hh, 8, 256);
+
+  int VAL_RANGE = 1 << 15;
+  uint16_t ranges_l[257-7];
+  quantized_histogram_to_range(ranges_l, 257-7, qh_l, VAL_RANGE);
+  uint16_t ranges_h[8];
+  quantized_histogram_to_range(ranges_h, 8,     qh_h, VAL_RANGE);
+
+  double e0 = calc_quantized_entropy(ranges_l, &h[7], 257-7, VAL_RANGE)/8;
+  double e1 = calc_quantized_entropy(ranges_h, hh,    8,     VAL_RANGE)/8;
+  double e2 = (calc_entropy_of_quantized_histogram(qh_l, 257-7)+
+               calc_entropy_of_quantized_histogram(qh_h, 8))/8;
+  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf zeros rle encoded with RUNA/RUNB q.asin.256\n", e0, e1, e2, e0+e1+e2
+    );
+
+  delete [] src;
+}
+
+#if 0
 static void tst25(const uint8_t* src0, int srclen)
 {
   uint8_t* src = mtf(src0, srclen);
@@ -872,7 +986,9 @@ static void tst25(const uint8_t* src0, int srclen)
 
   delete [] src;
 }
+#endif
 
+#if 0
 static void tst26(const uint8_t* src0, int srclen)
 {
   uint8_t* src = mtf(src0, srclen);
@@ -907,6 +1023,7 @@ static void tst26(const uint8_t* src0, int srclen)
 
   delete [] src;
 }
+#endif
 
 static const int VAL_RANGE = 1 << 14;
 static void quantize_histogram(int* q, const int* h, int len)
@@ -955,18 +1072,6 @@ static void quantize_histogram(int* q, const int* h, int len)
   }
 }
 
-static double calc_quantize_entropy(const int* q, const int* h, int len)
-{
-  // calculate entropy after quantization
-  double e = 0;
-  for (int c = 0; c < 257; ++c) {
-    unsigned cnt = h[c];
-    if (cnt)
-      e -= log2(q[c]/double(VAL_RANGE))*cnt;
-  }
-  return e;
-}
-
 static void tst23(const uint8_t* src0, int srclen)
 {
   const int CHUNK_SZ = 8192;
@@ -1000,7 +1105,7 @@ static void tst23(const uint8_t* src0, int srclen)
 
     int q[257];
     quantize_histogram(q, h, 257);
-    e0 += calc_quantize_entropy(q, h, 257)/8;
+    e0 += calc_quantized_entropy(q, h, 257, VAL_RANGE)/8;
 
     // encode q[] - q0[] with code, similar to RUNA/RUNB
     int hd[4] = {0};
@@ -1024,6 +1129,112 @@ static void tst23(const uint8_t* src0, int srclen)
 
   double e2 = 0/8;
   printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf zeros rle encoded with RUNA/RUNB. %d * %dB chunks  %11.3f\n", e0, e1, e2, e0+e1+e2, nChunks, CHUNK_SZ, e00);
+
+  delete [] src;
+}
+
+static void tst28(const uint8_t* src0, int srclen)
+{
+  const int CHUNK_SZ = 8192;
+  uint8_t* src = mtf(src0, srclen);
+
+  int nChunks = 0;
+  double e0 = 0;
+  double e1 = 0;
+  for (int i = 0; i < srclen; ) {
+    int h[257] = {0};
+    for (int nsym = 0; i < srclen && nsym < CHUNK_SZ; ++nsym) {
+      int c = src[i];
+      ++i;
+      if (c == 0) {
+        int i0 = i;
+        while (src[i] == 0) ++i;
+        unsigned rl = i - i0 + 1;
+        // encode to RUNA=1/RUNB=0
+        do {
+          ++h[rl & 1];
+          rl = (rl - 1) / 2;
+        } while (rl != 0);
+      } else {
+        ++h[c+1];
+      }
+    }
+
+    uint8_t qh[257];
+    quantize_histogram_by_asin(qh, h, 257, 256);
+    e1 += calc_entropy_of_quantized_histogram(qh, 257) / 8;
+
+    int VAL_RANGE = 1 << 15;
+    uint16_t ranges[257];
+    quantized_histogram_to_range(ranges, 257, qh, VAL_RANGE);
+    e0 += calc_quantized_entropy(ranges, h, 257, VAL_RANGE)/8;
+
+    ++nChunks;
+  }
+
+  double e2 = 0/8;
+  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf zeros rle encoded with RUNA/RUNB. %d * %dB chunks  q.asin.256\n", e0, e1, e2, e0+e1+e2, nChunks, CHUNK_SZ);
+
+  delete [] src;
+}
+
+static void tst29(const uint8_t* src0, int srclen)
+{
+  const int CHUNK_SZ = 8192/4;
+  uint8_t* src = mtf(src0, srclen);
+
+  int VAL_RANGE = 1 << 15;
+  int nChunks = 0;
+  double e0 = 0;
+  double e2 = 0;
+  int h_l[250] = {0};
+  for (int i = 0; i < srclen; ) {
+    int h[257] = {0};
+    for (int nsym = 0; i < srclen && nsym < CHUNK_SZ; ++nsym) {
+      int c = src[i];
+      ++i;
+      if (c == 0) {
+        int i0 = i;
+        while (src[i] == 0) ++i;
+        unsigned rl = i - i0 + 1;
+        // encode to RUNA=1/RUNB=0
+        do {
+          ++h[rl & 1];
+          rl = (rl - 1) / 2;
+        } while (rl != 0);
+      } else {
+        ++h[c+1];
+      }
+    }
+
+    int tot_l = 0;
+    for (int c = 0; c < 250; ++c) {
+      int hv = h[c+7];
+      h_l[c] += hv;
+      tot_l  += hv;
+    }
+    h[7] = tot_l;
+
+    uint8_t qh[8];
+    quantize_histogram_by_asin(qh, h, 8, 256);
+    e2 += calc_entropy_of_quantized_histogram(qh, 8) / 8;
+
+    uint16_t ranges[8];
+    quantized_histogram_to_range(ranges, 8, qh, VAL_RANGE);
+    e0 += calc_quantized_entropy(ranges, h, 8, VAL_RANGE)/8;
+
+    ++nChunks;
+  }
+
+  uint8_t qh_l[250];
+  quantize_histogram_by_asin(qh_l, h_l, 250, 256);
+  e2 += calc_entropy_of_quantized_histogram(qh_l, 250) / 8;
+
+  uint16_t ranges_l[250];
+  quantized_histogram_to_range(ranges_l, 250, qh_l, VAL_RANGE);
+  double e1 = calc_quantized_entropy(ranges_l, h_l, 250, VAL_RANGE)/8;
+
+  printf("%11.3f + %11.3f + %8.3f = %11.3f - mtf zeros rle encoded with RUNA/RUNB. %d * %dB chunks  q.asin.256 8+250\n", e0, e1, e2, e0+e1+e2, nChunks, CHUNK_SZ);
 
   delete [] src;
 }
