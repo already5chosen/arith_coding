@@ -1,17 +1,88 @@
 #include <cstdint>
 #include <cstring>
-#include <algorithm>
 // #include <cstdio>
-// #include <cmath>
-// #include <cctype>
 
 #include "bwt_mtf_rle_d.h"
 
-void ibwt(uint8_t* dst, const uint8_t* src, int len, int first_i)
+// return 0 for success, negative number on failure
+static int irle_imtf(
+ uint8_t*       dst,     // [dstlen]
+ int            dstlen,
+ int32_t        histogram[256],
+ const uint8_t* src,
+ int            srclen)
 {
-  int32_t histogram[256]={0};
-  for (int i = 0; i < len; ++i)
-    ++histogram[src[i]];
+  // initialize move-to-front decoder table
+  uint8_t t[256];
+  for (int i = 0; i < 256; ++i)
+    t[i] = i;
+
+  uint32_t rlAcc = 0;
+  uint32_t rlMsb = 1;
+  for (int i = 0; i < srclen; ++i) {
+    int srcC = src[i];
+    if (srcC < 2) {
+      // zero run
+      rlAcc |= (-srcC) & rlMsb;
+      rlMsb += rlMsb;
+      if (rlMsb == 0)
+        return -1; // zero run too long (A)
+    } else {
+      if (rlMsb > 1) {
+        // insert zero run
+        uint32_t rl = rlAcc + rlMsb - 1;
+        rlMsb = 1;
+        rlAcc = 0;
+        if (rl >= uint32_t(dstlen))
+          return -2; // zero run too long (B)
+        int c0 = t[0];
+        histogram[c0] += rl;
+        memset(dst, c0, rl);
+        dst += rl;
+        dstlen -= rl;
+      }
+      
+      if (dstlen == 0) 
+        return -3; // decoded section is longer than expected
+      dstlen -= 1;
+      
+      int mtfC = srcC - 1;
+      if (srcC == 255) {
+        ++i;
+        if (i == srclen)
+          return -4; // end of input in the middle of escape sequence
+        mtfC = src[i];
+        if (mtfC < 254)
+          return -5; // bad escape sequence
+      }
+      int c = t[mtfC];
+      histogram[c] += 1;
+      *dst++  = c;
+      
+      // update move-to-front decoder table
+      memmove(&t[1], &t[0], mtfC);
+      t[0] = c;
+    }
+  }
+  if (rlMsb > 1) {
+    // insert last zero run
+    uint32_t rl = rlAcc + rlMsb - 1;
+    if (rl > uint32_t(dstlen))
+      return -6; // zero run too long (C)
+    int c0 = t[0];
+    histogram[c0] += rl;
+    memset(dst, c0, rl);
+    dstlen -= rl;
+  }
+  
+  if (dstlen > 0)
+      return -7; // decoded section is shorter than expected
+
+  return 0;
+}
+
+static void ibwt(uint8_t* dst, const uint8_t* src, int32_t* ibwtIdx, int len, int bwtPrimaryIndex, int32_t histogram[256])
+{
   // integrate histogram
   int32_t acc = 0;
   for (int i = 0; i < 256; ++i) {
@@ -20,18 +91,33 @@ void ibwt(uint8_t* dst, const uint8_t* src, int len, int first_i)
     acc += h;
   }
 
-  int* T = new int[len];
   for (int i = 0; i < len; ++i) {
     int c = src[i];
-    T[histogram[c]] = i;
+    ibwtIdx[histogram[c]] = i;
     ++histogram[c];
   }
 
-  int index = first_i;
+  int index = bwtPrimaryIndex;
   for (int i = 0; i < len; ++i) {
     dst[i] = src[index];
-    index  = T[index];
+    index  = ibwtIdx[index];
   }
-
-  delete [] T;
 }
+
+// return 0 for success, negative number on failure
+int irle_imtf_ibwt(
+ uint8_t*       dst,     // [dstlen]
+ uint8_t*       ibwtInp, // [dstlen]
+ int32_t*       ibwtIdx, // [dstlen]
+ int            dstlen,
+ int            bwtPrimaryIndex,
+ const uint8_t* src,
+ int            srclen)
+{
+  int32_t histogram[256]={0};
+  int err = irle_imtf(ibwtInp, dstlen, histogram, src, srclen);
+  if (err == 0)
+    ibwt(dst, ibwtInp, ibwtIdx, dstlen, bwtPrimaryIndex, histogram);
+  return err;
+}
+

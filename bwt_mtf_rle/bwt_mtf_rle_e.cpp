@@ -61,7 +61,7 @@ int bwt_mtf_rle(  // return the length of destination array in octets
  int32_t*  tmp_dst, // srclen*uint32_t
  int*      pBwtPrimaryIndex,
  int*      pNruns,  // number of runs in the destination array
- const     uint8_t* src, 
+ const     uint8_t* src,
  int       srclen)
 {
   // BWT sort
@@ -72,11 +72,11 @@ int bwt_mtf_rle(  // return the length of destination array in octets
   cmp.m_srclen = srclen;
   std::sort(&tmp_dst[0], &tmp_dst[srclen], cmp);
 
-  // initialize move-to-front encoder table  
+  // initialize move-to-front encoder table
   uint8_t t[256];
   for (int i = 0; i < 256; ++i)
     t[i] = i;
-  
+
   int nRuns = 0;
   uint8_t* dst = reinterpret_cast<uint8_t*>(tmp_dst);
   unsigned zRunLen = 0;
@@ -87,10 +87,10 @@ int bwt_mtf_rle(  // return the length of destination array in octets
     if (k == 1)
       *pBwtPrimaryIndex = i;
     uint8_t c = src[k-1];
-    
+
     // move-to-front encoder
     int v1 = t[0];
-    if (c == v1) { 
+    if (c == v1) {
       // c already at front - count length of zero run
       ++zRunLen;
     } else {
@@ -115,7 +115,7 @@ int bwt_mtf_rle(  // return the length of destination array in octets
       }
       ++dst;
     }
-  }  
+  }
   if (zRunLen != 0) {
     ++nRuns;
     dst = insertZeroRun(dst, zRunLen);

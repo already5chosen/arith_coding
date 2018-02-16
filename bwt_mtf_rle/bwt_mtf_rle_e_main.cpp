@@ -55,7 +55,7 @@ int main(int argz, char** argv)
           storeAs3octets(&hdr[6], bwtPrimaryIndex);
           uint64_t t1 = __rdtsc();
           if (vFlag)
-            printf("%7d->%7d chars. %8.0f clocks. %4.1f clocks/char\n"
+            printf("%7d->%7d chars. %10.0f clocks. %6.1f clocks/char\n"
               ,int(tilelen)
               ,ressz
               ,double(t1-t0)
