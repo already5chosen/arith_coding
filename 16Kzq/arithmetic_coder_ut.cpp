@@ -151,11 +151,11 @@ static uint32_t log_estimate(uint32_t x)
     return uint32_t(-1)/x;
 }
 
-static void histogram_to_range(uint16_t* ranges, unsigned maxC, const uint32_t* h, uint32_t hTot, unsigned range_scale)
+static void histogram_to_range(uint16_t* ranges, unsigned len, const uint32_t* h, uint32_t hTot, unsigned range_scale)
 {
   // translate counts to ranges and store in ranges
 
-  memset(ranges, 0, sizeof(*ranges)*(maxC+1));
+  memset(ranges, 0, sizeof(*ranges)*len);
 
   // 1st pass - translate characters that are rounded range==1 from below
   uint32_t remCnt   = hTot;
@@ -164,7 +164,7 @@ static void histogram_to_range(uint16_t* ranges, unsigned maxC, const uint32_t* 
   do {
     uint32_t cntSum  = 0;
     nRanges = 0;
-    for (unsigned c = 0; c <= maxC; ++c) {
+    for (unsigned c = 0; c < len; ++c) {
       uint32_t cnt = h[c];
       if (cnt != 0 && ranges[c]==0) {
         if (uint64_t(cnt)*remRange < remCnt) {
@@ -180,7 +180,7 @@ static void histogram_to_range(uint16_t* ranges, unsigned maxC, const uint32_t* 
 
   // 2nd pass - translate remaining characters while rounding toward zero
   unsigned rangeSum = 0;
-  for (unsigned c = 0; c <= maxC; ++c) {
+  for (unsigned c = 0; c < len; ++c) {
     uint32_t cnt = h[c];
     if (cnt != 0) {
       unsigned range = ranges[c];
@@ -195,7 +195,7 @@ static void histogram_to_range(uint16_t* ranges, unsigned maxC, const uint32_t* 
     // calculate effect of increment of range on entropy
     int64_t de[256], denz[256];
     int denzLen = 0;
-    for (unsigned c = 0; c <= maxC; ++c) {
+    for (unsigned c = 0; c < len; ++c) {
       int64_t deltaE = 0;
       unsigned cnt = h[c];
       if (cnt != 0) {
@@ -215,7 +215,7 @@ static void histogram_to_range(uint16_t* ranges, unsigned maxC, const uint32_t* 
     int64_t thr = denz[indx];
 
     // increment ranges that will have maximal effect on entropy
-    for (unsigned c = 0; c <= maxC; ++c) {
+    for (unsigned c = 0; c < len; ++c) {
       int64_t deltaE = de[c];
       if (deltaE != 0 && deltaE < thr) {
         ranges[c] += 1;
@@ -232,14 +232,14 @@ static void histogram_to_range(uint16_t* ranges, unsigned maxC, const uint32_t* 
   }
 }
 
-void quantized_histogram_to_range(uint16_t* ranges, unsigned maxC, const uint8_t* qh, unsigned range_scale)
+void quantized_histogram_to_range(uint16_t* ranges, unsigned len, const uint8_t* qh, unsigned range_scale)
 {
   // translate quantized histogram from asin domain to linear domain
   uint32_t qhr[256];
   uint32_t qhrTot = 0;
-  for (unsigned c = 0; c <= maxC; ++c)
+  for (unsigned c = 0; c < len; ++c)
     qhrTot += (qhr[c] = dequantization_tab[qh[c]]);
 
-  histogram_to_range(ranges, maxC, qhr, qhrTot, range_scale);
+  histogram_to_range(ranges, len, qhr, qhrTot, range_scale);
 }
 

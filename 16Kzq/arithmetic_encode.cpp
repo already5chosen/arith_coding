@@ -78,7 +78,7 @@ static void prepare2(
   const uint8_t        qh[256],
   double*              pQuantizedEntropy)
 {
-  quantized_histogram_to_range(c2low, maxC, qh, VAL_RANGE);
+  quantized_histogram_to_range(c2low, maxC+1, qh, VAL_RANGE);
 
   // calculate entropy after quantization
   double entropy = 0;

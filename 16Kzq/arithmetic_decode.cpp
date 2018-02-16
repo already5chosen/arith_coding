@@ -199,7 +199,7 @@ int arithmetic_decode_model_t::load_and_prepare(CArithmeticDecoder* pDec)
   uint8_t qh[256];
   int maxC = load_quantized_histogram(qh, pDec);
   if (maxC >= 0) {
-    quantized_histogram_to_range(m_c2low, maxC, qh, VAL_RANGE);
+    quantized_histogram_to_range(m_c2low, maxC+1, qh, VAL_RANGE);
     for (unsigned c = maxC+1; c < 256; ++c)
       m_c2low[c] = 0;
     prepare();
