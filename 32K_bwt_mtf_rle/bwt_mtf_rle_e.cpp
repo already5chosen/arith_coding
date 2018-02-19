@@ -47,30 +47,39 @@ public:
   }
 };
 
-static uint8_t* insertZeroRun(uint8_t* dst, unsigned zRunLen)
+void bwt_sort(int32_t* dst, const uint8_t* src, int srclen)
+{ // BWT sort
+  for (int i = 0; i < srclen; ++i)
+    dst[i] = i;
+  bwt_compare cmp;
+  cmp.m_src = src;
+  cmp.m_srclen = srclen;
+  std::sort(&dst[0], &dst[srclen], cmp);
+}
+
+static uint8_t* insertZeroRun(uint8_t* dst, unsigned zRunLen, int32_t* histogram)
 { // encode length of zero run by method similar to bzip2' RUNA/RUNB
   zRunLen += 1;
   do {
-    *dst++ = zRunLen % 2;
+    int c = zRunLen % 2;
+    ++histogram[c];
+    *dst++ = c;
     zRunLen /= 2;
   } while (zRunLen > 1);
   return dst;
 }
 
-int bwt_mtf_rle(  // return the length of destination array in octets
- int32_t*  tmp_dst, // srclen*uint32_t
- int*      pBwtPrimaryIndex,
- int*      pNruns,  // number of runs in the destination array
- const     uint8_t* src,
- int       srclen)
+// return value - the length of destination array in octets
+int bwt_reorder_mtf_rle(
+ int32_t*            idx_dst, // srclen*uint32_t,
+                              // on input  - result of bwt_sort
+                              // on output - result of BWT followed by move-to-front and by zero-run-len encoding
+ const uint8_t*      src,
+ int                 srclen,
+ bwt_mtf_rle_meta_t* pMeta)
 {
-  // BWT sort
-  for (int i = 0; i < srclen; ++i)
-    tmp_dst[i] = i;
-  bwt_compare cmp;
-  cmp.m_src = src;
-  cmp.m_srclen = srclen;
-  std::sort(&tmp_dst[0], &tmp_dst[srclen], cmp);
+  // initialize histogram
+  memset(pMeta->histogram, 0, sizeof(pMeta->histogram));
 
   // initialize move-to-front encoder table
   uint8_t t[256];
@@ -78,14 +87,14 @@ int bwt_mtf_rle(  // return the length of destination array in octets
     t[i] = i;
 
   int nRuns = 0;
-  uint8_t* dst = reinterpret_cast<uint8_t*>(tmp_dst);
+  uint8_t* dst = reinterpret_cast<uint8_t*>(idx_dst);
   unsigned zRunLen = 0;
   for (int i = 0; i < srclen; ++i) {
-    int k = tmp_dst[i];
+    int k = idx_dst[i];
     if (k == 0)
       k = srclen;
     if (k == 1)
-      *pBwtPrimaryIndex = i;
+      pMeta->bwtPrimaryIndex = i;
     uint8_t c = src[k-1];
 
     // move-to-front encoder
@@ -97,7 +106,7 @@ int bwt_mtf_rle(  // return the length of destination array in octets
       ++nRuns;
       if (zRunLen != 0) {
         ++nRuns;
-        dst = insertZeroRun(dst, zRunLen);
+        dst = insertZeroRun(dst, zRunLen, pMeta->histogram);
         zRunLen = 0;
       }
       t[0] = c;
@@ -108,7 +117,9 @@ int bwt_mtf_rle(  // return the length of destination array in octets
       }
       t[k] = v0;
       int mtfC = k;
-      *dst = mtfC + 1; // range [1..253] encoded as x+1
+      int outC = mtfC + 1;
+      ++pMeta->histogram[outC];
+      *dst = outC;       // range [1..253] encoded as x+1
       if (mtfC >= 254) { // range [254..255] encode as a pair {255,x}
         *dst++ = 255;
         *dst = mtfC;
@@ -118,8 +129,8 @@ int bwt_mtf_rle(  // return the length of destination array in octets
   }
   if (zRunLen != 0) {
     ++nRuns;
-    dst = insertZeroRun(dst, zRunLen);
+    dst = insertZeroRun(dst, zRunLen, pMeta->histogram);
   }
-  *pNruns = nRuns;
-  return dst - reinterpret_cast<uint8_t*>(tmp_dst); // return the length of destination array in octets
+  pMeta->nRuns = nRuns;
+  return dst - reinterpret_cast<uint8_t*>(idx_dst); // return the length of destination array in octets
 }

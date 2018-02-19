@@ -5,7 +5,7 @@ all: bwt_ari_encode.exe bwt_ari_decode.exe
 bwt_mtf_rle_e.o: bwt_mtf_rle_e.cpp bwt_mtf_rle_e.h
 	${CC} -c $<
 
-bwt_mtf_rle_ari_e_main.o: bwt_mtf_rle_ari_e_main.cpp bwt_mtf_rle_e.h
+bwt_mtf_rle_ari_e_main.o: bwt_mtf_rle_ari_e_main.cpp bwt_mtf_rle_e.h arithmetic_encode.h
 	${CC} -c $<
 
 bwt_ari_encode.exe: bwt_mtf_rle_ari_e_main.o bwt_mtf_rle_e.o

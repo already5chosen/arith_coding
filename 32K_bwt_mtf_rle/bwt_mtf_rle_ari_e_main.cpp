@@ -5,8 +5,10 @@
 #include <x86intrin.h>
 
 #include "bwt_mtf_rle_e.h"
+#include "arithmetic_encode.h"
 
 static void storeAs3octets(uint8_t* dst, unsigned val);
+static bool isSingleCharacter(const uint8_t* src, int len);
 int main(int argz, char** argv)
 {
   if (argz < 3) {
@@ -41,37 +43,51 @@ int main(int argz, char** argv)
           done = true;
         }
         if (tilelen > 0) {
-          tmpDst.resize(tilelen);
-          uint64_t t0 = __rdtsc();
-          int bwtPrimaryIndex, nRuns;
-          int ressz = bwt_mtf_rle(  // return length of destination array in octets
-            &tmpDst.at(0), // srclen*uint32_t
-            &bwtPrimaryIndex,
-            &nRuns,     // number of runs in the destination array
-            inptile, tilelen);
           uint8_t hdr[9];
           storeAs3octets(&hdr[0], tilelen);
-          storeAs3octets(&hdr[3], ressz);
-          storeAs3octets(&hdr[6], bwtPrimaryIndex);
-          uint64_t t1 = __rdtsc();
-          if (vFlag)
-            printf("%7d->%7d chars. %10.0f clocks. %6.1f clocks/char\n"
-              ,int(tilelen)
-              ,ressz
-              ,double(t1-t0)
-              ,double(t1-t0)/tilelen
-              );
-          size_t wrlen = fwrite(hdr, 1, 9, fpout);
-          if (wrlen != 9) {
+          hdr[5] = 255; // default to special case
+          void* pRes = 0;
+          size_t hdrlen = 6;
+          int ressz  = 0;
+          if (!isSingleCharacter(inptile, tilelen)) {
+            tmpDst.resize(tilelen+256);
+            uint64_t t0 = __rdtsc();
+            bwt_sort(&tmpDst.at(0), inptile, tilelen);
+            bwt_mtf_rle_meta_t meta;
+            ressz = bwt_reorder_mtf_rle(  // return length of destination array in octets
+              &tmpDst.at(0), // both input and output
+              inptile, tilelen, &meta);
+            storeAs3octets(&hdr[3], ressz);
+            storeAs3octets(&hdr[6], meta.bwtPrimaryIndex);
+            uint64_t t1 = __rdtsc();
+            if (vFlag)
+              printf("%7d->%7d chars. %10.0f clocks. %6.1f clocks/char\n"
+                ,int(tilelen)
+                ,ressz
+                ,double(t1-t0)
+                ,double(t1-t0)/tilelen
+                );
+            hdrlen = 9;
+            pRes = &tmpDst.at(0);
+          } else {
+            // input consists of repetition of the same character
+            hdr[3] = 1;
+            hdr[4] = inptile[0];
+          }
+          // write result to file
+          size_t wrlen = fwrite(hdr, 1, hdrlen, fpout);
+          if (wrlen != hdrlen) {
             perror(outfilename);
             ret = 1;
             break;
           }
-          wrlen = fwrite(&tmpDst.at(0), 1, ressz, fpout);
-          if (wrlen != size_t(ressz)) {
-            perror(outfilename);
-            ret = 1;
-            break;
+          if (pRes) {
+            wrlen = fwrite(pRes, 1, ressz, fpout);
+            if (wrlen != size_t(ressz)) {
+              perror(outfilename);
+              ret = 1;
+              break;
+            }
           }
         }
       }
@@ -96,3 +112,12 @@ static void storeAs3octets(uint8_t* dst, unsigned val)
   dst[2] = (val >>16) % 256;
 }
 
+static bool isSingleCharacter(const uint8_t* src, int len) // len  > 0
+{
+  uint8_t c0 = src[0];
+  for (int i = 1; i < len; ++i) {
+    if (src[i] != c0)
+      return false;
+  }
+  return true; // repetition of single character
+}
