@@ -6,12 +6,59 @@
 
 #include "arithmetic_encode.h"
 #include "arithmetic_coder_ut.h"
+#include "arithmetic_coder_cfg.h"
 
 
 static const int QH_BITS  = 8;
 static const int RANGE_BITS = 14;
 static const int      QH_SCALE  = 1 << QH_BITS;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
+
+int arithmetic_encode_get_context_length(int tilelen) // return # of 32-bit words
+{
+  int nChunks = (tilelen-1)/ARITH_CODER_RUNS_PER_CHUNK + 1;
+  return nChunks*ARITH_CODER_N_DYNAMIC_SYMBOLS + 1 + 258;
+}
+
+int arithmetic_encode_chunk_callback(void* context, const uint8_t* src, int nSymbols)
+{
+  uint32_t* p = static_cast<uint32_t*>(context);
+  if (src) {
+    // regular call
+    uint32_t tmp[ARITH_CODER_N_DYNAMIC_SYMBOLS];
+    uint32_t* dynSum = &p[1];
+    memcpy(tmp, dynSum, sizeof(tmp));
+    memset(dynSum, 0, sizeof(tmp));
+
+    uint32_t* histogram = &p[2];
+    for (int i = 0; i < nSymbols; ++i) {
+      int c = src[i];
+      if (c == 255) {
+        // escape sequence for symbols 255 and 256
+        c = int(src[i+1]) + 1;
+        ++i;
+      }
+      ++histogram[c];
+    }
+
+    uint32_t chunk_i = p[0];
+    p[0] = chunk_i + 1;
+    uint32_t* chunkHistogram = &p[1+258+ARITH_CODER_N_DYNAMIC_SYMBOLS*chunk_i];
+    uint32_t dynLast = nSymbols; // sum of all symbols > ARITH_CODER_N_DYNAMIC_SYMBOLS-1
+    for (int i = 0; i < ARITH_CODER_N_DYNAMIC_SYMBOLS-1; ++i) {
+      uint32_t h = histogram[i];
+      chunkHistogram[i] = h;
+      dynSum[i] = tmp[i] + h;
+      dynLast -= h;
+    }
+    dynSum[ARITH_CODER_N_DYNAMIC_SYMBOLS-1] = tmp[ARITH_CODER_N_DYNAMIC_SYMBOLS-1] + dynLast;
+    chunkHistogram[ARITH_CODER_N_DYNAMIC_SYMBOLS-1] = dynLast;
+  } else {
+    // init
+    memset(p, 0, sizeof(uint32_t)*(1+258));
+  }
+  return ARITH_CODER_RUNS_PER_CHUNK;
+}
 
 // return value:
 // -1  - source consists of repetition of the same character
