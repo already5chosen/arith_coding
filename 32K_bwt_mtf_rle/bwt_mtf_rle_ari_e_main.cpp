@@ -52,28 +52,45 @@ int main(int argz, char** argv)
           int ressz  = 0;
           if (!isSingleCharacter(inptile, tilelen)) {
             tmpDst.resize(tilelen+256);
-            encContext.resize(arithmetic_encode_get_context_length(tilelen));
+            arithmetic_encode_init_context(&encContext, tilelen);
             uint64_t t0 = __rdtsc();
             bwt_sort(&tmpDst.at(0), inptile, tilelen);
             bwt_mtf_rle_meta_t meta;
-            ressz = bwt_reorder_mtf_rle(  // return length of destination array in octets
+            int rlesz = bwt_reorder_mtf_rle(  // return length of destination array in octets
               &tmpDst.at(0), // both input and output
-              inptile, tilelen, 
-              &meta, 
+              inptile, tilelen,
+              &meta,
               arithmetic_encode_chunk_callback,
-              &encContext.at(0));
+              &encContext);
             storeAs3octets(&hdr[3], ressz);
             storeAs3octets(&hdr[6], meta.bwtPrimaryIndex);
+            uint8_t* ariEncSrc = reinterpret_cast<uint8_t*>(&tmpDst.at(0));
+            uint8_t* ariEncDst = &ariEncSrc[rlesz];
+            double info[8];
+            ressz = arithmetic_encode(&encContext.at(0), ariEncDst, ariEncSrc, meta.nRuns, tilelen, vFlag ? info : 0);
             uint64_t t1 = __rdtsc();
             if (vFlag)
-              printf("%7d->%7d chars. %10.0f clocks. %6.1f clocks/char\n"
-                ,int(tilelen)
-                ,ressz
-                ,double(t1-t0)
-                ,double(t1-t0)/tilelen
-                );
-            hdrlen = 9;
-            pRes = &tmpDst.at(0);
+              printf("%7u->%7u. Model %7.3f. Coded %10.0f. Entropy %11.3f (%11.3f). %10.0f clocks. %6.1f clocks/char\n"
+               ,unsigned(tilelen)
+               ,ressz < 0 ? 0 : (ressz == 0 ? unsigned(tilelen) : unsigned(ressz))
+               ,info[1]/8
+               ,info[2]/8
+               ,info[0]/8
+               ,info[3]/8
+               ,double(t1-t0)
+               ,double(t1-t0)/tilelen
+             );
+            if (ressz > 0) {
+              // normal compression
+              hdrlen = 9;
+              pRes = ariEncDst;
+            } else {
+              // not compressible
+              hdr[3] = 0;
+              hdr[4] = 0;
+              pRes   = inptile;
+              ressz  = tilelen;
+            }
           } else {
             // input consists of repetition of the same character
             hdr[3] = 1;

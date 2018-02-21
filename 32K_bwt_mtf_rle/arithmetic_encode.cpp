@@ -14,23 +14,43 @@ static const int RANGE_BITS = 14;
 static const int      QH_SCALE  = 1 << QH_BITS;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 
-int arithmetic_encode_get_context_length(int tilelen) // return # of 32-bit words
+static void resize_up(std::vector<uint32_t>* vec, size_t len)
 {
-  int nChunks = (tilelen-1)/ARITH_CODER_RUNS_PER_CHUNK + 1;
-  return nChunks*ARITH_CODER_N_DYNAMIC_SYMBOLS + 1 + 258;
+  if (vec->size() < len)
+    vec->resize(len);
+}
+
+struct context_chunk_t {
+  uint32_t histogram[ARITH_CODER_N_DYNAMIC_SYMBOLS];
+  bool     hasDictionary;
+  uint8_t  qHistogram[ARITH_CODER_N_DYNAMIC_SYMBOLS];
+  uint16_t ranges[ARITH_CODER_N_DYNAMIC_SYMBOLS];
+};
+
+static const int CONTEX_HDR_LEN = 1 + 258;
+static const int CONTEX_CHUNK_LEN = (sizeof(context_chunk_t)-1)/sizeof(uint32_t) + 1;
+
+void arithmetic_encode_init_context(std::vector<uint32_t>* context, int tilelen)
+{
+  int nChunks = tilelen/(ARITH_CODER_RUNS_PER_CHUNK*2) + 1; // estimate # of chunks
+  resize_up(context, CONTEX_HDR_LEN+CONTEX_CHUNK_LEN*nChunks);
+  memset(&context->at(0), 0, sizeof(uint32_t)*CONTEX_HDR_LEN);
 }
 
 int arithmetic_encode_chunk_callback(void* context, const uint8_t* src, int nSymbols)
 {
-  uint32_t* p = static_cast<uint32_t*>(context);
   if (src) {
-    // regular call
-    uint32_t tmp[ARITH_CODER_N_DYNAMIC_SYMBOLS];
-    uint32_t* dynSum = &p[1];
+    std::vector<uint32_t>* vec = static_cast<std::vector<uint32_t>*>(context);
+    uint32_t chunk_i = (*vec)[0];
+    resize_up(vec, CONTEX_HDR_LEN+CONTEX_CHUNK_LEN*(chunk_i+1));
+    (*vec)[0] = chunk_i + 1;
+
+    uint32_t  tmp[ARITH_CODER_N_DYNAMIC_SYMBOLS];
+    uint32_t* dynSum = &vec->at(1);
     memcpy(tmp, dynSum, sizeof(tmp));
     memset(dynSum, 0, sizeof(tmp));
 
-    uint32_t* histogram = &p[2];
+    uint32_t* histogram = &dynSum[1];
     for (int i = 0; i < nSymbols; ++i) {
       int c = src[i];
       if (c == 255) {
@@ -41,21 +61,16 @@ int arithmetic_encode_chunk_callback(void* context, const uint8_t* src, int nSym
       ++histogram[c];
     }
 
-    uint32_t chunk_i = p[0];
-    p[0] = chunk_i + 1;
-    uint32_t* chunkHistogram = &p[1+258+ARITH_CODER_N_DYNAMIC_SYMBOLS*chunk_i];
-    uint32_t dynLast = nSymbols; // sum of all symbols > ARITH_CODER_N_DYNAMIC_SYMBOLS-1
+    context_chunk_t* chunk = reinterpret_cast<context_chunk_t*>(&vec->at(CONTEX_HDR_LEN+CONTEX_CHUNK_LEN*chunk_i));
+    uint32_t dynLast = nSymbols; // # of symbols with with value >= ARITH_CODER_N_DYNAMIC_SYMBOLS-1
     for (int i = 0; i < ARITH_CODER_N_DYNAMIC_SYMBOLS-1; ++i) {
       uint32_t h = histogram[i];
-      chunkHistogram[i] = h;
+      chunk->histogram[i] = h;
       dynSum[i] = tmp[i] + h;
       dynLast -= h;
     }
     dynSum[ARITH_CODER_N_DYNAMIC_SYMBOLS-1] = tmp[ARITH_CODER_N_DYNAMIC_SYMBOLS-1] + dynLast;
-    chunkHistogram[ARITH_CODER_N_DYNAMIC_SYMBOLS-1] = dynLast;
-  } else {
-    // init
-    memset(p, 0, sizeof(uint32_t)*(1+258));
+    chunk->histogram[ARITH_CODER_N_DYNAMIC_SYMBOLS-1] = dynLast;
   }
   return ARITH_CODER_RUNS_PER_CHUNK;
 }
@@ -324,8 +339,9 @@ void CArithmeticEncoder::spillOverflow(uint8_t* dst)
 // -1 - source consists of repetition of the same character
 //  0 - not compressible, because all input characters have approximately equal probability or because input is too short
 // >0 - the length of compressed buffer
-int arithmetic_encode(std::vector<uint8_t>* dst, const uint8_t* src, int srclen, double* pInfo)
+int arithmetic_encode(uint32_t* context, uint8_t* dst, const uint8_t* src, int nRuns, int origlen, double* pInfo)
 {
+#if 0  
   unsigned h[256];  // histogram
   uint8_t  qh[256]; // quantized histogram
   int maxC = prepare1(h, qh, src, srclen, pInfo);
@@ -367,4 +383,6 @@ int arithmetic_encode(std::vector<uint8_t>* dst, const uint8_t* src, int srclen,
 
   dst->resize(sz0 + reslen);
   return reslen;
+#endif
+  return 0;  
 }
