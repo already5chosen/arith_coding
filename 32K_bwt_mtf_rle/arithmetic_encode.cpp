@@ -62,7 +62,7 @@ int arithmetic_encode_chunk_callback(void* context, const uint8_t* src, int nSym
     }
 
     context_chunk_t* chunk = reinterpret_cast<context_chunk_t*>(&vec->at(CONTEX_HDR_LEN+CONTEX_CHUNK_LEN*chunk_i));
-    uint32_t dynLast = nSymbols; // # of symbols with with value >= ARITH_CODER_N_DYNAMIC_SYMBOLS-1
+    uint32_t dynLast = nSymbols; // # of symbols with value >= ARITH_CODER_N_DYNAMIC_SYMBOLS-1
     for (int i = 0; i < ARITH_CODER_N_DYNAMIC_SYMBOLS-1; ++i) {
       uint32_t h = histogram[i];
       chunk->histogram[i] = h;
@@ -75,50 +75,11 @@ int arithmetic_encode_chunk_callback(void* context, const uint8_t* src, int nSym
   return ARITH_CODER_RUNS_PER_CHUNK;
 }
 
-// return value:
-// -1  - source consists of repetition of the same character
-// >=0 - maxC = the character with the biggest numeric value that appears in the source at least once
-static int prepare1(
-  unsigned * __restrict h,
-  uint8_t*   __restrict qh, // quantized histogram
-  const uint8_t*    src, unsigned srclen,
-  double* pInfo)
+static void quantize_histogram(uint8_t* __restrict qh, uint32_t *h, int len, uint32_t hTot)
 {
-  // calculated statistics of appearance
-  memset(h, 0, sizeof(h[0])*256);
-  for (unsigned i = 0; i < srclen; ++i)
-    ++h[src[i]];
-
-  // find maximal frequency and highest-numbered character that occurred at least once
-  unsigned maxC = 255;
-  unsigned maxCnt = 0;
-  for (unsigned c = 0; c < 256; ++c) {
-    unsigned cnt = h[c];
-    if (cnt != 0) {
-      maxC = c;
-      if (maxCnt < cnt)
-        maxCnt = cnt;
-    }
-  }
-
-  if (pInfo) {
-    // calculate source entropy
-    double entropy = 0;
-    for (unsigned c = 0; c <= maxC; ++c) {
-      unsigned cnt = h[c];
-      if (cnt)
-        entropy += log2(double(srclen)/cnt)*cnt;
-    }
-    pInfo[0] = entropy;
-    pInfo[3] = 0;
-  }
-
-  if (maxCnt==srclen)
-    return -1; // source consists of repetition of the same character
-
-  double invhLen = 2.0/srclen;
+  double invhLen = 2.0/hTot;
   double M_PI = 3.1415926535897932384626433832795;
-  for (unsigned c = 0; c <= maxC; ++c) {
+  for (unsigned c = 0; c < len; ++c) {
     unsigned val = 0;
     unsigned cnt = h[c];
     if (cnt != 0) {
@@ -129,6 +90,79 @@ static int prepare1(
         val = QH_SCALE-1;
     }
     qh[c] = val;
+  }
+}
+
+// return value:
+// maxC = the character with the bighest numeric value that appears in the source at least once
+static int prepare1(
+  uint32_t * __restrict context,
+  uint8_t*   __restrict qh, // quantized histogram
+  double* pInfo)
+{
+  memset(qh, 0, 258);
+
+  // find highest-numbered character that occurred at least once
+  unsigned maxC = 0;
+  uint32_t *h = &context[1];
+  for (unsigned c = 0; c < ARITH_CODER_N_DYNAMIC_SYMBOLS; ++c) {
+    if (h[c] != 0)
+      maxC = c;
+  }
+
+  double entropy = 0;
+  int32_t tot_s = h[ARITH_CODER_N_DYNAMIC_SYMBOLS-1];
+  if (tot_s != 0) {
+    if (h[maxC] != tot_s) {
+      if (pInfo) {
+        // calculate source entropy of static part of histogram
+        entropy = log2(double(tot_s))*tot_s;
+        for (unsigned c = ARITH_CODER_N_DYNAMIC_SYMBOLS; c <= maxC; ++c) {
+          int32_t cnt = h[c];
+          if (cnt)
+            entropy -= log2(double(cnt))*cnt;
+        }
+      }
+      quantize_histogram(&qh[ARITH_CODER_N_DYNAMIC_SYMBOLS], &h[ARITH_CODER_N_DYNAMIC_SYMBOLS], maxC+1-ARITH_CODER_N_DYNAMIC_SYMBOLS, tot_s);
+    } else {
+      qh[maxC] = 255;  // static part of histogram consists of repetition of the same character
+    }
+  }
+
+  int nChunks = context[0];
+  for (int chunk_i = 0; chunk_i < nChunks; ++chunk_i) {
+    context_chunk_t* chunk = reinterpret_cast<context_chunk_t*>(&context[CONTEX_HDR_LEN+CONTEX_CHUNK_LEN*chunk_i]);
+    memset(chunk->qHistogram, 0, sizeof(chunk->qHistogram));
+
+    int32_t tot_d = 0;
+    unsigned maxC_d = 0;
+    for (unsigned c = 0; c < ARITH_CODER_N_DYNAMIC_SYMBOLS; ++c) {
+      int32_t cnt = chunk->histogram[c];
+      tot_d += cnt;
+      if (cnt)
+        maxC_d = c;
+    }
+    if (tot_d) {
+      if (chunk->histogram[maxC_d] != tot_d) {
+        if (pInfo) {
+          // calculate source entropy of dynamic chunk
+          entropy += log2(double(tot_d))*tot_d;
+          for (unsigned c = 0; c < ARITH_CODER_N_DYNAMIC_SYMBOLS; ++c) {
+            int32_t cnt = chunk->histogram[c];
+            if (cnt)
+              entropy -= log2(double(cnt))*cnt;
+          }
+        }
+        quantize_histogram(chunk->qHistogram, chunk->histogram, maxC_d+1, tot_d);
+      } else {
+        chunk->qHistogram[maxC_d] = 255; // chunk consists of repetition of the same character
+      }
+    }
+  }
+
+  if (pInfo) {
+    pInfo[0] = entropy;
+    pInfo[3] = 0;
   }
 
   return maxC;
@@ -341,9 +375,10 @@ void CArithmeticEncoder::spillOverflow(uint8_t* dst)
 // >0 - the length of compressed buffer
 int arithmetic_encode(uint32_t* context, uint8_t* dst, const uint8_t* src, int nRuns, int origlen, double* pInfo)
 {
-#if 0  
+  uint8_t qh[258]; // quantized histogram
+  int maxC = prepare1(context, qh, pInfo);
+#if 0
   unsigned h[256];  // histogram
-  uint8_t  qh[256]; // quantized histogram
   int maxC = prepare1(h, qh, src, srclen, pInfo);
 
 
@@ -384,5 +419,5 @@ int arithmetic_encode(uint32_t* context, uint8_t* dst, const uint8_t* src, int n
   dst->resize(sz0 + reslen);
   return reslen;
 #endif
-  return 0;  
+  return 0;
 }
