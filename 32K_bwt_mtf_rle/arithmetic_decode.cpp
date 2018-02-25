@@ -184,7 +184,7 @@ struct arithmetic_decode_model_t {
 private:
   static const int RANGE2C_NBITS = 9;
   static const int RANGE2C_SZ = 1 << RANGE2C_NBITS;
-  uint16_t  m_range2c[RANGE2C_SZ+1];
+  uint8_t m_range2c[RANGE2C_SZ+1];
   unsigned m_maxC;
 
   void prepare();
@@ -224,14 +224,16 @@ void arithmetic_decode_model_t::prepare()
       // build inverse index m_range2c
       maxC = c;
       lo += range;
+      unsigned r2c = c <= 255 ? c : 255;
       for (; invI <= ((lo-1) >> (RANGE_BITS-RANGE2C_NBITS)); ++invI) {
-        m_range2c[invI] = maxC;
+        m_range2c[invI] = r2c;
       }
     }
   }
   m_c2low[257] = VAL_RANGE;
+  unsigned r2c = maxC <= 255 ? maxC : 255;
   for (; invI <= RANGE2C_SZ; ++invI) {
-    m_range2c[invI] = maxC;
+    m_range2c[invI] = r2c;
   }
   m_maxC = maxC;
 }
