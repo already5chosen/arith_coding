@@ -142,8 +142,8 @@ static int store_model(uint8_t* dst, const uint8_t qh[257], unsigned maxC, doubl
 
   // for (int i = 0; i< QH_BITS+1; ++i)
     // printf("hist[%2d]=%d\n", i, hist[i]);
-  // for (int i = 0; i< 256; ++i)
-    // printf("range[%3d]=%5d\n", i, c2range[i]);
+  // for (int i = 0; i <= maxC; ++i)
+    // printf("range[%3d]=%5d\n", i, qh[i]);
 
   uint8_t* p = dst;
 
@@ -205,6 +205,7 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
   uint64_t range  = pEnc->m_range >> (RANGE_BITS-1); // scaled by 2**50
   uint8_t* dst0   = dst;
   uint64_t prevLo = lo;
+  // int dbg_i = 0;
   for (unsigned i = 0; i < srclen; ++i) {
     int c = src[i];
     if (c == 255) {
@@ -212,6 +213,7 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
       c = int(src[i+1]) + 1;
       ++i;
     }
+    // printf("[%3d]=%3d\n", dbg_i, c); ++dbg_i;
     uint64_t cLo = c2low[c+0];
     uint64_t cRa = c2low[c+1] - cLo;
     lo   += range * cLo;
@@ -312,7 +314,6 @@ int arithmetic_encode(uint32_t* context, uint8_t* dst, const uint8_t* src, int s
   if (lenEst >= origlen)
     return 0; // not compressible
 
-  // printf("ml=%u\n", modellen);
   int dstlen = encode(&dst[modellen], src, srclen, c2low, &enc);
 
   if (pInfo)

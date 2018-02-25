@@ -50,7 +50,8 @@ int main(int argz, char** argv)
           size_t hdrlen = 6;
           int ressz  = 0;
           if (!isSingleCharacter(inptile, tilelen)) {
-            tmpDst.resize(tilelen+256);
+            if (tilelen+256 > tmpDst.size())
+              tmpDst.resize(tilelen+256);
             uint32_t encContext[257];
             arithmetic_encode_init_context(encContext);
             uint64_t t0 = __rdtsc();
@@ -66,8 +67,6 @@ int main(int argz, char** argv)
             uint8_t* ariEncDst = &ariEncSrc[rlesz];
             double info[8];
             ressz = arithmetic_encode(encContext, ariEncDst, ariEncSrc, rlesz, tilelen, vFlag ? info : 0);
-            storeAs3octets(&hdr[3], ressz);
-            storeAs3octets(&hdr[6], meta.bwtPrimaryIndex);
             uint64_t t1 = __rdtsc();
             if (vFlag)
               printf("%7u->%7u. Model %7.3f. Coded %10.0f. Entropy %11.3f (%11.3f). %10.0f clocks. %6.1f clocks/char\n"
@@ -82,6 +81,8 @@ int main(int argz, char** argv)
              );
             if (ressz > 0) {
               // normal compression
+              storeAs3octets(&hdr[3], ressz);
+              storeAs3octets(&hdr[6], meta.bwtPrimaryIndex);
               hdrlen = 9;
               pRes = ariEncDst;
             } else {

@@ -45,7 +45,6 @@ int main(int argz, char** argv)
             fprintf(stderr, "%s: %s invalid.%s\n", argv[0], inpfilename, vFlag ? " Short tile header.": "");
           break;
         }
-
         size_t tilelen = loadFrom3octets(&hdr[0]);
         size_t codelen = loadFrom3octets(&hdr[3]);
 
@@ -60,7 +59,7 @@ int main(int argz, char** argv)
           switch (hdr[3]) {
             case 0:
               // not compressible
-              srclen = tilelen;
+              srclen = codelen = tilelen;
               break;
             case 1:
               // input consists of repetition of the same character
@@ -73,7 +72,6 @@ int main(int argz, char** argv)
         } else {
           if (codelen < 1 || codelen > tilelen) {
             fprintf(stderr, "%s: %s invalid.%s\n", argv[0], inpfilename, vFlag ? " Illegal code section length.": "");
-            fprintf(stderr, "%d %d\n", int(tilelen), int(codelen));
             break;
           }
         }
@@ -155,7 +153,7 @@ int main(int argz, char** argv)
 
         if (vFlag)
           printf(
-            "%7u -> %7u. Model %7.3f. Coded %7d. %8.0f clocks. %4.1f clocks/char"
+            "%7u -> %7u. Model %7.3f. Coded %7d. %9.0f clocks. %5.1f clocks/char"
             #ifdef ENABLE_PERF_COUNT
             " %6d %6d %6d"
             #endif

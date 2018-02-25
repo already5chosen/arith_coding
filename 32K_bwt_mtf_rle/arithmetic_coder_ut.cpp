@@ -193,7 +193,7 @@ static void histogram_to_range(uint16_t* ranges, unsigned len, const uint32_t* h
   if (rangeSum < range_scale) {
     remRange = range_scale - rangeSum;
     // calculate effect of increment of range on entropy
-    int64_t de[256], denz[256];
+    int64_t de[260], denz[260];
     int denzLen = 0;
     for (unsigned c = 0; c < len; ++c) {
       int64_t deltaE = 0;
@@ -235,7 +235,7 @@ static void histogram_to_range(uint16_t* ranges, unsigned len, const uint32_t* h
 void quantized_histogram_to_range(uint16_t* ranges, unsigned len, const uint8_t* qh, unsigned range_scale)
 {
   // translate quantized histogram from asin domain to linear domain
-  uint32_t qhr[256];
+  uint32_t qhr[260];
   uint32_t qhrTot = 0;
   for (unsigned c = 0; c < len; ++c)
     qhrTot += (qhr[c] = dequantization_tab[qh[c]]);

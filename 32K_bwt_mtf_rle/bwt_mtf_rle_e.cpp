@@ -90,6 +90,7 @@ int bwt_reorder_mtf_rle(
   uint8_t* dst = reinterpret_cast<uint8_t*>(idx_dst);
   uint8_t* chunk = dst;
   unsigned zRunLen = 0;
+  // int dbg_i = 0;
   for (int i = 0; i < srclen; ++i) {
     int k = idx_dst[i];
     if (k == 0)
@@ -99,10 +100,12 @@ int bwt_reorder_mtf_rle(
     uint8_t c = src[k-1];
 
     // move-to-front encoder
+    // printf("[%3d]=%3d\n", dbg_i, c); ++dbg_i;
     int v1 = t[0];
     if (c == v1) {
       // c already at front - count length of zero run
       ++zRunLen;
+      // printf("[%3d]=%3d\n", dbg_i, 0); ++dbg_i;
     } else {
       if (zRunLen != 0) {
         dst = insertZeroRun(dst, zRunLen);
@@ -116,6 +119,7 @@ int bwt_reorder_mtf_rle(
       }
       t[k] = v0;
       int mtfC = k;
+      // printf("[%3d]=%3d\n", dbg_i, mtfC); ++dbg_i;
       int outC = mtfC + 1;
       *dst = outC;       // range [1..253] encoded as x+1
       if (mtfC >= 254) { // range [254..255] encode as a pair {255,x}

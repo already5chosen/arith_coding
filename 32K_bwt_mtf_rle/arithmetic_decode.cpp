@@ -133,6 +133,9 @@ int load_quantized_histogram(uint8_t* qh, CArithmeticDecoder* pDec)
     qh[c] = range;
   }
 
+  // for (int i = 0; i <= maxC; ++i)
+    // printf("range[%3d]=%5d\n", i, qh[i]);
+
   return maxC; // success
 }
 
@@ -241,9 +244,9 @@ int decode(
   CArithmeticDecoder*        pDec)
 {
   // initialize move-to-front decoder table
-  uint8_t t[256];
+  uint8_t mtf_t[256];
   for (int i = 0; i < 256; ++i)
-    t[i] = i;
+    mtf_t[i] = i;
 
   const uint64_t MIN_RANGE = uint64_t(1) << (33-RANGE_BITS);
   const double TWO_POW83  = double(int64_t(1) << 40) * (int64_t(1) << 43);
@@ -266,6 +269,7 @@ int decode(
   uint32_t rlAcc = 0;
   uint32_t rlMsb = 1;
   uint8_t* dst = dst0;
+  // int dbg_i = 0;
   for (int i = 0; ; ) {
     #if 0
     uint64_t prod = umulh(invRange, range);
@@ -291,10 +295,8 @@ int decode(
     // uint64_t loEst33b = umulh(value,invRange);
     // unsigned ri = loEst33b>>(33-9);
     // unsigned lo = loEst33b>>(33-RANGE_BITS);
-// printf("%7d a %016llx %016llx %016llx %u %u\n", dst-dst0, value, invRange, loEst33b, ri, lo); fflush(stdout);
     // }
     int c = pModel->val2c_estimate(value, invRange); // can be off by -1, much less likely by -2
-// printf("%7d b\n", dst-dst0); fflush(stdout);
     // keep decoder in sync with encoder
     uint64_t cLo = pModel->m_c2low[c+0];
     uint64_t cHi = pModel->m_c2low[c+1];
@@ -313,23 +315,39 @@ int decode(
     }
     range = nxtRange;
 
-// printf("%7d x\n", dst-dst0); fflush(stdout);
     // RLE and MTF decode
+    // printf("[%3d]=%3d\n", dbg_i, c); ++dbg_i;
     if (c < 2) {
       // zero run
       rlAcc |= (-c) & rlMsb;
       rlMsb += rlMsb;
-      if (rlMsb == 0)
+      uint32_t rl = rlAcc + rlMsb - 1;
+      if (rl >= uint32_t(dstlen)) {
+        if (rl == uint32_t(dstlen)) {
+          // last run
+          int c0 = mtf_t[0];
+          // for (int ii=0; ii < rl; ++ii)
+            // {printf("[%3d]=%3d\n", dbg_i, c0); ++dbg_i;}
+          histogram[c0] += rl;
+          memset(dst, c0, rl);
+          dst += rl;
+          break;
+        }
         return -21; // zero run too long (A)
+      }
     } else {
       if (rlMsb > 1) {
         // insert zero run
         uint32_t rl = rlAcc + rlMsb - 1;
+        // for (int ii=0; ii < rl; ++ii)
+          // {printf("[%3d]=%3d\n", dbg_i, 0); ++dbg_i;}
         rlMsb = 1;
         rlAcc = 0;
-        if (rl >= uint32_t(dstlen))
+        if (rl >= uint32_t(dstlen)) 
           return -22; // zero run too long (B)
-        int c0 = t[0];
+        int c0 = mtf_t[0];
+        // for (int ii=0; ii < rl; ++ii)
+          // {printf("[%3d]=%3d\n", dbg_i, c0); ++dbg_i;}
         histogram[c0] += rl;
         memset(dst, c0, rl);
         dst += rl;
@@ -341,7 +359,9 @@ int decode(
       dstlen -= 1;
 
       int mtfC = c - 1;
-      int dstC = t[mtfC];
+      // printf("[%3d]=%3d\n", dbg_i, mtfC); ++dbg_i;
+      int dstC = mtf_t[mtfC];
+      // printf("[%3d]=%3d\n", dbg_i, dstC); ++dbg_i;
       histogram[dstC] += 1;
       *dst++ = dstC;
 
@@ -349,8 +369,8 @@ int decode(
         break; // success
 
       // update move-to-front decoder table
-      memmove(&t[1], &t[0], mtfC);
-      t[0] = c;
+      memmove(&mtf_t[1], &mtf_t[0], mtfC);
+      mtf_t[0] = dstC;
     }
 
     nxtRange = range >> RANGE_BITS;
