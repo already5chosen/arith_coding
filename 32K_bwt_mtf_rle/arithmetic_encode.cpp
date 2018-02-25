@@ -8,72 +8,28 @@
 #include "arithmetic_coder_ut.h"
 #include "arithmetic_coder_cfg.h"
 
-
-static const int QH_BITS  = 8;
-static const int RANGE_BITS = 14;
 static const int      QH_SCALE  = 1 << QH_BITS;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 
-static void resize_up(std::vector<uint32_t>* vec, size_t len)
+void arithmetic_encode_init_context(uint32_t* context)
 {
-  if (vec->size() < len)
-    vec->resize(len);
+  memset(context, 0, sizeof(uint32_t)*257);
 }
 
-struct context_chunk_t {
-  uint32_t histogram[ARITH_CODER_N_DYNAMIC_SYMBOLS];
-  bool     hasDictionary;
-  uint8_t  qHistogram[ARITH_CODER_N_DYNAMIC_SYMBOLS];
-  uint16_t ranges[ARITH_CODER_N_DYNAMIC_SYMBOLS];
-};
-
-static const int CONTEX_HDR_LEN = 1 + 258;
-static const int CONTEX_CHUNK_LEN = (sizeof(context_chunk_t)-1)/sizeof(uint32_t) + 1;
-
-void arithmetic_encode_init_context(std::vector<uint32_t>* context, int tilelen)
+void arithmetic_encode_chunk_callback(void* context, const uint8_t* src, int chunklen)
 {
-  int nChunks = tilelen/(ARITH_CODER_RUNS_PER_CHUNK*2) + 1; // estimate # of chunks
-  resize_up(context, CONTEX_HDR_LEN+CONTEX_CHUNK_LEN*nChunks);
-  memset(&context->at(0), 0, sizeof(uint32_t)*CONTEX_HDR_LEN);
-}
-
-int arithmetic_encode_chunk_callback(void* context, const uint8_t* src, int nSymbols)
-{
-  if (src) {
-    std::vector<uint32_t>* vec = static_cast<std::vector<uint32_t>*>(context);
-    uint32_t chunk_i = (*vec)[0];
-    resize_up(vec, CONTEX_HDR_LEN+CONTEX_CHUNK_LEN*(chunk_i+1));
-    (*vec)[0] = chunk_i + 1;
-
-    uint32_t  tmp[ARITH_CODER_N_DYNAMIC_SYMBOLS];
-    uint32_t* dynSum = &vec->at(1);
-    memcpy(tmp, dynSum, sizeof(tmp));
-    memset(dynSum, 0, sizeof(tmp));
-
-    uint32_t* histogram = &dynSum[1];
-    for (int i = 0; i < nSymbols; ++i) {
-      int c = src[i];
-      if (c == 255) {
-        // escape sequence for symbols 255 and 256
-        c = int(src[i+1]) + 1;
-        ++i;
-      }
-      ++histogram[c];
+  uint32_t* histogram = static_cast<uint32_t*>(context);
+  for (int i = 0; i < chunklen; ++i) {
+    int c = src[i];
+    if (c == 255) {
+      // escape sequence for symbols 255 and 256
+      c = int(src[i+1]) + 1;
+      ++i;
     }
-
-    context_chunk_t* chunk = reinterpret_cast<context_chunk_t*>(&vec->at(CONTEX_HDR_LEN+CONTEX_CHUNK_LEN*chunk_i));
-    uint32_t dynLast = nSymbols; // # of symbols with value >= ARITH_CODER_N_DYNAMIC_SYMBOLS-1
-    for (int i = 0; i < ARITH_CODER_N_DYNAMIC_SYMBOLS-1; ++i) {
-      uint32_t h = histogram[i];
-      chunk->histogram[i] = h;
-      dynSum[i] = tmp[i] + h;
-      dynLast -= h;
-    }
-    dynSum[ARITH_CODER_N_DYNAMIC_SYMBOLS-1] = tmp[ARITH_CODER_N_DYNAMIC_SYMBOLS-1] + dynLast;
-    chunk->histogram[ARITH_CODER_N_DYNAMIC_SYMBOLS-1] = dynLast;
+    ++histogram[c];
   }
-  return ARITH_CODER_RUNS_PER_CHUNK;
 }
+
 
 static void quantize_histogram(uint8_t* __restrict qh, uint32_t *h, int len, uint32_t hTot)
 {
@@ -94,84 +50,41 @@ static void quantize_histogram(uint8_t* __restrict qh, uint32_t *h, int len, uin
 }
 
 // return value:
-// maxC = the character with the bighest numeric value that appears in the source at least once
+// maxC = the character with the biggest numeric value that appears in the source at least once
 static int prepare1(
-  uint32_t * __restrict context,
+  uint32_t * __restrict histogram,
   uint8_t*   __restrict qh, // quantized histogram
   double* pInfo)
 {
-  memset(qh, 0, 258);
-
   // find highest-numbered character that occurred at least once
   unsigned maxC = 0;
-  uint32_t *h = &context[1];
-  for (unsigned c = 0; c < ARITH_CODER_N_DYNAMIC_SYMBOLS; ++c) {
-    if (h[c] != 0)
+  int32_t tot = 0;
+  for (unsigned c = 0; c < 257; ++c) {
+    tot += histogram[c];
+    if (histogram[c] != 0)
       maxC = c;
   }
 
-  double entropy = 0;
-  int32_t tot_s = h[ARITH_CODER_N_DYNAMIC_SYMBOLS-1];
-  if (tot_s != 0) {
-    if (h[maxC] != tot_s) {
-      if (pInfo) {
-        // calculate source entropy of static part of histogram
-        entropy = log2(double(tot_s))*tot_s;
-        for (unsigned c = ARITH_CODER_N_DYNAMIC_SYMBOLS; c <= maxC; ++c) {
-          int32_t cnt = h[c];
-          if (cnt)
-            entropy -= log2(double(cnt))*cnt;
-        }
-      }
-      quantize_histogram(&qh[ARITH_CODER_N_DYNAMIC_SYMBOLS], &h[ARITH_CODER_N_DYNAMIC_SYMBOLS], maxC+1-ARITH_CODER_N_DYNAMIC_SYMBOLS, tot_s);
-    } else {
-      qh[maxC] = 255;  // static part of histogram consists of repetition of the same character
-    }
-  }
-
-  int nChunks = context[0];
-  for (int chunk_i = 0; chunk_i < nChunks; ++chunk_i) {
-    context_chunk_t* chunk = reinterpret_cast<context_chunk_t*>(&context[CONTEX_HDR_LEN+CONTEX_CHUNK_LEN*chunk_i]);
-    memset(chunk->qHistogram, 0, sizeof(chunk->qHistogram));
-
-    int32_t tot_d = 0;
-    unsigned maxC_d = 0;
-    for (unsigned c = 0; c < ARITH_CODER_N_DYNAMIC_SYMBOLS; ++c) {
-      int32_t cnt = chunk->histogram[c];
-      tot_d += cnt;
-      if (cnt)
-        maxC_d = c;
-    }
-    if (tot_d) {
-      if (chunk->histogram[maxC_d] != tot_d) {
-        if (pInfo) {
-          // calculate source entropy of dynamic chunk
-          entropy += log2(double(tot_d))*tot_d;
-          for (unsigned c = 0; c < ARITH_CODER_N_DYNAMIC_SYMBOLS; ++c) {
-            int32_t cnt = chunk->histogram[c];
-            if (cnt)
-              entropy -= log2(double(cnt))*cnt;
-          }
-        }
-        quantize_histogram(chunk->qHistogram, chunk->histogram, maxC_d+1, tot_d);
-      } else {
-        chunk->qHistogram[maxC_d] = 255; // chunk consists of repetition of the same character
-      }
-    }
-  }
-
   if (pInfo) {
+    // calculate source entropy of static part of histogram
+    double entropy = log2(double(tot))*tot;
+    for (unsigned c = 0; c <= maxC; ++c) {
+      int32_t cnt = histogram[c];
+      if (cnt)
+        entropy -= log2(double(cnt))*cnt;
+    }
     pInfo[0] = entropy;
     pInfo[3] = 0;
   }
+  quantize_histogram(qh, histogram, maxC+1, tot);
 
   return maxC;
 }
 
 static void prepare2(
   uint16_t* __restrict c2low, unsigned maxC,
-  const unsigned       h[256],
-  const uint8_t        qh[256],
+  const unsigned       h[257],
+  const uint8_t        qh[257],
   double*              pQuantizedEntropy)
 {
   quantized_histogram_to_range(c2low, maxC+1, qh, VAL_RANGE);
@@ -214,7 +127,7 @@ static int inline floor_log2(unsigned x)
 }
 
 // return the number of stored octets
-static int store_model(uint8_t* dst, const uint8_t qh[256], unsigned maxC, double* pNbits, CArithmeticEncoder* pEnc)
+static int store_model(uint8_t* dst, const uint8_t qh[257], unsigned maxC, double* pNbits, CArithmeticEncoder* pEnc)
 {
   int nRanges = 0;
   unsigned hist[QH_BITS+1] = {0};
@@ -235,7 +148,7 @@ static int store_model(uint8_t* dst, const uint8_t qh[256], unsigned maxC, doubl
   uint8_t* p = dst;
 
   // store maxC
-  p = pEnc->put(256, maxC, 1, p);
+  p = pEnc->put(257, maxC, 1, p);
   // store histogram of log2
   unsigned rem = maxC + 1;
   for (int i = 0; i < QH_BITS && rem > 0; ++i) {
@@ -294,6 +207,11 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
   uint64_t prevLo = lo;
   for (unsigned i = 0; i < srclen; ++i) {
     int c = src[i];
+    if (c == 255) {
+      // escape sequence for symbols 255 and 256
+      c = int(src[i+1]) + 1;
+      ++i;
+    }
     uint64_t cLo = c2low[c+0];
     uint64_t cRa = c2low[c+1] - cLo;
     lo   += range * cLo;
@@ -370,54 +288,40 @@ void CArithmeticEncoder::spillOverflow(uint8_t* dst)
 }
 
 // return value:
-// -1 - source consists of repetition of the same character
 //  0 - not compressible, because all input characters have approximately equal probability or because input is too short
 // >0 - the length of compressed buffer
-int arithmetic_encode(uint32_t* context, uint8_t* dst, const uint8_t* src, int nRuns, int origlen, double* pInfo)
+int arithmetic_encode(uint32_t* context, uint8_t* dst, const uint8_t* src, int srclen, int origlen, double* pInfo)
 {
-  uint8_t qh[258]; // quantized histogram
+  uint8_t qh[257]; // quantized histogram
   int maxC = prepare1(context, qh, pInfo);
-#if 0
-  unsigned h[256];  // histogram
-  int maxC = prepare1(h, qh, src, srclen, pInfo);
 
-
-  if (maxC == -1)
-    return -1; // source consists of repetition of the same character
-
-  size_t sz0 = dst->size();
-  dst->resize(sz0 + 640);
   CArithmeticEncoder enc;
   enc.init();
   double modelLenBits;
-  unsigned modellen = store_model(&dst->at(sz0), qh, maxC, &modelLenBits, &enc);
+  unsigned modellen = store_model(dst, qh, maxC, &modelLenBits, &enc);
   if (pInfo)
     pInfo[1] = modelLenBits;
 
-  uint16_t c2low[257];
+  uint16_t c2low[258];
   double quantizedEntropy;
-  prepare2(c2low, maxC, h, qh, &quantizedEntropy);
+  prepare2(c2low, maxC, context, qh, &quantizedEntropy);
 
   int lenEst = (modelLenBits+quantizedEntropy+7)/8;
   if (pInfo)
     pInfo[3] = quantizedEntropy;
-  if (lenEst >= srclen)
+  if (lenEst >= origlen)
     return 0; // not compressible
 
   // printf("ml=%u\n", modellen);
-  dst->resize(sz0 + lenEst + 64);
-  int dstlen = encode(&dst->at(sz0+modellen), src, srclen, c2low, &enc);
+  int dstlen = encode(&dst[modellen], src, srclen, c2low, &enc);
 
   if (pInfo)
     pInfo[2] = dstlen*8.0;
 
   int reslen = modellen + dstlen;
 
-  if (reslen >= srclen)
+  if (reslen >= origlen)
     return 0; // not compressible
 
-  dst->resize(sz0 + reslen);
   return reslen;
-#endif
-  return 0;
 }

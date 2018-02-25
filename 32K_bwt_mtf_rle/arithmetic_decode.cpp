@@ -6,9 +6,8 @@
 
 #include "arithmetic_decode.h"
 #include "arithmetic_coder_ut.h"
+#include "arithmetic_coder_cfg.h"
 
-
-static const int RANGE_BITS = 14;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 
 class CArithmeticDecoder {
@@ -86,7 +85,7 @@ static
 int load_quantized_histogram(uint8_t* qh, CArithmeticDecoder* pDec)
 {
   // load maxC
-  unsigned maxC = pDec->get(256);
+  unsigned maxC = pDec->get(257);
   int err = pDec->put(maxC, 1);
   if (err)
     return err;
@@ -149,8 +148,8 @@ struct arithmetic_decode_model_t {
   int m_longLookupCount;
   int m_renormalizationCount;
   #endif
-  uint16_t m_c2low[257];
-  uint32_t m_c2invRange[256]; // floor(2^31/range)
+  uint16_t m_c2low[258];
+  uint32_t m_c2invRange[257]; // floor(2^31/range)
 
   int load_and_prepare(CArithmeticDecoder* pDec);
   int val2c_estimate(uint64_t value, uint64_t invRange) {
@@ -182,7 +181,7 @@ struct arithmetic_decode_model_t {
 private:
   static const int RANGE2C_NBITS = 9;
   static const int RANGE2C_SZ = 1 << RANGE2C_NBITS;
-  uint8_t  m_range2c[RANGE2C_SZ+1];
+  uint16_t  m_range2c[RANGE2C_SZ+1];
   unsigned m_maxC;
 
   void prepare();
@@ -196,11 +195,11 @@ int arithmetic_decode_model_t::load_and_prepare(CArithmeticDecoder* pDec)
   m_longLookupCount = 0;
   m_renormalizationCount = 0;
   #endif
-  uint8_t qh[256];
+  uint8_t qh[257];
   int maxC = load_quantized_histogram(qh, pDec);
   if (maxC >= 0) {
     quantized_histogram_to_range(m_c2low, maxC+1, qh, VAL_RANGE);
-    for (unsigned c = maxC+1; c < 256; ++c)
+    for (unsigned c = maxC+1; c < 257; ++c)
       m_c2low[c] = 0;
     prepare();
   }
@@ -210,10 +209,10 @@ int arithmetic_decode_model_t::load_and_prepare(CArithmeticDecoder* pDec)
 void arithmetic_decode_model_t::prepare()
 {
   // m_c2low -> cumulative sums of ranges
-  unsigned maxC = 255;
+  unsigned maxC = 0;
   unsigned lo = 0;
   unsigned invI = 0;
-  for (int c = 0; c < 256; ++c) {
+  for (int c = 0; c < 257; ++c) {
     unsigned range = m_c2low[c];
     // printf("%3u: %04x %04x\n", c, range, lo);
     m_c2low[c] = lo;
@@ -227,15 +226,25 @@ void arithmetic_decode_model_t::prepare()
       }
     }
   }
-  m_c2low[256] = VAL_RANGE;
+  m_c2low[257] = VAL_RANGE;
   for (; invI <= RANGE2C_SZ; ++invI) {
     m_range2c[invI] = maxC;
   }
   m_maxC = maxC;
 }
 
-int decode(arithmetic_decode_model_t* pModel, uint8_t* dst, int dstlen, CArithmeticDecoder* pDec)
+int decode(
+  arithmetic_decode_model_t* pModel,
+  uint8_t*                   dst0,
+  int                        dstlen,
+  int32_t                    histogram[256],
+  CArithmeticDecoder*        pDec)
 {
+  // initialize move-to-front decoder table
+  uint8_t t[256];
+  for (int i = 0; i < 256; ++i)
+    t[i] = i;
+
   const uint64_t MIN_RANGE = uint64_t(1) << (33-RANGE_BITS);
   const double TWO_POW83  = double(int64_t(1) << 40) * (int64_t(1) << 43);
 
@@ -254,6 +263,9 @@ int decode(arithmetic_decode_model_t* pModel, uint8_t* dst, int dstlen, CArithme
   uint64_t invRange = int64_t(TWO_POW83/range);     // approximation of floor(2**83/range). Maintained in [2**33..2*64)
 
   // uint64_t mxProd = 0, mnProd = uint64_t(-1);
+  uint32_t rlAcc = 0;
+  uint32_t rlMsb = 1;
+  uint8_t* dst = dst0;
   for (int i = 0; ; ) {
     #if 0
     uint64_t prod = umulh(invRange, range);
@@ -275,7 +287,14 @@ int decode(arithmetic_decode_model_t* pModel, uint8_t* dst, int dstlen, CArithme
     // That's the case of illegal code stream.
     // The case is extremely unlikely, but not impossible.
 
-    unsigned c = pModel->val2c_estimate(value, invRange); // can be off by -1, much less likely by -2
+    // {
+    // uint64_t loEst33b = umulh(value,invRange);
+    // unsigned ri = loEst33b>>(33-9);
+    // unsigned lo = loEst33b>>(33-RANGE_BITS);
+// printf("%7d a %016llx %016llx %016llx %u %u\n", dst-dst0, value, invRange, loEst33b, ri, lo); fflush(stdout);
+    // }
+    int c = pModel->val2c_estimate(value, invRange); // can be off by -1, much less likely by -2
+// printf("%7d b\n", dst-dst0); fflush(stdout);
     // keep decoder in sync with encoder
     uint64_t cLo = pModel->m_c2low[c+0];
     uint64_t cHi = pModel->m_c2low[c+1];
@@ -293,10 +312,46 @@ int decode(arithmetic_decode_model_t* pModel, uint8_t* dst, int dstlen, CArithme
       ++c;
     }
     range = nxtRange;
-    dst[i] = c;
-    ++i;
-    if (i == dstlen)
-      break; // success
+
+// printf("%7d x\n", dst-dst0); fflush(stdout);
+    // RLE and MTF decode
+    if (c < 2) {
+      // zero run
+      rlAcc |= (-c) & rlMsb;
+      rlMsb += rlMsb;
+      if (rlMsb == 0)
+        return -21; // zero run too long (A)
+    } else {
+      if (rlMsb > 1) {
+        // insert zero run
+        uint32_t rl = rlAcc + rlMsb - 1;
+        rlMsb = 1;
+        rlAcc = 0;
+        if (rl >= uint32_t(dstlen))
+          return -22; // zero run too long (B)
+        int c0 = t[0];
+        histogram[c0] += rl;
+        memset(dst, c0, rl);
+        dst += rl;
+        dstlen -= rl;
+      }
+
+      if (dstlen == 0)
+        return -23; // decoded section is longer than expected
+      dstlen -= 1;
+
+      int mtfC = c - 1;
+      int dstC = t[mtfC];
+      histogram[dstC] += 1;
+      *dst++ = dstC;
+
+      if (dstlen == 0)
+        break; // success
+
+      // update move-to-front decoder table
+      memmove(&t[1], &t[0], mtfC);
+      t[0] = c;
+    }
 
     nxtRange = range >> RANGE_BITS;
     if (nxtRange <= MIN_RANGE) {
@@ -338,12 +393,19 @@ int decode(arithmetic_decode_model_t* pModel, uint8_t* dst, int dstlen, CArithme
       invRange = umulh(invRange, (PROD_ONE*2-1-prod)<<44)<<1;
     }
   }
-  return dstlen;
+  return dst - dst0;
 }
 
 }
 
-int arithmetic_decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen, int* pInfo)
+// Arithmetic decode followed by RLE and MTF decode
+int arithmetic_decode(
+  uint8_t*       dst,
+  int            dstlen,
+  int32_t        histogram[256],
+  const uint8_t* src,
+  int            srclen,
+  int*           pInfo)
 {
   if (pInfo) {
     pInfo[0] = 0;
@@ -365,7 +427,8 @@ int arithmetic_decode(uint8_t* dst, int dstlen, const uint8_t* src, int srclen, 
       pInfo[0] = modellen*8;
       pInfo[1] = dec.m_srclen;
     }
-    int textlen = decode(&model, dst, dstlen, &dec);
+    memset(histogram, 0, sizeof(histogram[0])*256);
+    int textlen = decode(&model, dst, dstlen, histogram, &dec);
     #ifdef ENABLE_PERF_COUNT
     if (pInfo) {
       pInfo[2] = model.m_extLookupCount;

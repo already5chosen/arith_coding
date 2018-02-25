@@ -76,19 +76,17 @@ int bwt_reorder_mtf_rle(
  const uint8_t*      src,
  int                 srclen,
  bwt_mtf_rle_meta_t* pMeta,
- int                 (*chunkCallback)(void* context, const uint8_t* chunk, int nSymbols),
+ void                (*chunkCallback)(void* context, const uint8_t* chunk, int nSymbols),
  void*               chunkCallbackContext)
 {
   // initialize calback machinery
-  const int runsPerChunk = chunkCallback(chunkCallbackContext, 0, 0);
+  const int charPerChnck = 4096;
 
   // initialize move-to-front encoder table
   uint8_t t[256];
   for (int i = 0; i < 256; ++i)
     t[i] = i;
 
-  pMeta->nRuns = 0;
-  int chunkRuns = 0;
   uint8_t* dst = reinterpret_cast<uint8_t*>(idx_dst);
   uint8_t* chunk = dst;
   unsigned zRunLen = 0;
@@ -109,13 +107,6 @@ int bwt_reorder_mtf_rle(
       if (zRunLen != 0) {
         dst = insertZeroRun(dst, zRunLen);
         zRunLen = 0;
-        ++chunkRuns;
-        if (chunkRuns == runsPerChunk) {
-          chunkCallback(chunkCallbackContext, chunk, dst - chunk);
-          chunk = dst;
-          pMeta->nRuns += runsPerChunk;
-          chunkRuns = 0;
-        }
       }
       t[0] = c;
       int v0 = v1, k;
@@ -132,23 +123,16 @@ int bwt_reorder_mtf_rle(
         *dst = mtfC;
       }
       ++dst;
-      ++chunkRuns;
-      if (chunkRuns == runsPerChunk) {
+      if (dst-chunk >= charPerChnck) {
         chunkCallback(chunkCallbackContext, chunk, dst - chunk);
         chunk = dst;
-        pMeta->nRuns += runsPerChunk;
-        chunkRuns = 0;
       }
     }
   }
-  if (zRunLen != 0) {
+  if (zRunLen != 0)
     dst = insertZeroRun(dst, zRunLen);
-    ++chunkRuns;
-  }
-  if (chunkRuns != 0) {
+  if (dst - chunk != 0)
     chunkCallback(chunkCallbackContext, chunk, dst - chunk);
-    pMeta->nRuns += chunkRuns;
-  }
 
   return dst - reinterpret_cast<uint8_t*>(idx_dst); // return the length of destination array in octets
 }
