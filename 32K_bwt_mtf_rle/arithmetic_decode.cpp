@@ -251,7 +251,7 @@ int decode(
     mtf_t[i] = i;
 
   const uint64_t MIN_RANGE = uint64_t(1) << (33-RANGE_BITS);
-  const double TWO_POW83  = double(int64_t(1) << 40) * (int64_t(1) << 43);
+  const double INV_RANGE_SCALE = double(int64_t(1) << (54-RANGE_BITS)) * (int64_t(1) << 43); // 2**(97-rb)
 
   const uint8_t* src = pDec->m_src;
   int srclen = pDec->m_srclen;
@@ -263,9 +263,9 @@ int decode(
     useTmpbuf = true;
   }
 
-  uint64_t value = pDec->m_val;                     // scaled by 2**64
-  uint64_t range = pDec->m_range >> (RANGE_BITS-1); // scaled by 2**50.  Maintained in [2**19+1..2*50]
-  uint64_t invRange = int64_t(TWO_POW83/range);     // approximation of floor(2**83/range). Maintained in [2**33..2*64)
+  uint64_t value = pDec->m_val;                       // scaled by 2**64
+  uint64_t range = pDec->m_range >> (RANGE_BITS-1);   // scaled by 2**(64-rb).  Maintained in [2**(33-rb)+1..2*(64-rb)]
+  uint64_t invRange = int64_t(INV_RANGE_SCALE/range); // approximation of floor(2**(97-rb)/range). Maintained in [2**33..2*64)
 
   // uint64_t mxProd = 0, mnProd = uint64_t(-1);
   uint32_t rlAcc = 0;
@@ -276,7 +276,7 @@ int decode(
     #if 0
     uint64_t prod = umulh(invRange, range);
     if (prod > mxProd || prod < mnProd) {
-      const int64_t PROD_ONE = int64_t(1) << 19;
+      const int64_t PROD_ONE = int64_t(1) << (33-RANGE_BITS);
       if (prod > mxProd) mxProd=prod;
       if (prod < mnProd) mnProd=prod;
       printf("%016llx*%016llx=%3lld [%3lld..%3lld] %d (%d)\n"
@@ -345,7 +345,7 @@ int decode(
           // {printf("[%3d]=%3d\n", dbg_i, 0); ++dbg_i;}
         rlMsb = 1;
         rlAcc = 0;
-        if (rl >= uint32_t(dstlen)) 
+        if (rl >= uint32_t(dstlen))
           return -22; // zero run too long (B)
         int c0 = mtf_t[0];
         // for (int ii=0; ii < rl; ++ii)
@@ -409,10 +409,10 @@ int decode(
     invRange = umulh(invRange, uint64_t(pModel->m_c2invRange[c]) << (63-31)) << (RANGE_BITS+1);
 
     if ((i & 15)==0) {
-      // do one NR iteration to increase precision of invRange and assure that invRange*range <= 2**83
-      const uint64_t PROD_ONE = uint64_t(1) << 19;
-      uint64_t prod = umulh(invRange, range); // scaled to 2^20
-      invRange = umulh(invRange, (PROD_ONE*2-1-prod)<<44)<<1;
+      // do one NR iteration to increase precision of invRange and assure that invRange*range <= 2**(97-rb)
+      const uint64_t PROD_ONE = uint64_t(1) << (33-RANGE_BITS);
+      uint64_t prod = umulh(invRange, range); // scaled to 2^(33-RANGE_BITS)
+      invRange = umulh(invRange, (PROD_ONE*2-1-prod)<<(RANGE_BITS+30))<<1;
     }
   }
   return dst - dst0;
