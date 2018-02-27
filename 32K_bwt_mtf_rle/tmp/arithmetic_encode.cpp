@@ -133,18 +133,53 @@ static uint8_t* encode_val(uint8_t* dst, unsigned val, unsigned offset)
 
 static unsigned encode_qh(uint8_t* dst0, const uint8_t* qh, unsigned len)
 {
+  // // find smallest non-zero value
+  // unsigned min_val = 255;
+  // for (unsigned c = 0; c < len; ++c) {
+    // unsigned val = qh[c];
+    // printf("%3d %3d\n", c, val);
+    // if (val > 0 && val < min_val)
+      // min_val = val;
+  // }
+  // dst = encode_val(dst, min_val-1, 4);
+
+  // move-to-front encode
+  uint8_t mtf_t[256];
+  for (unsigned c = 0; c < 256; ++c)
+    mtf_t[c] = c;
+  // encode backward
+  uint8_t qhm[257];
+  for (unsigned i = 0; i < 257-len; ++i)
+    qhm[i] = 0;
+  for (unsigned i = 257-len; i < 257; ++i) {
+    unsigned c = qh[256-i];
+    unsigned k = 0;
+    int v1 = mtf_t[0];
+    if (c != v1) {
+      mtf_t[0] = c;
+      int v0 = v1;
+      for (k = 1; c != (v1=mtf_t[k]); ++k) {
+        mtf_t[k] = v0;
+        v0 = v1;
+      }
+      mtf_t[k] = v0;
+    }
+    qhm[i] = k;
+  }
+
   uint8_t* dst = dst0;
   int zr = -1;
-  for (unsigned c = 0; c < len; ++c) {
-    unsigned val = qh[c];
+  for (unsigned c = 0; c < 257; ++c) {
+    ++zr;
+    unsigned val = qhm[c];
     if (val > 0) {
       if (zr >= 0)
         dst = encode_val(dst, zr, 0);
-      zr = 0;
+      zr = -1;
       dst = encode_val(dst, val-1, 2);
     }
   }
-  dst = encode_val(dst, 257-len, 0);
+  dst = encode_val(dst, zr+1, 0);
   return dst - dst0;
 }
 
@@ -156,7 +191,7 @@ static unsigned quantize_histogram_pair(unsigned h0, unsigned h1, unsigned scale
   if (h1 == 0)
     return scale;
   unsigned hTot = h0 + h1;
-  printf("%u+%u => %.2f\n", h0, h1, (log2(hTot)*hTot-log2(h0)*h0-log2(h1)*h1)/8);
+  // printf("%u+%u => %.2f\n", h0, h1, (log2(hTot)*hTot-log2(h0)*h0-log2(h1)*h1)/8);
   double M_PI = 3.1415926535897932384626433832795;
   unsigned val = round((asin(h0*2.0/hTot - 1.0)/M_PI + 0.5)*scale);
   if (val < 1)
@@ -188,9 +223,9 @@ static int store_model(uint8_t* dst, const uint8_t qh[257], unsigned maxC, doubl
     range_tab[k][0] = 0;
     range_tab[k][2] = VAL_RANGE;
   }
-  printf("%.5f %.5f\n", double(hist[0]+hist[1])/(hist[0]+hist[1]+hist[2]+hist[3]), double(range_tab[0][1])/VAL_RANGE);
-  printf("%.5f %.5f\n", double(hist[0])/(hist[0]+hist[1]), double(range_tab[1][1])/VAL_RANGE);
-  printf("%.5f %.5f\n", double(hist[2])/(hist[2]+hist[3]), double(range_tab[2][1])/VAL_RANGE);
+  // printf("%.5f %.5f\n", double(hist[0]+hist[1])/(hist[0]+hist[1]+hist[2]+hist[3]), double(range_tab[0][1])/VAL_RANGE);
+  // printf("%.5f %.5f\n", double(hist[0])/(hist[0]+hist[1]), double(range_tab[1][1])/VAL_RANGE);
+  // printf("%.5f %.5f\n", double(hist[2])/(hist[2]+hist[3]), double(range_tab[2][1])/VAL_RANGE);
 
   unsigned hhw = (hh02-1) + (hh01-1)*8 + hh23*64; // combine all hh in a single word
 
