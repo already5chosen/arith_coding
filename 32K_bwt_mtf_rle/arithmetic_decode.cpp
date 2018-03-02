@@ -18,6 +18,7 @@ public:
   }
   void init(const uint8_t* src, int srclen);
   int put(uint64_t cLo, uint64_t cRange); // return 0 on success, negative number on error
+  int extract_1bit(const unsigned range_tab[3], int32_t* pRes); // return 0 on success, negative number on error
   uint64_t       m_val;   // scaled by 2**64
   uint64_t       m_range; // scaled by 2**63
   const uint8_t* m_src;
@@ -77,6 +78,23 @@ int CArithmeticDecoder::put(uint64_t cLo, uint64_t cRange)
   return 0;
 }
 
+// return 0 on success,
+// return negative number on error
+int CArithmeticDecoder::extract_1bit(const unsigned range_tab[3], int32_t* pRes)
+{
+  unsigned mid = range_tab[1];
+  if (0==mid)
+    return 1;
+  if (VAL_RANGE==mid)
+    return 0;
+  unsigned val = get(VAL_RANGE);
+  int res = (val >= mid);
+  *pRes = res;
+  unsigned lo = range_tab[res];
+  unsigned ra = range_tab[res+1]-lo;
+  return put(lo, ra);
+}
+
 // load_quantized_histogram
 // return  value:
 //   on success maxC >= 0
@@ -84,53 +102,103 @@ int CArithmeticDecoder::put(uint64_t cLo, uint64_t cRange)
 static
 int load_quantized_histogram(uint8_t* qh, CArithmeticDecoder* pDec)
 {
-  // load maxC
-  unsigned maxC = pDec->get(257);
-  int err = pDec->put(maxC, 1);
+  // load hhw - combined hh word
+  unsigned hhw = pDec->get(8*9*10*9);
+  int err = pDec->put(hhw, 1);
   if (err)
     return err;
 
-  // load histogram of log2
-  const int QH_BITS  = 8;
-  unsigned hist[QH_BITS+1] = {0};
-  unsigned rem = maxC+1;
-  for (int i = 0; i < QH_BITS && rem > 0; ++i) {
-    hist[i] = pDec->get(rem+1); // hist[i] in range [0..rem]
-    err = pDec->put(hist[i], 1);
-    if (err)
-      return err;
-    rem -= hist[i];
+  // split hhw into individual hh words
+  unsigned hh02 = (hhw % 8) + 1; hhw /= 8;
+  unsigned hh01 = (hhw % 9) + 1; hhw /= 9;
+  unsigned hh23 = (hhw %10) + 0; hhw /= 10;
+  unsigned hh45 = hhw + 1;
+
+  unsigned range_tab[4][3];
+  range_tab[0][1] = quantized_histogram_pair_to_range_qh_scale9(hh02, VAL_RANGE);
+  range_tab[1][1] = quantized_histogram_pair_to_range_qh_scale9(hh01, VAL_RANGE);
+  range_tab[2][1] = quantized_histogram_pair_to_range_qh_scale9(hh23, VAL_RANGE);
+  range_tab[3][1] = quantized_histogram_pair_to_range_qh_scale9(hh45, VAL_RANGE);
+  for (int k = 0; k < 4; ++k) {
+    range_tab[k][0] = 0;
+    range_tab[k][2] = VAL_RANGE;
   }
-  if (rem > 0)
-    hist[QH_BITS] = rem;
 
-  // load c2range
-  int nRanges = 0; // count non-zero ranges
-  for (unsigned c = 0; c <= maxC; ++c) {
-    // extract exp.range
-    unsigned ix = pDec->get(maxC+1);
-    int log2_i;
-    unsigned lo = 0;
-    for (log2_i = 0; lo+hist[log2_i] <= ix; ++log2_i)
-      lo += hist[log2_i];
-    err = pDec->put(lo, hist[log2_i]);
-    if (err)
-      return err;
+  unsigned val = 0;
+  int32_t prev_msb = 0;
+  uint32_t rlAcc = 0;
+  uint32_t rlMsb = 1;
+  int down = 0;
+  bool first = true;
+  int maxC = -1;
+  for (unsigned i = 0; ; )
+  {
+    int32_t msb = 0;
+    if (!first) {
+      err = pDec->extract_1bit(range_tab[0], &msb);
+      if (err)
+        return err;
+    }
+    first = false;
 
-    unsigned range = 0;
-    if (log2_i != 0) {
-      ++nRanges;
-      range = uint32_t(1) << (log2_i-1);
-      if (log2_i > 1) {
-        // extract offset within range
-        unsigned offset = pDec->get(range);
-        err = pDec->put(offset, 1);
-        if (err)
-          return err;
-        range += offset;
+    if (msb != prev_msb) {
+      // end of run
+      int32_t rl = rlAcc + rlMsb - 2;
+      rlMsb = 1;
+      rlAcc = 0;
+      if (prev_msb == 0) {
+        // end of zero run
+        i += rl;
+        if (rl > 0)
+          memset(&qh[257-i], val, rl);
+      } else {
+        rl += 1;
+        // end of diff run
+        if (down) {
+          if (rl + 1 > val)
+            return -15;
+          val -= rl + 1;
+        } else {
+          val += rl + 1;
+          if (val > 255)
+            return -16;
+        }
+        qh[256-i] = val;
+        if (maxC < 0)
+          maxC = 256-i;
+        i += 1;
       }
     }
-    qh[c] = range;
+
+    unsigned tabId = (msb==0) ? 0 : 2 - prev_msb;
+    int32_t lsb;
+    err = pDec->extract_1bit(range_tab[tabId+1], &lsb);
+    if (err)
+      return err;
+
+    if (tabId != 2) {
+      // zero run or difference
+      rlAcc |= (-lsb) & rlMsb;
+      rlMsb += rlMsb;
+      uint32_t rl = rlAcc + rlMsb - 2;
+      if (msb == 0) {
+        if (rl + i >= 257) {
+          if (rl + i == 257) {
+            if (rl > 0)
+              memset(&qh[0], val, rl);
+            break; // done
+          } else {
+            return -17;
+          }
+        }
+      } else {
+        if (rl >= 255)
+          return -18;
+      }
+    } else {
+      down = lsb; // sign of difference
+    }
+    prev_msb = msb;
   }
 
   // for (int i = 0; i <= maxC; ++i)

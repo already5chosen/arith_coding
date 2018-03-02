@@ -121,55 +121,120 @@ public:
   uint64_t m_range; // scaled by 2**63
 };
 
-static int inline floor_log2(unsigned x)
+static uint8_t* encode_val(uint8_t* dst, unsigned val, unsigned offset)
 {
-  return sizeof(unsigned)*8 - 1 - __builtin_clz(x); // floor(log2(x))
+  val += 2;
+  do {
+    *dst++ = (val % 2) + offset;
+    val /= 2;
+  } while (val > 1);
+  return dst;
+}
+
+static unsigned encode_qh(uint8_t* dst0, const uint8_t* qh, unsigned len)
+{
+  uint8_t* dst = dst0;
+  // encode backward
+  int runlen = 257-len-1;
+  unsigned prev_val = 0;
+  for (unsigned c = 0; c < len; ++c) {
+    ++runlen;
+    unsigned val = qh[len-1-c];
+    if (val != prev_val) {
+      if (runlen >= 0)
+        dst = encode_val(dst, runlen, 0);
+      runlen = -1;
+      unsigned diff;
+      if (val > prev_val) {
+        *dst++ = 4;
+        diff = val - prev_val - 1;
+      } else {
+        *dst++ = 5;
+        diff = prev_val - val - 1;
+      }
+      prev_val = val;
+      if (diff != 0)
+        dst = encode_val(dst, diff-1, 2);
+    }
+  }
+  dst = encode_val(dst, runlen+1, 0);
+  return dst - dst0;
+}
+
+// return quantized code of h0/(h0+h1) in range [0..scale]
+static unsigned quantize_histogram_pair(unsigned h0, unsigned h1, unsigned scale)
+{
+  if (h0 == 0)
+    return 0;
+  if (h1 == 0)
+    return scale;
+  unsigned hTot = h0 + h1;
+  // printf("%u+%u => %.2f\n", h0, h1, (log2(hTot)*hTot-log2(h0)*h0-log2(h1)*h1)/8);
+  double M_PI = 3.1415926535897932384626433832795;
+  unsigned val = round((asin(h0*2.0/hTot - 1.0)/M_PI + 0.5)*scale);
+  if (val < 1)
+    val = 1;
+  else if (val >= scale)
+    val = scale-1;
+  return val;
 }
 
 // return the number of stored octets
 static int store_model(uint8_t* dst, const uint8_t qh[257], unsigned maxC, double* pNbits, CArithmeticEncoder* pEnc)
 {
-  int nRanges = 0;
-  unsigned hist[QH_BITS+1] = {0};
-  for (unsigned c = 0; c <= maxC; ++c) {
-    uint32_t range = qh[c];
-    if (range > 0) {
-      ++nRanges;
-      hist[1+floor_log2(range)] += 1;
-    }
-  }
-  hist[0] = maxC + 1 - nRanges; // # of zero ranges before maxC
+  // encode qh
+  uint8_t eqh[257*QH_BITS];
+  unsigned qhlen = encode_qh(eqh, qh, maxC + 1);
+  unsigned hist[6] = {0};
+  for (unsigned c = 0; c < qhlen; ++c)
+    ++hist[eqh[c]];
 
-  // for (int i = 0; i< QH_BITS+1; ++i)
-    // printf("hist[%2d]=%d\n", i, hist[i]);
-  // for (int i = 0; i <= maxC; ++i)
-    // printf("range[%3d]=%5d\n", i, qh[i]);
+  unsigned hh02 = quantize_histogram_pair(hist[0]+hist[1]-1,
+                           hist[2]+hist[3]+hist[4]+hist[5], 9); // range [1..8], because both sums > 0
+  unsigned hh01 = quantize_histogram_pair(hist[0], hist[1], 9); // range [1..9], because hist[0] > 0
+  unsigned hh23 = quantize_histogram_pair(hist[2], hist[3], 9); // range [0..9]
+  unsigned hh45 = quantize_histogram_pair(hist[4], hist[5], 9); // range [1..9], because hist[4] > 0
+
+  unsigned range_tab[4][3];
+  range_tab[0][1] = quantized_histogram_pair_to_range_qh_scale9(hh02, VAL_RANGE);
+  range_tab[1][1] = quantized_histogram_pair_to_range_qh_scale9(hh01, VAL_RANGE);
+  range_tab[2][1] = quantized_histogram_pair_to_range_qh_scale9(hh23, VAL_RANGE);
+  range_tab[3][1] = quantized_histogram_pair_to_range_qh_scale9(hh45, VAL_RANGE);
+  for (int k = 0; k < 4; ++k) {
+    range_tab[k][0] = 0;
+    range_tab[k][2] = VAL_RANGE;
+    // printf("range_tab[%d][1] = %5d\n", k, range_tab[k][1]);
+  }
+  // printf("%.5f %.5f\n", double(hist[0]+hist[1])/(hist[0]+hist[1]+hist[2]+hist[3]), double(range_tab[0][1])/VAL_RANGE);
+  // printf("%.5f %.5f\n", double(hist[0])/(hist[0]+hist[1]), double(range_tab[1][1])/VAL_RANGE);
+  // printf("%.5f %.5f\n", double(hist[2])/(hist[2]+hist[3]), double(range_tab[2][1])/VAL_RANGE);
+
+  unsigned hhw = (hh02-1)+8*((hh01-1)+(9*(hh23+10*(hh45-1)))); // combine all hh in a single word
 
   uint8_t* p = dst;
 
-  // store maxC
-  p = pEnc->put(257, maxC, 1, p);
-  // store histogram of log2
-  unsigned rem = maxC + 1;
-  for (int i = 0; i < QH_BITS && rem > 0; ++i) {
-    p = pEnc->put(rem+1, hist[i], 1, p);
-    rem -= hist[i];
+  // store hhw
+  p = pEnc->put(8*9*10*9, hhw, 1, p);
+  // store eqh
+  for (unsigned c = 0; c < qhlen; ++c)
+  {
+    unsigned val = eqh[c];
+    unsigned val0 = val > 1;
+    unsigned val1 = val % 2;
+    // printf("%d\n", val, val0, val1);
+    unsigned lo0 = range_tab[0][val0];
+    unsigned ra0 = range_tab[0][val0+1] - lo0;
+    unsigned* range_tab1 = range_tab[val/2+1];
+    unsigned lo1 = range_tab1[val1];
+    unsigned ra1 = range_tab1[val1+1] - lo1;
+    if (c != 0)
+      p = pEnc->put(VAL_RANGE, lo0, ra0, p);
+    if (ra1 != 0)
+      p = pEnc->put(VAL_RANGE, lo1, ra1, p);
   }
 
-  // store c2range
-  for (unsigned c = 0; c <= maxC; ++c) {
-    uint32_t range = qh[c];
-    int log2_i = range == 0 ? 0 : 1+floor_log2(range);
-    int lo = 0;
-    for (int i = 0; i < log2_i; ++i)
-      lo += hist[i];
-    p = pEnc->put(maxC+1, lo, hist[log2_i], p); // exp.range
-    if (log2_i > 1) {
-      uint32_t expRangeSz = uint32_t(1) << (log2_i-1);
-      p = pEnc->put(expRangeSz, range-expRangeSz, 1, p); // offset within range
-    }
-  }
-  pEnc->spillOverflow(p);
+  // for (int i = 0; i <= maxC; ++i)
+    // printf("range[%3d]=%5d\n", i, qh[i]);
 
   int len = p - dst;
   *pNbits = len*8.0 + 63 - log2(pEnc->m_range);

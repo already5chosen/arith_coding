@@ -243,38 +243,16 @@ void quantized_histogram_to_range(uint16_t* ranges, unsigned len, const uint8_t*
   histogram_to_range(ranges, len, qhr, qhrTot, range_scale);
 }
 
-static const uint32_t dequantization_tab7[6] =
-{ // round((sin((double(i+1)/7 - 0.5)*M_PI) + 1.0)*2**24);
- 1661467,  6316793,  13043934,  20510498,  27237639, 31892965,
-};
-static const uint32_t dequantization_tab8[7] =
-{ // round((sin((double(i+1)/8 - 0.5)*M_PI) + 1.0)*2**24);
- 1277090, 4913933, 10356853, 16777216, 23197579, 28640499, 32277342,
-};
 static const uint32_t dequantization_tab9[8] =
 { // round((sin((double(i+1)/9 - 0.5)*M_PI) + 1.0)*2**24);
   1011790, 3925123, 8388608, 13863883, 19690549, 25165824, 29629309, 32542642,
 };
 
-
-// qh_scale in range [7..9]
-// return range[0]
-static unsigned quantized_histogram_pair_to_range(unsigned qh, unsigned range_scale, unsigned qh_scale, const uint32_t* tab)
-{
+unsigned quantized_histogram_pair_to_range_qh_scale9(unsigned qh, unsigned range_scale) {
   if (qh <= 0)
     return 0;
-  if (qh >= qh_scale)
+  if (qh >= 9)
     return range_scale;
-  return (uint64_t(tab[qh-1])*range_scale + (uint64_t(1) << 24)) >> 25;
-}
-
-unsigned quantized_histogram_pair_to_range_qh_scale7(unsigned qh, unsigned range_scale) {
-  return quantized_histogram_pair_to_range(qh, range_scale, 7, dequantization_tab7);
-}
-unsigned quantized_histogram_pair_to_range_qh_scale8(unsigned qh, unsigned range_scale) {
-  return quantized_histogram_pair_to_range(qh, range_scale, 8, dequantization_tab8);
-}
-unsigned quantized_histogram_pair_to_range_qh_scale9(unsigned qh, unsigned range_scale) {
-  return quantized_histogram_pair_to_range(qh, range_scale, 9, dequantization_tab9);
+  return (uint64_t(dequantization_tab9[qh-1])*range_scale + (uint64_t(1) << 24)) >> 25;
 }
 
