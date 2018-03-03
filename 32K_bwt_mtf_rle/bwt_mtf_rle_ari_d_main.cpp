@@ -92,6 +92,7 @@ int main(int argz, char** argv)
         int info[8]={0};
         uint8_t *pDst = 0;
         uint64_t t0 = __rdtsc();
+        uint64_t t1 = t0;
         if (hdr[5] == 255) {
           // special cases
           switch (hdr[3]) {
@@ -140,6 +141,7 @@ int main(int argz, char** argv)
           if (tilelen > dst.size())
             dst.resize(tilelen);
           
+          t1 = __rdtsc();
           pDst = &dst.at(0);
           ibwt(
             pDst,
@@ -149,11 +151,11 @@ int main(int argz, char** argv)
             bwtPrimaryIndex,
             histogram);
         }
-        uint64_t t1 = __rdtsc();
+        uint64_t t2 = __rdtsc();
 
         if (vFlag)
           printf(
-            "%7u -> %7u. Model %7.3f. Coded %7d. %9.0f clocks. %5.1f clocks/char"
+            "%7u -> %7u. Model %7.3f. Coded %7d. %9.0f clocks. %5.1f+%4.1f=%5.1f clocks/char"
             #ifdef ENABLE_PERF_COUNT
             " %6d %6d %6d"
             #endif
@@ -162,8 +164,10 @@ int main(int argz, char** argv)
             ,unsigned(tilelen)
             ,info[0]/8.0
             ,info[1]
-            ,double(t1-t0)
+            ,double(t2-t0)
             ,double(t1-t0)/tilelen
+            ,double(t2-t1)/tilelen
+            ,double(t2-t0)/tilelen
             #ifdef ENABLE_PERF_COUNT
             ,info[2]
             ,info[3]

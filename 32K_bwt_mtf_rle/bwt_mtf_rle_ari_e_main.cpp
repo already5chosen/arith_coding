@@ -56,6 +56,7 @@ int main(int argz, char** argv)
             arithmetic_encode_init_context(encContext);
             uint64_t t0 = __rdtsc();
             bwt_sort(&tmpDst.at(0), inptile, tilelen);
+            uint64_t t1 = __rdtsc();
             bwt_mtf_rle_meta_t meta;
             int rlesz = bwt_reorder_mtf_rle(  // return length of destination array in octets
               &tmpDst.at(0), // both input and output
@@ -63,21 +64,25 @@ int main(int argz, char** argv)
               &meta,
               arithmetic_encode_chunk_callback,
               encContext);
+            uint64_t t2 = __rdtsc();
             uint8_t* ariEncSrc = reinterpret_cast<uint8_t*>(&tmpDst.at(0));
             uint8_t* ariEncDst = &ariEncSrc[rlesz];
             double info[8];
             ressz = arithmetic_encode(encContext, ariEncDst, ariEncSrc, rlesz, tilelen, vFlag ? info : 0);
-            uint64_t t1 = __rdtsc();
+            uint64_t t3 = __rdtsc();
             if (vFlag)
-              printf("%7u->%7u. Model %7.3f. Coded %10.0f. Entropy %11.3f (%11.3f). %10.0f clocks. %6.1f clocks/char\n"
+              printf("%7u->%7u. Model %7.3f. Coded %10.0f. Entropy %11.3f (%11.3f). %10.0f clocks. %6.1f+%5.1f+%4.1f=%6.1f clocks/char\n"
                ,unsigned(tilelen)
                ,ressz < 0 ? 0 : (ressz == 0 ? unsigned(tilelen) : unsigned(ressz))
                ,info[1]/8
                ,info[2]/8
                ,info[0]/8
                ,info[3]/8
-               ,double(t1-t0)
+               ,double(t3-t0)
                ,double(t1-t0)/tilelen
+               ,double(t2-t1)/tilelen
+               ,double(t3-t2)/tilelen
+               ,double(t3-t0)/tilelen
              );
             if (ressz > 0) {
               // normal compression
