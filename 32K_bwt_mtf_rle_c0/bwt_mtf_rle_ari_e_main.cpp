@@ -30,6 +30,7 @@ int main(int argz, char** argv)
       const size_t TILE_SIZE = 1024*1024;
       uint8_t* inptile = new uint8_t[TILE_SIZE];
       std::vector<int32_t> tmpDst;
+      std::vector<uint32_t> encContext;
       ret = 0;
       bool done = false;
       while (!done) {
@@ -52,8 +53,7 @@ int main(int argz, char** argv)
           if (!isSingleCharacter(inptile, tilelen)) {
             if (tilelen+256 > tmpDst.size())
               tmpDst.resize(tilelen+256);
-            uint32_t encContext[257];
-            arithmetic_encode_init_context(encContext);
+            arithmetic_encode_init_context(&encContext, tilelen);
             uint64_t t0 = __rdtsc();
             bwt_sort(&tmpDst.at(0), inptile, tilelen);
             uint64_t t1 = __rdtsc();
@@ -63,12 +63,12 @@ int main(int argz, char** argv)
               inptile, tilelen,
               &meta,
               arithmetic_encode_chunk_callback,
-              encContext);
+              &encContext);
             uint64_t t2 = __rdtsc();
             uint8_t* ariEncSrc = reinterpret_cast<uint8_t*>(&tmpDst.at(0));
             uint8_t* ariEncDst = &ariEncSrc[rlesz];
             double info[8];
-            ressz = arithmetic_encode(encContext, ariEncDst, ariEncSrc, rlesz, tilelen, vFlag ? info : 0);
+            ressz = arithmetic_encode(&encContext.at(0), ariEncDst, ariEncSrc, rlesz, tilelen, vFlag ? info : 0);
             uint64_t t3 = __rdtsc();
             if (vFlag)
               printf("%7u->%7u. Model %7.3f. Coded %10.0f. Entropy %11.3f (%11.3f). %10.0f clocks. %6.1f+%5.1f+%4.1f=%6.1f clocks/char\n"
