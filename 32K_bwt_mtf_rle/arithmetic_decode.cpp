@@ -103,7 +103,7 @@ static
 int load_quantized_histogram(uint8_t* qh, CArithmeticDecoder* pDec)
 {
   // load hhw - combined hh word
-  unsigned hhw = pDec->get(8*9*10*9);
+  unsigned hhw = pDec->get(8*9*10*10);
   int err = pDec->put(hhw, 1);
   if (err)
     return err;
@@ -112,7 +112,7 @@ int load_quantized_histogram(uint8_t* qh, CArithmeticDecoder* pDec)
   unsigned hh02 = (hhw % 8) + 1; hhw /= 8;
   unsigned hh01 = (hhw % 9) + 1; hhw /= 9;
   unsigned hh23 = (hhw %10) + 0; hhw /= 10;
-  unsigned hh45 = hhw + 1;
+  unsigned hh45 = hhw;
 
   unsigned range_tab[4][3];
   range_tab[0][1] = quantized_histogram_pair_to_range_qh_scale9(hh02, VAL_RANGE);
@@ -129,21 +129,18 @@ int load_quantized_histogram(uint8_t* qh, CArithmeticDecoder* pDec)
   uint32_t rlAcc = 0;
   uint32_t rlMsb = 1;
   int down = 0;
-  bool first = true;
+  bool first = 1;
   int maxC = -1;
   for (unsigned i = 0; ; )
   {
-    int32_t msb = 0;
-    if (!first) {
-      err = pDec->extract_1bit(range_tab[0], &msb);
-      if (err)
-        return err;
-    }
-    first = false;
+    int32_t msb;
+    err = pDec->extract_1bit(range_tab[0], &msb);
+    if (err)
+      return err;
 
     if (msb != prev_msb) {
       // end of run
-      int32_t rl = rlAcc + rlMsb - 2;
+      int32_t rl = rlAcc + rlMsb - 2 + first;
       rlMsb = 1;
       rlAcc = 0;
       if (prev_msb == 0) {
@@ -168,35 +165,40 @@ int load_quantized_histogram(uint8_t* qh, CArithmeticDecoder* pDec)
           maxC = 256-i;
         i += 1;
       }
+      first = 0;
     }
 
     unsigned tabId = (msb==0) ? 0 : 2 - prev_msb;
-    int32_t lsb;
-    err = pDec->extract_1bit(range_tab[tabId+1], &lsb);
-    if (err)
-      return err;
+    if (tabId != 2 || (val != 0 && val != 255)) {
+      int32_t lsb;
+      err = pDec->extract_1bit(range_tab[tabId+1], &lsb);
+      if (err)
+        return err;
 
-    if (tabId != 2) {
-      // zero run or difference
-      rlAcc |= (-lsb) & rlMsb;
-      rlMsb += rlMsb;
-      uint32_t rl = rlAcc + rlMsb - 2;
-      if (msb == 0) {
-        if (rl + i >= 257) {
-          if (rl + i == 257) {
-            if (rl > 0)
-              memset(&qh[0], val, rl);
-            break; // done
-          } else {
-            return -17;
+      if (tabId != 2) {
+        // zero run or difference
+        rlAcc |= (-lsb) & rlMsb;
+        rlMsb += rlMsb;
+        uint32_t rl = rlAcc + rlMsb - 2;
+        if (msb == 0) {
+          if (rl + i >= 257) {
+            if (rl + i == 257) {
+              if (rl > 0)
+                memset(&qh[0], val, rl);
+              break; // done
+            } else {
+              return -17;
+            }
           }
+        } else {
+          if (rl >= 255)
+            return -18;
         }
       } else {
-        if (rl >= 255)
-          return -18;
+        down = lsb; // sign of difference
       }
     } else {
-      down = lsb; // sign of difference
+      down = (val != 0);
     }
     prev_msb = msb;
   }

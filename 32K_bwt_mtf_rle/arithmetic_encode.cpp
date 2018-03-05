@@ -135,7 +135,7 @@ static unsigned encode_qh(uint8_t* dst0, const uint8_t* qh, unsigned len)
 {
   uint8_t* dst = dst0;
   // encode backward
-  int runlen = 257-len-1;
+  int runlen = 257-len-2;
   unsigned prev_val = 0;
   for (unsigned c = 0; c < len; ++c) {
     ++runlen;
@@ -146,10 +146,10 @@ static unsigned encode_qh(uint8_t* dst0, const uint8_t* qh, unsigned len)
       runlen = -1;
       unsigned diff;
       if (val > prev_val) {
-        *dst++ = 4;
+        *dst++ = prev_val != 0 ? 4 : 6;
         diff = val - prev_val - 1;
       } else {
-        *dst++ = 5;
+        *dst++ = prev_val != 255 ? 5 : 6;
         diff = prev_val - val - 1;
       }
       prev_val = val;
@@ -185,15 +185,15 @@ static int store_model(uint8_t* dst, const uint8_t qh[257], unsigned maxC, doubl
   // encode qh
   uint8_t eqh[257*QH_BITS];
   unsigned qhlen = encode_qh(eqh, qh, maxC + 1);
-  unsigned hist[6] = {0};
+  unsigned hist[7] = {0};
   for (unsigned c = 0; c < qhlen; ++c)
     ++hist[eqh[c]];
 
-  unsigned hh02 = quantize_histogram_pair(hist[0]+hist[1]-1,
-                           hist[2]+hist[3]+hist[4]+hist[5], 9); // range [1..8], because both sums > 0
+  unsigned hh02 = quantize_histogram_pair(hist[0]+hist[1],
+                   hist[2]+hist[3]+hist[4]+hist[5]+hist[6], 9); // range [1..8], because both sums > 0
   unsigned hh01 = quantize_histogram_pair(hist[0], hist[1], 9); // range [1..9], because hist[0] > 0
   unsigned hh23 = quantize_histogram_pair(hist[2], hist[3], 9); // range [0..9]
-  unsigned hh45 = quantize_histogram_pair(hist[4], hist[5], 9); // range [1..9], because hist[4] > 0
+  unsigned hh45 = quantize_histogram_pair(hist[4], hist[5], 9); // range [0..9]
 
   unsigned range_tab[4][3];
   range_tab[0][1] = quantized_histogram_pair_to_range_qh_scale9(hh02, VAL_RANGE);
@@ -209,12 +209,12 @@ static int store_model(uint8_t* dst, const uint8_t qh[257], unsigned maxC, doubl
   // printf("%.5f %.5f\n", double(hist[0])/(hist[0]+hist[1]), double(range_tab[1][1])/VAL_RANGE);
   // printf("%.5f %.5f\n", double(hist[2])/(hist[2]+hist[3]), double(range_tab[2][1])/VAL_RANGE);
 
-  unsigned hhw = (hh02-1)+8*((hh01-1)+(9*(hh23+10*(hh45-1)))); // combine all hh in a single word
+  unsigned hhw = (hh02-1)+8*((hh01-1)+(9*(hh23+10*hh45))); // combine all hh in a single word
 
   uint8_t* p = dst;
 
   // store hhw
-  p = pEnc->put(8*9*10*9, hhw, 1, p);
+  p = pEnc->put(8*9*10*10, hhw, 1, p);
   // store eqh
   for (unsigned c = 0; c < qhlen; ++c)
   {
@@ -224,13 +224,14 @@ static int store_model(uint8_t* dst, const uint8_t qh[257], unsigned maxC, doubl
     // printf("%d\n", val, val0, val1);
     unsigned lo0 = range_tab[0][val0];
     unsigned ra0 = range_tab[0][val0+1] - lo0;
-    unsigned* range_tab1 = range_tab[val/2+1];
-    unsigned lo1 = range_tab1[val1];
-    unsigned ra1 = range_tab1[val1+1] - lo1;
-    if (c != 0)
-      p = pEnc->put(VAL_RANGE, lo0, ra0, p);
-    if (ra1 != 0)
-      p = pEnc->put(VAL_RANGE, lo1, ra1, p);
+    p = pEnc->put(VAL_RANGE, lo0, ra0, p);
+    if (val < 6) {
+      unsigned* range_tab1 = range_tab[val/2+1];
+      unsigned lo1 = range_tab1[val1];
+      unsigned ra1 = range_tab1[val1+1] - lo1;
+      if (ra1 != 0)
+        p = pEnc->put(VAL_RANGE, lo1, ra1, p);
+    }
   }
 
   // for (int i = 0; i <= maxC; ++i)
