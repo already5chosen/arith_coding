@@ -231,50 +231,81 @@ static unsigned quantize_histogram_pair(unsigned h0, unsigned h1, unsigned scale
   return val;
 }
 
-// return the number of stored octets
-static int store_model(uint8_t* dst, uint32_t * context, double* pNbits, CArithmeticEncoder* pEnc)
+static unsigned add_value_to_histogram(unsigned* h, unsigned val)
 {
-  int nChunks = context[0];
-  unsigned maxMaxC = context[2];
+  val += 2;
+  unsigned nbits = 0;
+  do {
+    ++nbits;
+    ++h[val % 2];
+    val /= 2;
+  } while (val > 1);
+  return nbits;
+}
 
-  // transpose qHistogram[][]
-  uint8_t* qhT = reinterpret_cast<uint8_t*>(&context[CONTEX_HDR_LEN+CONTEX_CHUNK_LEN*nChunks]);
-  for (int chunk_i = 0; chunk_i < nChunks; ++chunk_i) {
-    context_chunk_t* chunk = reinterpret_cast<context_chunk_t*>(&context[CONTEX_HDR_LEN+CONTEX_CHUNK_LEN*chunk_i]);
-    int maxC = chunk->maxC;
-    uint8_t* dst = &qhT[chunk_i];
-    for (int i = 0; i <= maxC; ++i, dst += nChunks)
-      *dst = chunk->qHistogram[i];
-    for (int i = maxC+1; i <= maxMaxC; ++i, dst += nChunks)
-      *dst = 0;
+static uint8_t* encode_value(uint8_t* dst, unsigned val, const unsigned* range_tab0, const unsigned* range_tab1, CArithmeticEncoder* pEnc)
+{
+  unsigned lo0 = range_tab0[0];
+  unsigned ra0 = range_tab0[1] - lo0;
+  val += 2;
+  do {
+    dst = pEnc->put(VAL_RANGE, lo0, ra0, dst);
+    unsigned bit = val % 2;
+    unsigned lo1 = range_tab1[bit];
+    unsigned ra1 = range_tab1[bit+1] - lo1;
+    if (ra1 != 0)
+      dst = pEnc->put(VAL_RANGE, lo1, ra1, dst);
+    val /= 2;
+  } while (val > 1);
+  return dst;
+}
+
+static uint8_t* store_model_store_base_data(uint8_t* dst, const uint8_t* qh, int len, int nChunks, CArithmeticEncoder* pEnc)
+{
+  // encode backward
+  // first pass - calculate histograms
+  unsigned hist[8] = {0};
+  int runlen = 257-len-2;
+  unsigned prev_val = 0;
+  for (unsigned c = 0; c < len; ++c) {
+    ++runlen;
+    unsigned val = qh[len-1-c];
+    if (val != prev_val) {
+      if (runlen >= 0)
+        hist[0] += add_value_to_histogram(&hist[2], runlen);
+      runlen = -1;
+      unsigned diff;
+      hist[1] += 1;
+      if (val > prev_val) {
+        hist[6] += (prev_val != 0); // '+'
+        diff = val - prev_val - 1;
+      } else {
+        hist[7] += (prev_val != 255); // '-'
+        diff = prev_val - val - 1;
+      }
+      prev_val = val;
+      if (diff != 0)
+        hist[1] += add_value_to_histogram(&hist[4], diff-1);
+    }
+  }
+  if (nChunks == 1) {
+    hist[0] += add_value_to_histogram(&hist[2], runlen+2);
+  } else {
+    hist[0] += add_value_to_histogram(&hist[2], runlen+1);
+    hist[1] += add_value_to_histogram(&hist[4], nChunks-2);
+    hist[0] += add_value_to_histogram(&hist[2], 0);
   }
 
-  // fill qh with median values of rows of qhT[][]
-  uint8_t qh[257];
-  for (int i = 0; i <= maxMaxC; ++i) {
-    uint8_t* row = &qhT[i*nChunks];
-    std::nth_element(&row[0], &row[nChunks/2], &row[nChunks]);
-    qh[i] = row[nChunks/2];
-  }
-
-  // encode qh
-  uint8_t eqh[257*QH_BITS];
-  unsigned qhlen = encode_qh(eqh, qh, maxMaxC + 1);
-  unsigned hist[6] = {0};
-  for (unsigned c = 0; c < qhlen; ++c)
-    ++hist[eqh[c]];
-
-  unsigned hh02 = quantize_histogram_pair(hist[0]+hist[1]-1,
-                           hist[2]+hist[3]+hist[4]+hist[5], 9); // range [1..8], because both sums > 0
-  unsigned hh01 = quantize_histogram_pair(hist[0], hist[1], 9); // range [1..9], because hist[0] > 0
+  unsigned hh01 = quantize_histogram_pair(hist[0], hist[1], 9); // range [1..8], because both sums > 0
   unsigned hh23 = quantize_histogram_pair(hist[2], hist[3], 9); // range [0..9]
-  unsigned hh45 = quantize_histogram_pair(hist[4], hist[5], 9); // range [1..9], because hist[4] > 0
+  unsigned hh45 = quantize_histogram_pair(hist[4], hist[5], 9); // range [0..9]
+  unsigned hh67 = quantize_histogram_pair(hist[6], hist[7], 9); // range [0..9]
 
   unsigned range_tab[4][3];
-  range_tab[0][1] = quantized_histogram_pair_to_range_qh_scale9(hh02, VAL_RANGE);
-  range_tab[1][1] = quantized_histogram_pair_to_range_qh_scale9(hh01, VAL_RANGE);
-  range_tab[2][1] = quantized_histogram_pair_to_range_qh_scale9(hh23, VAL_RANGE);
-  range_tab[3][1] = quantized_histogram_pair_to_range_qh_scale9(hh45, VAL_RANGE);
+  range_tab[0][1] = quantized_histogram_pair_to_range_qh_scale9(hh01, VAL_RANGE);
+  range_tab[1][1] = quantized_histogram_pair_to_range_qh_scale9(hh23, VAL_RANGE);
+  range_tab[2][1] = quantized_histogram_pair_to_range_qh_scale9(hh45, VAL_RANGE);
+  range_tab[3][1] = quantized_histogram_pair_to_range_qh_scale9(hh67, VAL_RANGE);
   for (int k = 0; k < 4; ++k) {
     range_tab[k][0] = 0;
     range_tab[k][2] = VAL_RANGE;
@@ -284,41 +315,175 @@ static int store_model(uint8_t* dst, uint32_t * context, double* pNbits, CArithm
   // printf("%.5f %.5f\n", double(hist[0])/(hist[0]+hist[1]), double(range_tab[1][1])/VAL_RANGE);
   // printf("%.5f %.5f\n", double(hist[2])/(hist[2]+hist[3]), double(range_tab[2][1])/VAL_RANGE);
 
-  unsigned hhw = (hh02-1)+8*((hh01-1)+(9*(hh23+10*(hh45-1)))); // combine all hh in a single word
-
-  uint8_t* p = dst;
+  unsigned hhw = (hh01-1)+8*(hh23+(10*(hh45+10*hh67))); // combine all hh in a single word
 
   // store hhw
-  p = pEnc->put(8*9*10*9, hhw, 1, p);
-  // store eqh
-  for (unsigned c = 0; c < qhlen; ++c)
-  {
-    unsigned val = eqh[c];
-    unsigned val0 = val > 1;
-    unsigned val1 = val % 2;
-    // printf("%d\n", val, val0, val1);
-    unsigned lo0 = range_tab[0][val0];
-    unsigned ra0 = range_tab[0][val0+1] - lo0;
-    unsigned* range_tab1 = range_tab[val/2+1];
-    unsigned lo1 = range_tab1[val1];
-    unsigned ra1 = range_tab1[val1+1] - lo1;
-    if (c != 0)
-      p = pEnc->put(VAL_RANGE, lo0, ra0, p);
-    if (ra1 != 0)
-      p = pEnc->put(VAL_RANGE, lo1, ra1, p);
-  }
+  dst = pEnc->put(8*10*10*10, hhw, 1, dst);
 
-  // for (int i = 0; i <= maxC; ++i)
-    // printf("range[%3d]=%5d\n", i, qh[i]);
-
-  for (int i = 0; i <= maxMaxC; ++i) {
-    uint8_t* row = &qhT[i*nChunks];
-    for (int chunk_i = 0; chunk_i < nChunks; ++chunk_i) {
+  // second pass - encode qh and nChunks
+  runlen = 257-len-2;
+  prev_val = 0;
+  for (unsigned c = 0; c < len; ++c) {
+    ++runlen;
+    unsigned val = qh[len-1-c];
+    if (val != prev_val) {
+      if (runlen >= 0)
+        dst = encode_value(dst, runlen, &range_tab[0][0], range_tab[1], pEnc);
+      runlen = -1;
+      unsigned diff;
+      dst = pEnc->put(VAL_RANGE, range_tab[0][1], VAL_RANGE-range_tab[0][1], dst);
+      if (val > prev_val) {
+        if (prev_val != 0 && range_tab[3][1] != 0)
+          dst = pEnc->put(VAL_RANGE, 0, range_tab[3][1], dst); // '+'
+        diff = val - prev_val - 1;
+      } else {
+        if (prev_val != 255 && range_tab[3][1] != VAL_RANGE)
+          dst = pEnc->put(VAL_RANGE, range_tab[3][1], VAL_RANGE-range_tab[3][1], dst); // '-'
+        diff = prev_val - val - 1;
+      }
+      prev_val = val;
+      if (diff != 0)
+        dst = encode_value(dst, diff-1, &range_tab[0][1], range_tab[2], pEnc);
     }
   }
+  if (nChunks == 1) {
+    dst = encode_value(dst, runlen+2, &range_tab[0][0], range_tab[1], pEnc);
+  } else {
+    dst = encode_value(dst, runlen+1,  &range_tab[0][0], range_tab[1], pEnc);
+    dst = encode_value(dst, nChunks-2, &range_tab[0][1], range_tab[2], pEnc);
+    dst = encode_value(dst, 0,         &range_tab[0][0], range_tab[1], pEnc);
+  }
+
+  return dst;
+}
+
+static uint8_t* store_model_store_diff_data(uint8_t* dst, const uint8_t* baseQh, const uint8_t* qhT, int len, int nChunks, CArithmeticEncoder* pEnc)
+{
+  // first pass - calculate histograms
+  unsigned hist[8] = {0};
+  int runlen = -2;
+  for (int i = 0; i < len; ++i) {
+    const uint8_t* row = &qhT[(len-1-i)*nChunks];
+    unsigned baseVal = baseQh[len-1-i];
+    for (int chunk_i = 0; chunk_i < nChunks; ++chunk_i) {
+      unsigned val = row[chunk_i];
+      ++runlen;
+      if (val != baseVal) {
+        if (runlen >= 0)
+          hist[0] += add_value_to_histogram(&hist[2], runlen);
+        runlen = -1;
+        unsigned diff;
+        hist[1] += 1;
+        if (val > baseVal) {
+          hist[6] += (baseVal != 0); // '+'
+          diff = val - baseVal - 1;
+        } else {
+          hist[7] += (baseVal != 255); // '-'
+          diff = baseVal - val - 1;
+        }
+        if (diff != 0)
+          hist[1] += add_value_to_histogram(&hist[4], diff-1);
+      }
+    }
+  }
+  hist[0] += add_value_to_histogram(&hist[2], runlen+1);
 
 
-  int len = p - dst;
+  unsigned hh01 = quantize_histogram_pair(hist[0], hist[1], 9); // range [1..8], because both sums > 0
+  unsigned hh23 = quantize_histogram_pair(hist[2], hist[3], 9); // range [0..9]
+  unsigned hh45 = quantize_histogram_pair(hist[4], hist[5], 9); // range [0..9]
+  unsigned hh67 = quantize_histogram_pair(hist[6], hist[7], 9); // range [0..9]
+
+  unsigned range_tab[4][3];
+  range_tab[0][1] = quantized_histogram_pair_to_range_qh_scale9(hh01, VAL_RANGE);
+  range_tab[1][1] = quantized_histogram_pair_to_range_qh_scale9(hh23, VAL_RANGE);
+  range_tab[2][1] = quantized_histogram_pair_to_range_qh_scale9(hh45, VAL_RANGE);
+  range_tab[3][1] = quantized_histogram_pair_to_range_qh_scale9(hh67, VAL_RANGE);
+  for (int k = 0; k < 4; ++k) {
+    range_tab[k][0] = 0;
+    range_tab[k][2] = VAL_RANGE;
+    // printf("range_tab[%d][1] = %5d\n", k, range_tab[k][1]);
+  }
+  // printf("%.5f %.5f\n", double(hist[0]+hist[1])/(hist[0]+hist[1]+hist[2]+hist[3]), double(range_tab[0][1])/VAL_RANGE);
+  // printf("%.5f %.5f\n", double(hist[0])/(hist[0]+hist[1]), double(range_tab[1][1])/VAL_RANGE);
+  // printf("%.5f %.5f\n", double(hist[2])/(hist[2]+hist[3]), double(range_tab[2][1])/VAL_RANGE);
+
+  unsigned hhw = (hh01-1)+8*(hh23+(10*(hh45+10*hh67))); // combine all hh in a single word
+
+  // store hhw
+  dst = pEnc->put(8*10*10*10, hhw, 1, dst);
+
+  // second pass - encode
+  runlen = -2;
+  for (int i = 0; i < len; ++i) {
+    const uint8_t* row = &qhT[(len-1-i)*nChunks];
+    unsigned baseVal = baseQh[len-1-i];
+    for (int chunk_i = 0; chunk_i < nChunks; ++chunk_i) {
+      unsigned val = row[chunk_i];
+      ++runlen;
+      if (val != baseVal) {
+        if (runlen >= 0)
+          dst = encode_value(dst, runlen, &range_tab[0][0], range_tab[1], pEnc);
+        runlen = -1;
+        unsigned diff;
+        dst = pEnc->put(VAL_RANGE, range_tab[0][1], VAL_RANGE-range_tab[0][1], dst);
+        if (val > baseVal) {
+          if (baseVal != 0 && range_tab[3][1] != 0)
+            dst = pEnc->put(VAL_RANGE, 0, range_tab[3][1], dst); // '+'
+          diff = val - baseVal - 1;
+        } else {
+          if (baseVal != 255 && range_tab[3][1] != VAL_RANGE)
+            dst = pEnc->put(VAL_RANGE, range_tab[3][1], VAL_RANGE-range_tab[3][1], dst); // '-'
+          diff = baseVal - val - 1;
+        }
+        if (diff != 0)
+          dst = encode_value(dst, diff-1, &range_tab[0][1], range_tab[2], pEnc);
+      }
+    }
+  }
+  dst = encode_value(dst, runlen+1, &range_tab[0][0], range_tab[1], pEnc);
+
+  return dst;
+}
+
+// return the number of stored octets
+static int store_model(uint8_t* dst, uint32_t * context, double* pNbits, CArithmeticEncoder* pEnc)
+{
+  int nChunks = context[0];
+  unsigned maxMaxC = context[2];
+  uint8_t* dst0 = dst;
+
+  if (nChunks == 1) {
+    context_chunk_t* chunk = reinterpret_cast<context_chunk_t*>(&context[CONTEX_HDR_LEN]);
+    dst = store_model_store_base_data(dst, chunk->qHistogram, maxMaxC+1, nChunks, pEnc);
+  } else {
+    // transpose qHistogram[][]
+    uint8_t* qhT = reinterpret_cast<uint8_t*>(&context[CONTEX_HDR_LEN+CONTEX_CHUNK_LEN*nChunks]);
+    for (int chunk_i = 0; chunk_i < nChunks; ++chunk_i) {
+      context_chunk_t* chunk = reinterpret_cast<context_chunk_t*>(&context[CONTEX_HDR_LEN+CONTEX_CHUNK_LEN*chunk_i]);
+      int maxC = chunk->maxC;
+      uint8_t* dst = &qhT[chunk_i];
+      for (int i = 0; i <= maxC; ++i, dst += nChunks)
+        *dst = chunk->qHistogram[i];
+      for (int i = maxC+1; i <= maxMaxC; ++i, dst += nChunks)
+        *dst = 0;
+    }
+
+    // fill qh with median values of rows of qhT[][]
+    uint8_t qh[257];
+    for (int i = 0; i <= maxMaxC; ++i) {
+      uint8_t* row = &qhT[i*nChunks];
+      std::nth_element(&row[0], &row[nChunks/2], &row[nChunks]);
+      qh[i] = row[nChunks/2];
+    }
+
+    // store qh and nChunks
+    dst = store_model_store_base_data(dst, qh, maxMaxC+1, nChunks, pEnc);
+    // store qhT-qh
+    dst = store_model_store_diff_data(dst, qh, qhT, maxMaxC+1, nChunks, pEnc);
+  }
+
+  int len = dst - dst0;
   *pNbits = len*8.0 + 63 - log2(pEnc->m_range);
   return len;
 }
