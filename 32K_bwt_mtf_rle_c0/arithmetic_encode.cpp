@@ -19,6 +19,7 @@ static void resize_up(std::vector<uint32_t>* vec, size_t len)
 
 struct context_chunk_t {
   int      maxC;
+  int      srclen;
   uint32_t histogram[257];
   uint8_t  qHistogram[257];
   uint16_t ranges[257];
@@ -45,6 +46,7 @@ int arithmetic_encode_chunk_callback(void* context, const uint8_t* src, int chun
     (*vec)[1] = nRuns;
 
     context_chunk_t* chunk = reinterpret_cast<context_chunk_t*>(&vec->at(CONTEX_HDR_LEN+CONTEX_CHUNK_LEN*chunk_i));
+    chunk->srclen = chunklen;
     uint32_t* histogram = chunk->histogram;
     memset(histogram, 0, sizeof(chunk->histogram));
     for (int i = 0; i < chunklen; ++i) {
@@ -87,6 +89,7 @@ static void prepare1(uint32_t * context, double* pInfo)
     // add last chunk to before-last
     context_chunk_t* dstChunk = reinterpret_cast<context_chunk_t*>(&context[CONTEX_HDR_LEN+CONTEX_CHUNK_LEN*(nChunks-2)]);
     context_chunk_t* srcChunk = reinterpret_cast<context_chunk_t*>(&context[CONTEX_HDR_LEN+CONTEX_CHUNK_LEN*(nChunks-1)]);
+    dstChunk->srclen += srcChunk->srclen;
     for (int i = 0; i < 257; ++i) {
       dstChunk->histogram[i] += srcChunk->histogram[i];
     }
@@ -143,20 +146,9 @@ static double prepare2(uint32_t * context)
     for (unsigned c = 0; c <= maxC; ++c) {
       unsigned cnt = chunk->histogram[c];
       if (cnt)
-        entropy += log2(double(VAL_RANGE)/chunk->ranges[c])*cnt;
+        entropy -= log2(chunk->ranges[c]/double(VAL_RANGE))*cnt;
     }
-
-    #if 0
-    // c2low -> cumulative sums of ranges
-    unsigned lo = 0;
-    for (unsigned c = 0; c <= maxC; ++c) {
-      unsigned range = c2low[c];
-      // printf("%3u: %04x\n", c, range);
-      c2low[c] = lo;
-      lo += range;
-    }
-    c2low[maxC+1] = VAL_RANGE;
-    #endif
+    // printf("%10d\n", int(entropy/8));
   }
   return entropy;
 }
@@ -172,46 +164,6 @@ public:
   uint64_t m_lo;    // scaled by 2**63
   uint64_t m_range; // scaled by 2**63
 };
-
-static uint8_t* encode_val(uint8_t* dst, unsigned val, unsigned offset)
-{
-  val += 2;
-  do {
-    *dst++ = (val % 2) + offset;
-    val /= 2;
-  } while (val > 1);
-  return dst;
-}
-
-static unsigned encode_qh(uint8_t* dst0, const uint8_t* qh, unsigned len)
-{
-  uint8_t* dst = dst0;
-  // encode backward
-  int runlen = 257-len-1;
-  unsigned prev_val = 0;
-  for (unsigned c = 0; c < len; ++c) {
-    ++runlen;
-    unsigned val = qh[len-1-c];
-    if (val != prev_val) {
-      if (runlen >= 0)
-        dst = encode_val(dst, runlen, 0);
-      runlen = -1;
-      unsigned diff;
-      if (val > prev_val) {
-        *dst++ = 4;
-        diff = val - prev_val - 1;
-      } else {
-        *dst++ = 5;
-        diff = prev_val - val - 1;
-      }
-      prev_val = val;
-      if (diff != 0)
-        dst = encode_val(dst, diff-1, 2);
-    }
-  }
-  dst = encode_val(dst, runlen+1, 0);
-  return dst - dst0;
-}
 
 // return quantized code of h0/(h0+h1) in range [0..scale]
 static unsigned quantize_histogram_pair(unsigned h0, unsigned h1, unsigned scale)
@@ -509,7 +461,17 @@ static void inc_dst(uint8_t* dst) {
   } while (val==0);
 }
 
-static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint16_t c2low[257], CArithmeticEncoder* pEnc)
+static void range2low(uint16_t* c2low, const uint16_t* c2range, unsigned len)
+{
+  unsigned lo = 0;
+  for (unsigned c = 0; c < len; ++c) {
+    c2low[c] = lo;
+    lo += c2range[c];
+  }
+  c2low[len] = VAL_RANGE;
+}
+
+static int encode(uint8_t* dst, const uint8_t* src, uint32_t* context, CArithmeticEncoder* pEnc)
 {
   const uint64_t MSB_MSK   = uint64_t(255) << 56;
   const uint64_t MIN_RANGE = uint64_t(1) << (33-RANGE_BITS);
@@ -518,35 +480,46 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
   uint8_t* dst0   = dst;
   uint64_t prevLo = lo;
   // int dbg_i = 0;
-  for (unsigned i = 0; i < srclen; ++i) {
-    int c = src[i];
-    if (c == 255) {
-      // escape sequence for symbols 255 and 256
-      c = int(src[i+1]) + 1;
-      ++i;
-    }
-    // printf("[%3d]=%3d\n", dbg_i, c); ++dbg_i;
-    uint64_t cLo = c2low[c+0];
-    uint64_t cRa = c2low[c+1] - cLo;
-    lo   += range * cLo;
-    range = range * cRa;
+  int nChunks = context[0];
+  for (int chunk_i = 0; chunk_i < nChunks; ++chunk_i) {
+    context_chunk_t* chunk = reinterpret_cast<context_chunk_t*>(&context[CONTEX_HDR_LEN+CONTEX_CHUNK_LEN*chunk_i]);
+    uint16_t c2low[258]; // c2low -> cumulative sums of ranges
+    range2low(c2low, chunk->ranges, chunk->maxC+1);
 
-    // at this point range is scaled by 2**64 - the same scale as lo
-    uint64_t nxtRange = range >> RANGE_BITS;
-    if (nxtRange <= MIN_RANGE) {
-      // re-normalize
-      if (lo < prevLo) // lo overflow
-        inc_dst(dst); //dst = inc_dst(dst0, dst);
-      dst[0] = lo >> (64-8*1);
-      dst[1] = lo >> (64-8*2);
-      dst[2] = lo >> (64-8*3);
-      dst += 3;
-      lo <<= 24;
-      nxtRange = range << (24-RANGE_BITS);
-      prevLo = lo;
+    unsigned srclen = chunk->srclen;
+    for (unsigned i = 0; i < srclen; ++i) {
+      int c = src[i];
+      if (c == 255) {
+        // escape sequence for symbols 255 and 256
+        c = int(src[i+1]) + 1;
+        ++i;
+      }
+      // printf("[%3d]=%3d\n", dbg_i, c); ++dbg_i;
+      uint64_t cLo = c2low[c+0];
+      uint64_t cRa = c2low[c+1] - cLo;
+      lo   += range * cLo;
+      range = range * cRa;
+
+      // at this point range is scaled by 2**64 - the same scale as lo
+      uint64_t nxtRange = range >> RANGE_BITS;
+      if (nxtRange <= MIN_RANGE) {
+        // re-normalize
+        if (lo < prevLo) // lo overflow
+          inc_dst(dst); //dst = inc_dst(dst0, dst);
+        dst[0] = lo >> (64-8*1);
+        dst[1] = lo >> (64-8*2);
+        dst[2] = lo >> (64-8*3);
+        dst += 3;
+        lo <<= 24;
+        nxtRange = range << (24-RANGE_BITS);
+        prevLo = lo;
+      }
+      range = nxtRange;
     }
-    range = nxtRange;
+    src += srclen;
+    // printf(": %10d\n", dst-dst0);   
   }
+
   // output last bits
   if (lo < prevLo) // lo overflow
     inc_dst(dst); //dst = inc_dst(dst0, dst);
@@ -615,7 +588,6 @@ int arithmetic_encode(uint32_t* context, uint8_t* dst, const uint8_t* src, int s
   if (pInfo)
     pInfo[1] = modelLenBits;
 
-  // uint16_t c2low[258];
   double quantizedEntropy = prepare2(context);
 
   int lenEst = (modelLenBits+quantizedEntropy+7)/8;
@@ -624,12 +596,13 @@ int arithmetic_encode(uint32_t* context, uint8_t* dst, const uint8_t* src, int s
   if (lenEst >= origlen)
     return 0; // not compressible
 
-  int dstlen = encode(&dst[modellen], src, srclen, c2low, &enc);
+  int dstlen = encode(&dst[modellen], src, context, &enc);
 
   if (pInfo)
     pInfo[2] = dstlen*8.0;
 
   int reslen = modellen + dstlen;
+  // printf("%d+%d=%d(%d) <> %d\n", modellen, dstlen, reslen, lenEst, origlen);
 
   if (reslen >= origlen)
     return 0; // not compressible

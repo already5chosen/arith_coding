@@ -71,7 +71,7 @@ int main(int argz, char** argv)
             ressz = arithmetic_encode(&encContext.at(0), ariEncDst, ariEncSrc, rlesz, tilelen, vFlag ? info : 0);
             uint64_t t3 = __rdtsc();
             if (vFlag)
-              printf("%7u->%7u. Model %7.3f. Coded %10.0f. Entropy %11.3f (%11.3f). %10.0f clocks. %6.1f+%5.1f+%4.1f=%6.1f clocks/char\n"
+              printf("%7u->%7u. Model %9.3f. Coded %10.0f. Entropy %11.3f (%11.3f). %10.0f clocks. %6.1f+%5.1f+%4.1f=%6.1f clocks/char\n"
                ,unsigned(tilelen)
                ,ressz < 0 ? 0 : (ressz == 0 ? unsigned(tilelen) : unsigned(ressz))
                ,info[1]/8
