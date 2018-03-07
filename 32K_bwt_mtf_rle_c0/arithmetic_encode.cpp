@@ -41,7 +41,7 @@ int arithmetic_encode_chunk_callback(void* context, const uint8_t* src, int chun
   if (src) {
     std::vector<uint32_t>* vec = static_cast<std::vector<uint32_t>*>(context);
     uint32_t chunk_i = (*vec)[0];
-    resize_up(vec, CONTEX_HDR_LEN+CONTEX_CHUNK_LEN*(chunk_i+1)+((chunk_i+1)*257)/sizeof(uint32_t)+1);
+    resize_up(vec, CONTEX_HDR_LEN+CONTEX_CHUNK_LEN*(chunk_i+1)+((chunk_i+1)*258)/sizeof(uint32_t)+1);
     (*vec)[0] = chunk_i + 1;
     (*vec)[1] = nRuns;
 
@@ -423,8 +423,9 @@ static int store_model(uint8_t* dst, uint32_t * context, double* pNbits, CArithm
 
     // fill qh with median values of rows of qhT[][]
     uint8_t qh[257];
+    uint8_t* row = &qhT[(maxMaxC+1)*nChunks];
     for (int i = 0; i <= maxMaxC; ++i) {
-      uint8_t* row = &qhT[i*nChunks];
+      memcpy(row, &qhT[i*nChunks], nChunks);
       std::nth_element(&row[0], &row[nChunks/2], &row[nChunks]);
       qh[i] = row[nChunks/2];
     }
@@ -517,7 +518,7 @@ static int encode(uint8_t* dst, const uint8_t* src, uint32_t* context, CArithmet
       range = nxtRange;
     }
     src += srclen;
-    // printf(": %10d\n", dst-dst0);   
+    // printf(": %10d\n", dst-dst0);
   }
 
   // output last bits
