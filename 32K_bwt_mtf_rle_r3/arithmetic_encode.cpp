@@ -13,7 +13,7 @@ static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 
 void arithmetic_encode_init_context(uint32_t* context)
 {
-  memset(context, 0, sizeof(uint32_t)*257);
+  memset(context, 0, sizeof(uint32_t)*258);
 }
 
 void arithmetic_encode_chunk_callback(void* context, const uint8_t* src, int chunklen)
@@ -22,8 +22,8 @@ void arithmetic_encode_chunk_callback(void* context, const uint8_t* src, int chu
   for (int i = 0; i < chunklen; ++i) {
     int c = src[i];
     if (c == 255) {
-      // escape sequence for symbols 255 and 256
-      c = int(src[i+1]) + 1;
+      // escape sequence for symbols 255 to 257
+      c = int(src[i+1]) + 2;
       ++i;
     }
     ++histogram[c];
@@ -59,7 +59,7 @@ static int prepare1(
   // find highest-numbered character that occurred at least once
   unsigned maxC = 0;
   int32_t tot = 0;
-  for (unsigned c = 0; c < 257; ++c) {
+  for (unsigned c = 0; c < 258; ++c) {
     tot += histogram[c];
     if (histogram[c] != 0)
       maxC = c;
@@ -83,8 +83,8 @@ static int prepare1(
 
 static void prepare2(
   uint16_t* __restrict c2low, unsigned maxC,
-  const unsigned       h[257],
-  const uint8_t        qh[257],
+  const unsigned       h[258],
+  const uint8_t        qh[258],
   double*              pQuantizedEntropy)
 {
   quantized_histogram_to_range(c2low, maxC+1, qh, VAL_RANGE);
@@ -135,7 +135,7 @@ static unsigned encode_qh(uint8_t* dst0, const uint8_t* qh, unsigned len)
 {
   uint8_t* dst = dst0;
   // encode backward
-  int runlen = 257-len-2;
+  int runlen = 258-len-2;
   unsigned prev_val = 0;
   for (unsigned c = 0; c < len; ++c) {
     ++runlen;
@@ -180,10 +180,10 @@ static unsigned quantize_histogram_pair(unsigned h0, unsigned h1, unsigned scale
 }
 
 // return the number of stored octets
-static int store_model(uint8_t* dst, const uint8_t qh[257], unsigned maxC, double* pNbits, CArithmeticEncoder* pEnc)
+static int store_model(uint8_t* dst, const uint8_t qh[258], unsigned maxC, double* pNbits, CArithmeticEncoder* pEnc)
 {
   // encode qh
-  uint8_t eqh[257*QH_BITS];
+  uint8_t eqh[258*QH_BITS];
   unsigned qhlen = encode_qh(eqh, qh, maxC + 1);
   unsigned hist[7] = {0};
   for (unsigned c = 0; c < qhlen; ++c)
@@ -263,7 +263,7 @@ static void inc_dst(uint8_t* dst) {
   } while (val==0);
 }
 
-static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint16_t c2low[257], CArithmeticEncoder* pEnc)
+static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint16_t c2low[259], CArithmeticEncoder* pEnc)
 {
   const uint64_t MSB_MSK   = uint64_t(255) << 56;
   const uint64_t MIN_RANGE = uint64_t(1) << (33-RANGE_BITS);
@@ -276,7 +276,7 @@ static int encode(uint8_t* dst, const uint8_t* src, unsigned srclen, const uint1
     int c = src[i];
     if (c == 255) {
       // escape sequence for symbols 255 and 256
-      c = int(src[i+1]) + 1;
+      c = int(src[i+1]) + 2;
       ++i;
     }
     // printf("[%3d]=%3d\n", dbg_i, c); ++dbg_i;
@@ -360,7 +360,7 @@ void CArithmeticEncoder::spillOverflow(uint8_t* dst)
 // >0 - the length of compressed buffer
 int arithmetic_encode(uint32_t* context, uint8_t* dst, const uint8_t* src, int srclen, int origlen, double* pInfo)
 {
-  uint8_t qh[257]; // quantized histogram
+  uint8_t qh[258]; // quantized histogram
   int maxC = prepare1(context, qh, pInfo);
 
   CArithmeticEncoder enc;
@@ -370,9 +370,11 @@ int arithmetic_encode(uint32_t* context, uint8_t* dst, const uint8_t* src, int s
   if (pInfo)
     pInfo[1] = modelLenBits;
 
-  uint16_t c2low[258];
+  uint16_t c2low[259];
   double quantizedEntropy;
   prepare2(c2low, maxC, context, qh, &quantizedEntropy);
+  // for (int i = 0; i < 259; ++i)
+    // printf("c2low[%3d]=%5d\n", i, c2low[i]);
 
   int lenEst = (modelLenBits+quantizedEntropy+7)/8;
   if (pInfo)

@@ -50,9 +50,9 @@ int main(int argz, char** argv)
           size_t hdrlen = 6;
           int ressz  = 0;
           if (!isSingleCharacter(inptile, tilelen)) {
-            if (tilelen+256 > tmpDst.size())
-              tmpDst.resize(tilelen+256);
-            uint32_t encContext[257];
+            if (tilelen+260 > tmpDst.size())
+              tmpDst.resize(tilelen+260);
+            uint32_t encContext[258];
             arithmetic_encode_init_context(encContext);
             uint64_t t0 = __rdtsc();
             bwt_sort(&tmpDst.at(0), inptile, tilelen);

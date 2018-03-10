@@ -3,13 +3,13 @@
 #include "bwt_mtf_rle_e.h"
 
 static uint8_t* insertZeroRun(uint8_t* dst, unsigned zRunLen)
-{ // encode length of zero run by method similar to bzip2' RUNA/RUNB
-  zRunLen += 1;
+{ // encode length of zero run with ternary code
   do {
-    int c = zRunLen % 2;
+    zRunLen -= 1;
+    int c = zRunLen % 3;
     *dst++ = c;
-    zRunLen /= 2;
-  } while (zRunLen > 1);
+    zRunLen /= 3;
+  } while (zRunLen > 0);
   return dst;
 }
 
@@ -65,9 +65,9 @@ int bwt_reorder_mtf_rle(
       t[k] = v0;
       int mtfC = k;
       // printf("[%3d]=%3d\n", dbg_i, mtfC); ++dbg_i;
-      int outC = mtfC + 1;
-      *dst = outC;       // range [1..253] encoded as x+1
-      if (mtfC >= 254) { // range [254..255] encode as a pair {255,x}
+      int outC = mtfC + 2;
+      *dst = outC;       // range [1..252] encoded as x+2
+      if (mtfC >= 253) { // range [253..255] encoded as a pair {255,x}
         *dst++ = 255;
         *dst = mtfC;
       }

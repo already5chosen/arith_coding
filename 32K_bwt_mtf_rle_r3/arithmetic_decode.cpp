@@ -147,7 +147,7 @@ int load_quantized_histogram(uint8_t* qh, CArithmeticDecoder* pDec)
         // end of zero run
         i += rl;
         if (rl > 0)
-          memset(&qh[257-i], val, rl);
+          memset(&qh[258-i], val, rl);
       } else {
         rl += 1;
         // end of diff run
@@ -160,9 +160,9 @@ int load_quantized_histogram(uint8_t* qh, CArithmeticDecoder* pDec)
           if (val > 255)
             return -16;
         }
-        qh[256-i] = val;
+        qh[257-i] = val;
         if (maxC < 0)
-          maxC = 256-i;
+          maxC = 257-i;
         i += 1;
       }
       first = 0;
@@ -181,8 +181,8 @@ int load_quantized_histogram(uint8_t* qh, CArithmeticDecoder* pDec)
         rlMsb += rlMsb;
         uint32_t rl = rlAcc + rlMsb - 2;
         if (msb == 0) {
-          if (rl + i >= 257) {
-            if (rl + i == 257) {
+          if (rl + i >= 258) {
+            if (rl + i == 258) {
               if (rl > 0)
                 memset(&qh[0], val, rl);
               break; // done
@@ -221,8 +221,8 @@ struct arithmetic_decode_model_t {
   int m_longLookupCount;
   int m_renormalizationCount;
   #endif
-  uint16_t m_c2low[258];
-  uint32_t m_c2invRange[257]; // floor(2^31/range)
+  uint16_t m_c2low[259];
+  uint32_t m_c2invRange[258]; // floor(2^31/range)
 
   int load_and_prepare(CArithmeticDecoder* pDec);
   int val2c_estimate(uint64_t value, uint64_t invRange) {
@@ -268,14 +268,16 @@ int arithmetic_decode_model_t::load_and_prepare(CArithmeticDecoder* pDec)
   m_longLookupCount = 0;
   m_renormalizationCount = 0;
   #endif
-  uint8_t qh[257];
+  uint8_t qh[258];
   int maxC = load_quantized_histogram(qh, pDec);
   if (maxC >= 0) {
     quantized_histogram_to_range(m_c2low, maxC+1, qh, VAL_RANGE);
-    for (unsigned c = maxC+1; c < 257; ++c)
+    for (unsigned c = maxC+1; c < 258; ++c)
       m_c2low[c] = 0;
     prepare();
   }
+  // for (int i = 0; i < 259; ++i)
+    // printf("c2low[%3d]=%5d\n", i, m_c2low[i]);
   return maxC;
 }
 
@@ -285,7 +287,7 @@ void arithmetic_decode_model_t::prepare()
   unsigned maxC = 0;
   unsigned lo = 0;
   unsigned invI = 0;
-  for (int c = 0; c < 257; ++c) {
+  for (int c = 0; c < 258; ++c) {
     unsigned range = m_c2low[c];
     // printf("%3u: %04x %04x\n", c, range, lo);
     m_c2low[c] = lo;
@@ -300,7 +302,7 @@ void arithmetic_decode_model_t::prepare()
       }
     }
   }
-  m_c2low[257] = VAL_RANGE;
+  m_c2low[258] = VAL_RANGE;
   unsigned r2c = maxC <= 255 ? maxC : 255;
   for (; invI <= RANGE2C_SZ; ++invI) {
     m_range2c[invI] = r2c;
@@ -389,11 +391,11 @@ int decode(
 
     // RLE and MTF decode
     // printf("[%3d]=%3d\n", dbg_i, c); ++dbg_i;
-    if (c < 2) {
+    if (c < 3) {
       // zero run
-      rlAcc |= (-c) & rlMsb;
-      rlMsb += rlMsb;
-      uint32_t rl = rlAcc + rlMsb - 1;
+      rlAcc += (c+1) * rlMsb;
+      rlMsb *= 3;
+      uint32_t rl = rlAcc;
       if (rl >= uint32_t(dstlen)) {
         if (rl == uint32_t(dstlen)) {
           // last run
@@ -410,7 +412,7 @@ int decode(
     } else {
       if (rlMsb > 1) {
         // insert zero run
-        uint32_t rl = rlAcc + rlMsb - 1;
+        uint32_t rl = rlAcc;
         // for (int ii=0; ii < rl; ++ii)
           // {printf("[%3d]=%3d\n", dbg_i, 0); ++dbg_i;}
         rlMsb = 1;
@@ -430,7 +432,7 @@ int decode(
         return -23; // decoded section is longer than expected
       dstlen -= 1;
 
-      int mtfC = c - 1;
+      int mtfC = c - 2;
       // printf("[%3d]=%3d\n", dbg_i, mtfC); ++dbg_i;
       int dstC = mtf_t[mtfC];
       // printf("[%3d]=%3d\n", dbg_i, dstC); ++dbg_i;
