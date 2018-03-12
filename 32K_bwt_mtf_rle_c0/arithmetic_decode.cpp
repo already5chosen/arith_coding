@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
+#include <vector>
 // #include <cmath>
 // #include <cctype>
 
@@ -95,12 +96,38 @@ int CArithmeticDecoder::extract_1bit(const unsigned range_tab[3], int32_t* pRes)
   return put(lo, ra);
 }
 
+// load_nChunks
+// return  value:
+//   on success nChunks >= 0
+//   on parsing error negative error code
+static
+int load_nChunks(CArithmeticDecoder* pDec)
+{
+  // use predefined value for sake of simplicity
+  static const unsigned encTab[] = { 0, 4, 7, 8 };
+  static const unsigned decTab[] = { 0, 0, 0, 0, 1, 1, 1, 2 };
+  uint32_t val = 0;
+  uint32_t msb = 1;
+  for (int i = 0; i < 30; ++i) {
+    int symb = decTab[pDec->get(8)];
+    int ret = pDec->put(encTab[symb], encTab[symb+1]-encTab[symb]);
+    if (ret < 0)
+      return ret;
+    if (symb == 2)
+      return val+1;
+    val += (-symb) & msb;
+    msb += msb;
+  }
+  return -15;
+  ;
+}
+
 // load_quantized_histogram
 // return  value:
 //   on success maxC >= 0
 //   on parsing error negative error code
 static
-int load_quantized_histogram(uint8_t* qh, CArithmeticDecoder* pDec)
+int load_quantized_histogram(uint8_t* qh, int nChunks, CArithmeticDecoder* pDec)
 {
   // load hhw - combined hh word
   unsigned hhw = pDec->get(8*9*10*9);
@@ -222,7 +249,7 @@ struct arithmetic_decode_model_t {
   uint16_t m_c2low[258];
   uint32_t m_c2invRange[257]; // floor(2^31/range)
 
-  int load_and_prepare(CArithmeticDecoder* pDec);
+  int load_and_prepare(CArithmeticDecoder* pDec, int nChunks);
   int val2c_estimate(uint64_t value, uint64_t invRange) {
     uint64_t loEst33b = umulh(value,invRange);
     unsigned ri = loEst33b>>(33-RANGE2C_NBITS);
@@ -259,15 +286,10 @@ private:
 };
 
 
-int arithmetic_decode_model_t::load_and_prepare(CArithmeticDecoder* pDec)
+int arithmetic_decode_model_t::load_and_prepare(CArithmeticDecoder* pDec, int nChunks)
 {
-  #ifdef ENABLE_PERF_COUNT
-  m_extLookupCount = 0;
-  m_longLookupCount = 0;
-  m_renormalizationCount = 0;
-  #endif
   uint8_t qh[257];
-  int maxC = load_quantized_histogram(qh, pDec);
+  int maxC = load_quantized_histogram(qh, nChunks, pDec);
   if (maxC >= 0) {
     quantized_histogram_to_range(m_c2low, maxC+1, qh, VAL_RANGE);
     for (unsigned c = maxC+1; c < 257; ++c)
@@ -509,24 +531,41 @@ int arithmetic_decode(
 
   CArithmeticDecoder dec;
   dec.init(src, srclen);
-  arithmetic_decode_model_t model;
-  int err = model.load_and_prepare(&dec);
-  if (err >= 0) {
-    int modellen = srclen - dec.m_srclen;
-    if (pInfo) {
-      pInfo[0] = modellen*8;
-      pInfo[1] = dec.m_srclen;
-    }
-    memset(histogram, 0, sizeof(histogram[0])*256);
-    int textlen = decode(&model, dst, dstlen, histogram, &dec);
+  
+  int nChunks = load_nChunks(&dec);
+  if (nChunks < 0)
+    return nChunks;
+  
+  if (nChunks * ARITH_CODER_RUNS_PER_CHUNK > dstlen)
+    return -15;
+  
+  std::vector<uint8_t> qhVec(nChunks*257);
+  int maxMaxC = load_quantized_histogram(&qhVec.at(0), nChunks, &dec);
+  if (maxMaxC >= 0) {
+    arithmetic_decode_model_t model;
     #ifdef ENABLE_PERF_COUNT
-    if (pInfo) {
-      pInfo[2] = model.m_extLookupCount;
-      pInfo[3] = model.m_longLookupCount;
-      pInfo[4] = model.m_renormalizationCount;
-    }
+    model.m_extLookupCount = 0;
+    model.m_longLookupCount = 0;
+    model.m_renormalizationCount = 0;
     #endif
-    return textlen;
+    int err = model.load_and_prepare(&dec, nChunks);
+    if (err >= 0) {
+      int modellen = srclen - dec.m_srclen;
+      if (pInfo) {
+        pInfo[0] = modellen*8;
+        pInfo[1] = dec.m_srclen;
+      }
+      memset(histogram, 0, sizeof(histogram[0])*256);
+      int textlen = decode(&model, dst, dstlen, histogram, &dec);
+      #ifdef ENABLE_PERF_COUNT
+      if (pInfo) {
+        pInfo[2] = model.m_extLookupCount;
+        pInfo[3] = model.m_longLookupCount;
+        pInfo[4] = model.m_renormalizationCount;
+      }
+      #endif
+      return textlen;
+    }
   }
-  return err;
+  return maxMaxC;
 }
