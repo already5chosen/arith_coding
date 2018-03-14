@@ -109,17 +109,19 @@ int load_nChunks(CArithmeticDecoder* pDec)
   uint32_t val = 0;
   uint32_t msb = 1;
   for (int i = 0; i < 30; ++i) {
-    int symb = decTab[pDec->get(8)];
+    // int symb = decTab[pDec->get(8)];
+    int dVal = pDec->get(8);
+    int symb = decTab[dVal];
+    // printf("%d: [%d]=%d\n", i, dVal, symb);
     int ret = pDec->put(encTab[symb], encTab[symb+1]-encTab[symb]);
     if (ret < 0)
       return ret;
     if (symb == 2)
-      return val+1;
+      return val+msb;
     val += (-symb) & msb;
     msb += msb;
   }
   return -15;
-  ;
 }
 
 // load_quantized_histogram
@@ -127,19 +129,19 @@ int load_nChunks(CArithmeticDecoder* pDec)
 //   on success maxC >= 0
 //   on parsing error negative error code
 static
-int load_quantized_histogram(uint8_t* qh, int nChunks, CArithmeticDecoder* pDec)
+int load_quantized_histogram(uint8_t* qh, unsigned nChunks, CArithmeticDecoder* pDec)
 {
   // load hhw - combined hh word
-  unsigned hhw = pDec->get(8*9*10*9);
+  unsigned hhw = pDec->get(8*10*10*10);
   int err = pDec->put(hhw, 1);
   if (err)
     return err;
 
   // split hhw into individual hh words
-  unsigned hh02 = (hhw % 8) + 1; hhw /= 8;
-  unsigned hh01 = (hhw % 9) + 1; hhw /= 9;
-  unsigned hh23 = (hhw %10) + 0; hhw /= 10;
-  unsigned hh45 = hhw + 1;
+  unsigned hh02 = (hhw %  8) + 1; hhw /= 8;
+  unsigned hh01 = (hhw % 10) + 0; hhw /= 10;
+  unsigned hh23 = (hhw % 10) + 0; hhw /= 10;
+  unsigned hh45 = hhw + 0;
 
   unsigned range_tab[4][3];
   range_tab[0][1] = quantized_histogram_pair_to_range_qh_scale9(hh02, VAL_RANGE);
@@ -152,86 +154,113 @@ int load_quantized_histogram(uint8_t* qh, int nChunks, CArithmeticDecoder* pDec)
   }
 
   unsigned val = 0;
-  int32_t prev_msb = 0;
+  int32_t  prev_msb = 0;
   uint32_t rlAcc = 0;
   uint32_t rlMsb = 1;
-  int down = 0;
-  bool first = true;
-  int maxC = -1;
-  for (unsigned i = 0; ; )
+  int  down  = 0;
+  bool first = 1;
+  int  maxMaxC  = -1;
+  for (unsigned xi = 0, yi = 0; ; )
   {
-    int32_t msb = 0;
-    if (!first) {
-      err = pDec->extract_1bit(range_tab[0], &msb);
-      if (err)
-        return err;
-    }
-    first = false;
+    int32_t msb;
+    err = pDec->extract_1bit(range_tab[0], &msb);
+    if (err)
+      return err;
 
     if (msb != prev_msb) {
       // end of run
-      int32_t rl = rlAcc + rlMsb - 2;
+      int32_t rl = rlAcc + rlMsb - 2 + first;
       rlMsb = 1;
       rlAcc = 0;
       if (prev_msb == 0) {
         // end of zero run
-        i += rl;
-        if (rl > 0)
-          memset(&qh[257-i], val, rl);
+        // printf("zero run %d at %d.%d\n", rl, yi, xi); fflush(stdout);
+        while (rl > 0) {
+          qh[yi*257+256-xi] = val;
+          ++yi;
+          if (yi == nChunks) {
+            val = qh[256-xi];
+            yi = 0;
+            ++xi;
+          }
+          --rl;
+        }
       } else {
         rl += 1;
         // end of diff run
+        
         if (down) {
           if (rl + 1 > val)
-            return -15;
+            return -17;
           val -= rl + 1;
         } else {
           val += rl + 1;
           if (val > 255)
-            return -16;
+            return -18;
         }
-        qh[256-i] = val;
-        if (maxC < 0)
-          maxC = 256-i;
-        i += 1;
+        // printf("val %d at %d.%d\n", val, yi, xi); fflush(stdout);
+        qh[yi*257+256-xi] = val;
+        if (maxMaxC < 0)
+          maxMaxC = 256-xi;
+        ++yi;
+        if (yi == nChunks) {
+          val = qh[256-xi];
+          yi = 0;
+          ++xi;
+        }
       }
+      first = 0;
     }
 
     unsigned tabId = (msb==0) ? 0 : 2 - prev_msb;
-    int32_t lsb;
-    err = pDec->extract_1bit(range_tab[tabId+1], &lsb);
-    if (err)
-      return err;
+    if (tabId != 2 || (val != 0 && val != 255)) {
+      int32_t lsb;
+      err = pDec->extract_1bit(range_tab[tabId+1], &lsb);
+      if (err)
+        return err;
 
-    if (tabId != 2) {
-      // zero run or difference
-      rlAcc |= (-lsb) & rlMsb;
-      rlMsb += rlMsb;
-      uint32_t rl = rlAcc + rlMsb - 2;
-      if (msb == 0) {
-        if (rl + i >= 257) {
-          if (rl + i == 257) {
-            if (rl > 0)
-              memset(&qh[0], val, rl);
-            break; // done
-          } else {
-            return -17;
+      if (tabId != 2) {
+        // zero run or difference
+        rlAcc |= (-lsb) & rlMsb;
+        rlMsb += rlMsb;
+        uint32_t rl = rlAcc + rlMsb - 2;
+        if (msb == 0) {
+          unsigned nxt_i = rl + xi*nChunks + yi;
+          if (nxt_i >= 257*nChunks) {
+            if (nxt_i == 257*nChunks) {
+              while (rl > 0) {
+                qh[yi*257+256-xi] = val;
+                ++yi;
+                if (yi == nChunks) {
+                  val = qh[256-xi];
+                  yi = 0;
+                  ++xi;
+                }
+                --rl;
+              }
+              break; // done
+            } else {
+              return -19;
+            }
           }
+        } else {
+          if (rl >= 255)
+            return -20;
         }
       } else {
-        if (rl >= 255)
-          return -18;
+        down = lsb; // sign of difference
       }
     } else {
-      down = lsb; // sign of difference
+      down = (val != 0);
     }
     prev_msb = msb;
   }
 
-  // for (int i = 0; i <= maxC; ++i)
-    // printf("range[%3d]=%5d\n", i, qh[i]);
+  // for (int yi = 0; yi < nChunks; ++yi)
+    // for (int xi = 0; xi <= maxMaxC; ++xi)
+      // printf("qh[%3d][%3d]=%5d\n", yi, xi, qh[yi*257+xi]);
 
-  return maxC; // success
+  return maxMaxC; // success
 }
 
 static inline uint64_t umulh(uint64_t a, uint64_t b) {
@@ -537,7 +566,8 @@ int arithmetic_decode(
     return nChunks;
   
   if (nChunks * ARITH_CODER_RUNS_PER_CHUNK > dstlen)
-    return -15;
+    return -16;
+  // printf("nChunks=%d\n", nChunks);
   
   std::vector<uint8_t> qhVec(nChunks*257);
   int maxMaxC = load_quantized_histogram(&qhVec.at(0), nChunks, &dec);
@@ -548,6 +578,7 @@ int arithmetic_decode(
     model.m_longLookupCount = 0;
     model.m_renormalizationCount = 0;
     #endif
+    return dstlen;
     int err = model.load_and_prepare(&dec, nChunks);
     if (err >= 0) {
       int modellen = srclen - dec.m_srclen;

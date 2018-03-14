@@ -258,10 +258,10 @@ static uint8_t* store_model_store_nChunks(uint8_t* dst, int val, CArithmeticEnco
   static const unsigned encTab[] = { 0, 4, 7, 8 };
   while (val > 1) {
     unsigned bit = val % 2;
-    dst = pEnc->put(VAL_RANGE, encTab[bit], encTab[bit+1]-encTab[bit], dst);
+    dst = pEnc->put(8, encTab[bit], encTab[bit+1]-encTab[bit], dst);
     val /= 2;
   }
-  dst = pEnc->put(VAL_RANGE, encTab[2], encTab[2+1]-encTab[2], dst);
+  dst = pEnc->put(8, encTab[2], encTab[2+1]-encTab[2], dst);
   return dst;
 }
 
@@ -381,6 +381,10 @@ static int store_model(uint8_t* dst, uint32_t * context, double* pNbits, CArithm
     if (maxC < maxMaxC)
       memset(&qHistogram[CONTEXT_QH_LEN*chunk_i+maxC+1], 0, maxMaxC-maxC);
   }
+  
+  // for (int yi = 0; yi < nChunks; ++yi)
+    // for (int xi = 0; xi <= maxMaxC; ++xi)
+      // printf("qh[%3d][%3d]=%5d\n", yi, xi, qHistogram[yi*257+xi]);
 
   uint8_t* dst0 = dst;
   dst = store_model_store_nChunks(dst, nChunks, pEnc);
