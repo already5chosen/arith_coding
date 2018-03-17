@@ -24,7 +24,7 @@ int bwt_reorder_mtf_rle(
  int                 (*chunkCallback)(void* context, const uint8_t* chunk, int nSymbols, int nRuns),
  void*               chunkCallbackContext)
 {
-  // initialize calback machinery
+  // initialize callback machinery
   const int runsPerChunk = chunkCallback(chunkCallbackContext, 0, 0, 0);
 
   // initialize move-to-front encoder table

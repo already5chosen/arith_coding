@@ -52,7 +52,7 @@ int main(int argz, char** argv)
           fprintf(stderr, "%s: %s invalid.%s\n", argv[0], inpfilename, vFlag ? " Illegal tile length.": "");
           break;
         }
-        
+
         size_t srclen = codelen + 3;
         if (hdr[5] == 255) {
           // special cases
@@ -75,7 +75,7 @@ int main(int argz, char** argv)
             break;
           }
         }
-        
+
         if (srclen != 0) {
           if (srclen > src.size())
             src.resize(srclen);
@@ -88,7 +88,7 @@ int main(int argz, char** argv)
             break;
           }
         }
-        
+
         int info[8]={0};
         uint8_t *pDst = 0;
         uint64_t t0 = __rdtsc();
@@ -120,7 +120,7 @@ int main(int argz, char** argv)
             fprintf(stderr, "%s: %s invalid.%s\n", argv[0], inpfilename, vFlag ? " primary_i out of range.": "");
             break;
           }
-          
+
           if (tilelen > ibwtInp.size())
             ibwtInp.resize(tilelen);
           int32_t histogram[256];
@@ -140,7 +140,7 @@ int main(int argz, char** argv)
             ibwtIdx.resize(tilelen);
           if (tilelen > dst.size())
             dst.resize(tilelen);
-          
+
           t1 = __rdtsc();
           pDst = &dst.at(0);
           ibwt(
@@ -155,7 +155,7 @@ int main(int argz, char** argv)
 
         if (vFlag)
           printf(
-            "%7u -> %7u. Model %7.3f. Coded %7d. %9.0f clocks. %5.1f+%4.1f=%5.1f clocks/char"
+            "%7u -> %7u. Model %7.1f. Coded %7d. %9.0f clks. %5.1f+%4.1f=%5.1f clk/char"
             #ifdef ENABLE_PERF_COUNT
             " %6d %6d %6d"
             #endif

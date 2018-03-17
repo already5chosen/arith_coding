@@ -25,6 +25,8 @@ int main(int argz, char** argv)
   int ret = 1;
   FILE* fpinp = fopen(inpfilename, "rb");
   if (fpinp) {
+    size_t inpfilename_len = strlen(inpfilename);
+    char* nametag = inpfilename_len < 4 ? inpfilename : &inpfilename[inpfilename_len-4];    
     FILE* fpout = fopen(outfilename, "wb");
     if (fpout) {
       const size_t TILE_SIZE = 1024*1024;
@@ -32,8 +34,10 @@ int main(int argz, char** argv)
       std::vector<int32_t> tmpDst;
       std::vector<uint32_t> encContext;
       ret = 0;
+      int tile_i = 0;
       bool done = false;
       while (!done) {
+        ++tile_i;
         size_t tilelen = fread(inptile, 1, TILE_SIZE, fpinp);
         if (tilelen < TILE_SIZE) {
           if (!feof(fpinp)) {
@@ -71,7 +75,11 @@ int main(int argz, char** argv)
             ressz = arithmetic_encode(&encContext.at(0), ariEncDst, ariEncSrc, rlesz, tilelen, vFlag ? info : 0);
             uint64_t t3 = __rdtsc();
             if (vFlag)
-              printf("%7u->%7u. Model %9.3f. Coded %10.0f. Entropy %11.3f (%11.3f). %10.0f clocks. %6.1f+%5.1f+%4.1f=%6.1f clocks/char (%.0f)\n"
+              printf(
+               "%4s:%d "
+               "%7u->%7u. Model %9.3f. Coded %9.0f. Entropy %11.3f (%11.3f). %10.0f clks. %6.1f+%5.1f+%4.1f=%6.1f clk/char (%.0f)\n"
+               ,nametag
+               ,tile_i
                ,unsigned(tilelen)
                ,ressz < 0 ? 0 : (ressz == 0 ? unsigned(tilelen) : unsigned(ressz))
                ,info[1]/8
