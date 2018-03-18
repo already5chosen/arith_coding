@@ -1,61 +1,6 @@
-// #include <cstdio>
-// #include <cmath>
 #include <cstring>
-#include <algorithm>
 
 #include "bwt_mtf_rle_e.h"
-
-class bwt_compare {
-public:
-  const uint8_t* m_src;
-  int   m_srclen;
-  bool operator() (int32_t a, int32_t b)  const
-  {
-    uint8_t ca = m_src[a];
-    uint8_t cb = m_src[b];
-    if (ca != cb)
-      return ca < cb;
-    // ca==cb;
-    if (a < b) {
-      if (m_srclen > b + 1) {
-        int cmp = memcmp(&m_src[a+1], &m_src[b+1], m_srclen - b - 1);
-        if (cmp != 0)
-          return cmp < 0;
-      }
-      int cmp = memcmp(&m_src[a+m_srclen-b], &m_src[0], b-a);
-      if (cmp != 0)
-        return cmp < 0;
-      cmp = memcmp(&m_src[0], &m_src[b-a], a);
-      if (cmp != 0)
-        return cmp < 0;
-      return true;
-    } else if (b < a) {
-      if (m_srclen > a + 1) {
-        int cmp = memcmp(&m_src[a+1], &m_src[b+1], m_srclen - a - 1);
-        if (cmp != 0)
-          return cmp < 0;
-      }
-      int cmp = memcmp(&m_src[0], &m_src[b+m_srclen-a], a-b);
-      if (cmp != 0)
-        return cmp < 0;
-      cmp = memcmp(&m_src[a-b], &m_src[0], b);
-      if (cmp != 0)
-        return cmp < 0;
-      return false;
-    }
-    return false;
-  }
-};
-
-void bwt_sort(int32_t* dst, const uint8_t* src, int srclen)
-{ // BWT sort
-  for (int i = 0; i < srclen; ++i)
-    dst[i] = i;
-  bwt_compare cmp;
-  cmp.m_src = src;
-  cmp.m_srclen = srclen;
-  std::sort(&dst[0], &dst[srclen], cmp);
-}
 
 static uint8_t* insertZeroRun(uint8_t* dst, unsigned zRunLen)
 { // encode length of zero run by method similar to bzip2' RUNA/RUNB
@@ -76,11 +21,11 @@ int bwt_reorder_mtf_rle(
  const uint8_t*      src,
  int                 srclen,
  bwt_mtf_rle_meta_t* pMeta,
- int                 (*chunkCallback)(void* context, const uint8_t* chunk, int nSymbols),
+ int                 (*chunkCallback)(void* context, const uint8_t* chunk, int nSymbols, int nRuns),
  void*               chunkCallbackContext)
 {
-  // initialize calback machinery
-  const int runsPerChunk = chunkCallback(chunkCallbackContext, 0, 0);
+  // initialize callback machinery
+  const int runsPerChunk = chunkCallback(chunkCallbackContext, 0, 0, 0);
 
   // initialize move-to-front encoder table
   uint8_t t[256];
@@ -110,12 +55,6 @@ int bwt_reorder_mtf_rle(
         dst = insertZeroRun(dst, zRunLen);
         zRunLen = 0;
         ++chunkRuns;
-        if (chunkRuns == runsPerChunk) {
-          chunkCallback(chunkCallbackContext, chunk, dst - chunk);
-          chunk = dst;
-          pMeta->nRuns += runsPerChunk;
-          chunkRuns = 0;
-        }
       }
       t[0] = c;
       int v0 = v1, k;
@@ -133,8 +72,8 @@ int bwt_reorder_mtf_rle(
       }
       ++dst;
       ++chunkRuns;
-      if (chunkRuns == runsPerChunk) {
-        chunkCallback(chunkCallbackContext, chunk, dst - chunk);
+      if (chunkRuns >= runsPerChunk) {
+        chunkCallback(chunkCallbackContext, chunk, dst - chunk, chunkRuns);
         chunk = dst;
         pMeta->nRuns += runsPerChunk;
         chunkRuns = 0;
@@ -146,7 +85,7 @@ int bwt_reorder_mtf_rle(
     ++chunkRuns;
   }
   if (chunkRuns != 0) {
-    chunkCallback(chunkCallbackContext, chunk, dst - chunk);
+    chunkCallback(chunkCallbackContext, chunk, dst - chunk, chunkRuns);
     pMeta->nRuns += chunkRuns;
   }
 

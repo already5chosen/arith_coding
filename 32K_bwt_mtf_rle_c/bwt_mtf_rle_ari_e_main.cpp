@@ -25,6 +25,8 @@ int main(int argz, char** argv)
   int ret = 1;
   FILE* fpinp = fopen(inpfilename, "rb");
   if (fpinp) {
+    size_t inpfilename_len = strlen(inpfilename);
+    char* nametag = inpfilename_len < 4 ? inpfilename : &inpfilename[inpfilename_len-4];    
     FILE* fpout = fopen(outfilename, "wb");
     if (fpout) {
       const size_t TILE_SIZE = 1024*1024;
@@ -32,8 +34,10 @@ int main(int argz, char** argv)
       std::vector<int32_t> tmpDst;
       std::vector<uint32_t> encContext;
       ret = 0;
+      int tile_i = 0;
       bool done = false;
       while (!done) {
+        ++tile_i;
         size_t tilelen = fread(inptile, 1, TILE_SIZE, fpinp);
         if (tilelen < TILE_SIZE) {
           if (!feof(fpinp)) {
@@ -51,10 +55,12 @@ int main(int argz, char** argv)
           size_t hdrlen = 6;
           int ressz  = 0;
           if (!isSingleCharacter(inptile, tilelen)) {
-            tmpDst.resize(tilelen+256);
+            if (tilelen+256 > tmpDst.size())
+              tmpDst.resize(tilelen+256);
             arithmetic_encode_init_context(&encContext, tilelen);
             uint64_t t0 = __rdtsc();
             bwt_sort(&tmpDst.at(0), inptile, tilelen);
+            uint64_t t1 = __rdtsc();
             bwt_mtf_rle_meta_t meta;
             int rlesz = bwt_reorder_mtf_rle(  // return length of destination array in octets
               &tmpDst.at(0), // both input and output
@@ -62,26 +68,35 @@ int main(int argz, char** argv)
               &meta,
               arithmetic_encode_chunk_callback,
               &encContext);
-            storeAs3octets(&hdr[3], ressz);
-            storeAs3octets(&hdr[6], meta.bwtPrimaryIndex);
+            uint64_t t2 = __rdtsc();
             uint8_t* ariEncSrc = reinterpret_cast<uint8_t*>(&tmpDst.at(0));
             uint8_t* ariEncDst = &ariEncSrc[rlesz];
             double info[8];
-            ressz = arithmetic_encode(&encContext.at(0), ariEncDst, ariEncSrc, meta.nRuns, tilelen, vFlag ? info : 0);
-            uint64_t t1 = __rdtsc();
+            ressz = arithmetic_encode(&encContext.at(0), ariEncDst, ariEncSrc, rlesz, tilelen, vFlag ? info : 0);
+            uint64_t t3 = __rdtsc();
             if (vFlag)
-              printf("%7u->%7u. Model %7.3f. Coded %10.0f. Entropy %11.3f (%11.3f). %10.0f clocks. %6.1f clocks/char\n"
+              printf(
+               "%4s:%d "
+               "%7u->%7u. Model %9.3f. Coded %9.0f. Entropy %11.3f (%11.3f). %10.0f clks. %6.1f+%5.1f+%4.1f=%6.1f clk/char (%.0f)\n"
+               ,nametag
+               ,tile_i
                ,unsigned(tilelen)
                ,ressz < 0 ? 0 : (ressz == 0 ? unsigned(tilelen) : unsigned(ressz))
                ,info[1]/8
                ,info[2]/8
                ,info[0]/8
                ,info[3]/8
-               ,double(t1-t0)
+               ,double(t3-t0)
                ,double(t1-t0)/tilelen
+               ,double(t2-t1)/tilelen
+               ,double(t3-t2)/tilelen
+               ,double(t3-t0)/tilelen
+               ,info[4]
              );
             if (ressz > 0) {
               // normal compression
+              storeAs3octets(&hdr[3], ressz);
+              storeAs3octets(&hdr[6], meta.bwtPrimaryIndex);
               hdrlen = 9;
               pRes = ariEncDst;
             } else {

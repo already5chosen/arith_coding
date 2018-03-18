@@ -8,9 +8,6 @@
 #include "arithmetic_coder_ut.h"
 #include "arithmetic_coder_cfg.h"
 
-
-static const int QH_BITS  = 8;
-static const int RANGE_BITS = 14;
 static const int      QH_SCALE  = 1 << QH_BITS;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 
@@ -37,9 +34,9 @@ void arithmetic_encode_init_context(std::vector<uint32_t>* context, int tilelen)
   memset(&context->at(0), 0, sizeof(uint32_t)*CONTEX_HDR_LEN);
 }
 
-int arithmetic_encode_chunk_callback(void* context, const uint8_t* src, int nSymbols)
+int arithmetic_encode_chunk_callback(void* context, const uint8_t* chunk, int chunklen, int nRuns)
 {
-  if (src) {
+  if (chunk) {
     std::vector<uint32_t>* vec = static_cast<std::vector<uint32_t>*>(context);
     uint32_t chunk_i = (*vec)[0];
     resize_up(vec, CONTEX_HDR_LEN+CONTEX_CHUNK_LEN*(chunk_i+1));
@@ -51,18 +48,18 @@ int arithmetic_encode_chunk_callback(void* context, const uint8_t* src, int nSym
     memset(dynSum, 0, sizeof(tmp));
 
     uint32_t* histogram = &dynSum[1];
-    for (int i = 0; i < nSymbols; ++i) {
-      int c = src[i];
+    for (int i = 0; i < chunklen; ++i) {
+      int c = chunk[i];
       if (c == 255) {
         // escape sequence for symbols 255 and 256
-        c = int(src[i+1]) + 1;
+        c = int(chunk[i+1]) + 1;
         ++i;
       }
       ++histogram[c];
     }
 
     context_chunk_t* chunk = reinterpret_cast<context_chunk_t*>(&vec->at(CONTEX_HDR_LEN+CONTEX_CHUNK_LEN*chunk_i));
-    uint32_t dynLast = nSymbols; // # of symbols with value >= ARITH_CODER_N_DYNAMIC_SYMBOLS-1
+    uint32_t dynLast = chunklen; // # of symbols with value >= ARITH_CODER_N_DYNAMIC_SYMBOLS-1
     for (int i = 0; i < ARITH_CODER_N_DYNAMIC_SYMBOLS-1; ++i) {
       uint32_t h = histogram[i];
       chunk->histogram[i] = h;
