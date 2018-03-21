@@ -232,15 +232,32 @@ static void histogram_to_range(uint16_t* ranges, unsigned len, const uint32_t* h
   }
 }
 
-void quantized_histogram_to_range(uint16_t* ranges, unsigned len, const uint8_t* qh, unsigned range_scale)
+// return # of non-zero ranges
+int quantized_histogram_to_range(uint16_t* ranges, unsigned len, const uint8_t* qh, unsigned range_scale)
 {
   // translate quantized histogram from asin domain to linear domain
   uint32_t qhr[260];
   uint32_t qhrTot = 0;
-  for (unsigned c = 0; c < len; ++c)
-    qhrTot += (qhr[c] = dequantization_tab[qh[c]]);
+  int nRanges = 0;
+  for (unsigned c = 0; c < len; ++c) {
+    uint32_t r = dequantization_tab[qh[c]];
+    qhr[c] = r;
+    qhrTot  += r;
+    nRanges += (r != 0);
+  }
 
-  histogram_to_range(ranges, len, qhr, qhrTot, range_scale);
+  if (nRanges > 1) {
+    histogram_to_range(ranges, len, qhr, qhrTot, range_scale);
+  } else if (nRanges == 1) {
+    // special case: 1 nonzero range. 
+    // Store an index of nonzero range in ranges[0]
+    unsigned c;
+    for (c = 0; qh[c] == 0; ++c) 
+      ;
+    ranges[0] = c;
+  }
+  
+  return nRanges;
 }
 
 static const uint32_t dequantization_tab9[8] =
