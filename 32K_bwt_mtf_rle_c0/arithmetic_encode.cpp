@@ -412,7 +412,7 @@ static int encode(uint8_t* dst, const uint8_t* src, const uint32_t* context, CAr
   uint8_t* dst0   = dst;
   uint64_t prevLo = lo;
   // int dbg_i = 0;
-  int nChunks = context[0];
+  int nChunks = context[CONTEXT_HDR_NCHUNKS_I];
   for (int chunk_i = 0; chunk_i < nChunks; ++chunk_i) {
     const context_c2low_t* chunk = reinterpret_cast<const context_c2low_t*>(&context[CONTEXT_HDR_LEN+CONTEXT_C2LOW_SZ*chunk_i]);
     const uint16_t* c2low = chunk->c2low;
