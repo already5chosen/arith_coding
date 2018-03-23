@@ -504,7 +504,6 @@ static void inc_dst(uint8_t* dst) {
 
 static int encode(uint8_t* dst, const uint8_t* src, const uint32_t* context, CArithmeticEncoder* pEnc)
 {
-
   const uint64_t MSB_MSK   = uint64_t(255) << 56;
   const uint64_t MIN_RANGE = uint64_t(1) << (33-RANGE_BITS);
   uint64_t lo     = pEnc->m_lo << 1;              // scaled by 2**64
