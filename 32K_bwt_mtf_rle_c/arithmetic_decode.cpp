@@ -10,6 +10,7 @@
 #include "arithmetic_coder_cfg.h"
 
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
+static const int N_COMMON_SYMBOLS = 257 + 1 - ARITH_CODER_N_DYNAMIC_SYMBOLS;
 
 class CArithmeticDecoder {
 public:
@@ -126,18 +127,22 @@ int load_nChunks(CArithmeticDecoder* pDec)
 
 // load_quantized_histogram
 // return  value:
-//   on success maxC >= 0
+//   on success hlen >= 0
 //   on parsing error negative error code
 static
-int load_quantized_histogram(uint8_t* qh, unsigned nChunks, CArithmeticDecoder* pDec)
+int load_quantized_histogram(uint8_t* qh, unsigned nCol, unsigned nChunks, CArithmeticDecoder* pDec)
 {
   // load hhw - combined hh word
-  unsigned hhw = pDec->get(8*10*10*10);
+  unsigned hhw = pDec->get(8*10*10*10+1);
   int err = pDec->put(hhw, 1);
   if (err)
     return err;
 
+  if (hhw == 0)
+    return 0; // zero code indicates that histogram is empty
+
   // split hhw into individual hh words
+  hhw -= 1;
   unsigned hh02 = (hhw %  8) + 1; hhw /= 8;
   unsigned hh01 = (hhw % 10) + 0; hhw /= 10;
   unsigned hh23 = (hhw % 10) + 0; hhw /= 10;
@@ -176,10 +181,10 @@ int load_quantized_histogram(uint8_t* qh, unsigned nChunks, CArithmeticDecoder* 
         // end of zero run
         // printf("zero run %d at %d.%d\n", rl, yi, xi); fflush(stdout);
         while (rl > 0) {
-          qh[yi*257+256-xi] = val;
+          qh[(yi+1)*nCol-1-xi] = val;
           ++yi;
           if (yi == nChunks) {
-            val = qh[256-xi];
+            val = qh[nCol-1-xi];
             yi = 0;
             ++xi;
           }
@@ -199,12 +204,12 @@ int load_quantized_histogram(uint8_t* qh, unsigned nChunks, CArithmeticDecoder* 
             return -18;
         }
         // printf("val %d at %d.%d\n", val, yi, xi); fflush(stdout);
-        qh[yi*257+256-xi] = val;
+        qh[(yi+1)*nCol-1-xi] = val;
         if (maxMaxC < 0)
-          maxMaxC = 256-xi;
+          maxMaxC = nCol-1-xi;
         ++yi;
         if (yi == nChunks) {
-          val = qh[256-xi];
+          val = qh[nCol-1-xi];
           yi = 0;
           ++xi;
         }
@@ -226,13 +231,13 @@ int load_quantized_histogram(uint8_t* qh, unsigned nChunks, CArithmeticDecoder* 
         uint32_t rl = rlAcc + rlMsb - 2;
         if (msb == 0) {
           unsigned nxt_i = rl + xi*nChunks + yi;
-          if (nxt_i >= 257*nChunks) {
-            if (nxt_i == 257*nChunks) {
+          if (nxt_i >= nCol*nChunks) {
+            if (nxt_i == nCol*nChunks) {
               while (rl > 0) {
-                qh[yi*257+256-xi] = val;
+                qh[(yi+1)*nCol-1-xi] = val;
                 ++yi;
                 if (yi == nChunks) {
-                  val = qh[256-xi];
+                  val = qh[nCol-1-xi];
                   yi = 0;
                   ++xi;
                 }
@@ -260,7 +265,7 @@ int load_quantized_histogram(uint8_t* qh, unsigned nChunks, CArithmeticDecoder* 
     // for (int xi = 0; xi <= maxMaxC; ++xi)
       // printf("qh[%3d][%3d]=%5d\n", yi, xi, qh[yi*257+xi]);
 
-  return maxMaxC; // success
+  return maxMaxC + 1; // success
 }
 
 static inline uint64_t umulh(uint64_t a, uint64_t b) {
@@ -275,22 +280,27 @@ struct arithmetic_decode_model_t {
   int m_longLookupCount;
   int m_renormalizationCount;
   #endif
-  uint16_t m_c2low[258];
-  uint32_t m_c2invRange[257]; // floor(2^31/range)
 
-  void dequantize_and_prepare(const uint8_t qh[257], int maxMaxC);
-  int val2c_estimate(uint64_t value, uint64_t invRange) {
+  void init() {
+    #ifdef ENABLE_PERF_COUNT
+    m_extLookupCount       = 0;
+    m_longLookupCount      = 0;
+    m_renormalizationCount = 0;
+    #endif
+  }
+  int dequantize_and_prepare(uint16_t c2low[], uint32_t c2invRange[], const uint8_t* qh, unsigned hlen, unsigned nSymbols);
+  int val2c_estimate(uint64_t value, uint64_t invRange, const uint16_t c2low[]) {
     uint64_t loEst33b = umulh(value,invRange);
     unsigned ri = loEst33b>>(33-RANGE2C_NBITS);
     unsigned lo = loEst33b>>(33-RANGE_BITS);
-    unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c] <= (lo/32)*32
-    if (__builtin_expect(m_c2low[c+1] <= lo, 0)) {
+    unsigned c = m_range2c[ri]; // c is the biggest character for which c2low[c] <= (lo/32)*32
+    if (__builtin_expect(c2low[c+1] <= lo, 0)) {
       do {
         #ifdef ENABLE_PERF_COUNT
         ++m_extLookupCount;
         #endif
         ++c;
-      } while (m_c2low[c+1] <= lo);
+      } while (c2low[c+1] <= lo);
     }
     return c;
     #if 0
@@ -301,7 +311,7 @@ struct arithmetic_decode_model_t {
       #endif
       ret = c;
       ++c;
-    } while (m_c2low[c] <= lo);
+    } while (c2low[c] <= lo);
     return ret;
     #endif
   }
@@ -311,30 +321,48 @@ private:
   uint8_t m_range2c[RANGE2C_SZ+1];
   unsigned m_maxC;
 
-  void prepare();
+  void prepare(uint16_t c2low[], uint32_t c2invRange[], int nSymbols);
 };
 
+template <unsigned N_SYMBOLS>
+struct TArithmetic_decode_model_t {
+  uint16_t m_c2low[N_SYMBOLS+1];
+  uint32_t m_c2invRange[N_SYMBOLS]; // floor(2^31/range)
+  arithmetic_decode_model_t b;
 
-void arithmetic_decode_model_t::dequantize_and_prepare(const uint8_t qh[257], int maxMaxC)
+  int dequantize_and_prepare(const uint8_t* qh, int hlen)
+  {
+    b.dequantize_and_prepare(m_c2low, qh, hlen, N_SYMBOLS);
+  }
+
+};
+
+int arithmetic_decode_model_t::dequantize_and_prepare(uint16_t c2low[], uint32_t c2invRange[], const uint8_t* qh, unsigned hlen, unsigned nSymbols)
 {
-  quantized_histogram_to_range(m_c2low, maxMaxC+1, qh, VAL_RANGE);
-  for (unsigned c = maxMaxC+1; c < 257; ++c)
-    m_c2low[c] = 0;
-  prepare();
+  if (hlen > 0) {
+    int nRanges = quantized_histogram_to_range(c2low, hlen, qh, VAL_RANGE);
+    if (nRanges > 1) {
+      for (unsigned c = hlen; c < nSymbols; ++c)
+        c2low[c] = 0;
+      prepare(c2low, c2invRange, nSymbols);
+    }
+    return nRanges;
+  }
+  return 0;
 }
 
-void arithmetic_decode_model_t::prepare()
+void arithmetic_decode_model_t::prepare(uint16_t c2low[], uint32_t c2invRange[], int nSymbols)
 {
-  // m_c2low -> cumulative sums of ranges
+  // c2low -> cumulative sums of ranges
   unsigned maxC = 0;
   unsigned lo = 0;
   unsigned invI = 0;
-  for (int c = 0; c < 257; ++c) {
-    unsigned range = m_c2low[c];
+  for (int c = 0; c < nSymbols; ++c) {
+    unsigned range = c2low[c];
     // printf("%3u: %04x %04x\n", c, range, lo);
-    m_c2low[c] = lo;
+    c2low[c] = lo;
     if (range != 0) {
-      m_c2invRange[c] = (1u << 31)/range; // floor(2^31/range)
+      c2invRange[c] = (1u << 31)/range; // floor(2^31/range)
       // build inverse index m_range2c
       maxC = c;
       lo += range;
@@ -344,7 +372,7 @@ void arithmetic_decode_model_t::prepare()
       }
     }
   }
-  m_c2low[257] = VAL_RANGE;
+  c2low[nSymbols] = VAL_RANGE;
   unsigned r2c = maxC <= 255 ? maxC : 255;
   for (; invI <= RANGE2C_SZ; ++invI) {
     m_range2c[invI] = r2c;
@@ -353,15 +381,22 @@ void arithmetic_decode_model_t::prepare()
 }
 
 int decode(
-  arithmetic_decode_model_t* pModel,
   uint8_t*                   dst0,
   int                        dstlen,
   int32_t                    histogram[256],
   CArithmeticDecoder*        pDec,
   const uint8_t*             qh,
-  int                        maxMaxC,
+  int                        commonHlen,
+  int                        maxChunkHlen,
   int                        nChunks)
 {
+  TArithmetic_decode_model_t<N_COMMON_SYMBOLS> commonModel;
+  commonModel.b.init();
+  int nCommonRanges = commonModel.dequantize_and_prepare(qh, commonHlen);
+
+  TArithmetic_decode_model_t<ARITH_CODER_N_DYNAMIC_SYMBOLS> chunkModel;
+  chunkModel.b.init();
+
   // initialize move-to-front decoder table
   uint8_t mtf_t[256];
   for (int i = 0; i < 256; ++i)
@@ -391,7 +426,8 @@ int decode(
   // int dbg_i = 0;
   int dst_i = 0;
   for (int chunk_i = 0; chunk_i < nChunks; ++chunk_i) {
-    pModel->dequantize_and_prepare(&qh[257*chunk_i], maxMaxC);
+    int nChunkRanges = chunkModel.dequantize_and_prepare(&qh[ARITH_CODER_N_DYNAMIC_SYMBOLS*chunk_i+N_COMMON_SYMBOLS], maxChunkHlen);
+
     const int runsPerChunk = chunk_i == nChunks-1? ARITH_CODER_RUNS_PER_CHUNK*2 : ARITH_CODER_RUNS_PER_CHUNK;
     for (int run_i = 0; run_i < runsPerChunk; ) {
       #if 0
@@ -419,6 +455,7 @@ int decode(
       // unsigned ri = loEst33b>>(33-9);
       // unsigned lo = loEst33b>>(33-RANGE_BITS);
       // }
+      arithmetic_decode_model_t* pModel = &chunkModel.b;
       int c = pModel->val2c_estimate(value, invRange); // can be off by -1, much less likely by -2
       // keep decoder in sync with encoder
       uint64_t cLo = pModel->m_c2low[c+0];
@@ -574,30 +611,27 @@ int arithmetic_decode(
     return -16;
   // printf("nChunks=%d\n", nChunks);
 
-  std::vector<uint8_t> qhVec(nChunks*257);
-  int maxMaxC = load_quantized_histogram(&qhVec.at(0), nChunks, &dec);
-  if (maxMaxC >= 0) {
-    arithmetic_decode_model_t model;
-    #ifdef ENABLE_PERF_COUNT
-    model.m_extLookupCount = 0;
-    model.m_longLookupCount = 0;
-    model.m_renormalizationCount = 0;
-    #endif
-    int modellen = srclen - dec.m_srclen;
-    if (pInfo) {
-      pInfo[0] = modellen*8;
-      pInfo[1] = dec.m_srclen;
+  std::vector<uint8_t> qhVec(nChunks*ARITH_CODER_N_DYNAMIC_SYMBOLS+N_COMMON_SYMBOLS);
+  int commonHlen = load_quantized_histogram(&qhVec.at(0), N_COMMON_SYMBOLS, 1, &dec);
+  if (commonHlen >= 0) {
+    int chunkMaxHlen = load_quantized_histogram(&qhVec.at(N_COMMON_SYMBOLS), ARITH_CODER_N_DYNAMIC_SYMBOLS, nChunks, &dec);
+    if (chunkMaxHlen >= 0) {
+      int modellen = srclen - dec.m_srclen;
+      if (pInfo) {
+        pInfo[0] = modellen*8;
+        pInfo[1] = dec.m_srclen;
+      }
+      memset(histogram, 0, sizeof(histogram[0])*256);
+      int textlen = decode(dst, dstlen, histogram, &dec, &qhVec.at(0), commonHlen, chunkMaxHlen, nChunks);
+      #ifdef ENABLE_PERF_COUNT
+      if (pInfo) {
+        pInfo[2] = model.m_extLookupCount;
+        pInfo[3] = model.m_longLookupCount;
+        pInfo[4] = model.m_renormalizationCount;
+      }
+      #endif
+      return textlen;
     }
-    memset(histogram, 0, sizeof(histogram[0])*256);
-    int textlen = decode(&model, dst, dstlen, histogram, &dec, &qhVec.at(0), maxMaxC, nChunks);
-    #ifdef ENABLE_PERF_COUNT
-    if (pInfo) {
-      pInfo[2] = model.m_extLookupCount;
-      pInfo[3] = model.m_longLookupCount;
-      pInfo[4] = model.m_renormalizationCount;
-    }
-    #endif
-    return textlen;
   }
-  return maxMaxC;
+  return commonHlen;
 }
