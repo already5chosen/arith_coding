@@ -280,27 +280,39 @@ struct arithmetic_decode_model_t {
   int m_longLookupCount;
   int m_renormalizationCount;
   #endif
+  unsigned  m_nSymbols;
+  uint16_t* m_c2low;      // [m_nSymbols+1]
+  uint32_t* m_c2invRange; // [m_nSymbols];  floor(2^31/range)
 
-  void init() {
+  arithmetic_decode_model_t(unsigned nSymbols) {
     #ifdef ENABLE_PERF_COUNT
     m_extLookupCount       = 0;
     m_longLookupCount      = 0;
     m_renormalizationCount = 0;
     #endif
+    m_c2low      = new uint16_t[nSymbols+1];
+    m_c2invRange = new uint32_t[nSymbols];
+    m_nSymbols   = nSymbols;
   }
-  int dequantize_and_prepare(uint16_t c2low[], uint32_t c2invRange[], const uint8_t* qh, unsigned hlen, unsigned nSymbols);
-  int val2c_estimate(uint64_t value, uint64_t invRange, const uint16_t c2low[]) {
+  
+  ~arithmetic_decode_model_t() {
+    delete m_c2low;
+    delete m_c2invRange;
+  }
+  
+  int dequantize_and_prepare(const uint8_t* qh, unsigned hlen);
+  int val2c_estimate(uint64_t value, uint64_t invRange) {
     uint64_t loEst33b = umulh(value,invRange);
     unsigned ri = loEst33b>>(33-RANGE2C_NBITS);
     unsigned lo = loEst33b>>(33-RANGE_BITS);
-    unsigned c = m_range2c[ri]; // c is the biggest character for which c2low[c] <= (lo/32)*32
-    if (__builtin_expect(c2low[c+1] <= lo, 0)) {
+    unsigned c = m_range2c[ri]; // c is the biggest character for which m_c2low[c] <= (lo/32)*32
+    if (__builtin_expect(m_c2low[c+1] <= lo, 0)) {
       do {
         #ifdef ENABLE_PERF_COUNT
         ++m_extLookupCount;
         #endif
         ++c;
-      } while (c2low[c+1] <= lo);
+      } while (m_c2low[c+1] <= lo);
     }
     return c;
     #if 0
@@ -311,7 +323,7 @@ struct arithmetic_decode_model_t {
       #endif
       ret = c;
       ++c;
-    } while (c2low[c] <= lo);
+    } while (m_c2low[c] <= lo);
     return ret;
     #endif
   }
@@ -321,48 +333,35 @@ private:
   uint8_t m_range2c[RANGE2C_SZ+1];
   unsigned m_maxC;
 
-  void prepare(uint16_t c2low[], uint32_t c2invRange[], int nSymbols);
+  void prepare();
 };
 
-template <unsigned N_SYMBOLS>
-struct TArithmetic_decode_model_t {
-  uint16_t m_c2low[N_SYMBOLS+1];
-  uint32_t m_c2invRange[N_SYMBOLS]; // floor(2^31/range)
-  arithmetic_decode_model_t b;
-
-  int dequantize_and_prepare(const uint8_t* qh, int hlen)
-  {
-    b.dequantize_and_prepare(m_c2low, qh, hlen, N_SYMBOLS);
-  }
-
-};
-
-int arithmetic_decode_model_t::dequantize_and_prepare(uint16_t c2low[], uint32_t c2invRange[], const uint8_t* qh, unsigned hlen, unsigned nSymbols)
+int arithmetic_decode_model_t::dequantize_and_prepare(const uint8_t* qh, unsigned hlen)
 {
   if (hlen > 0) {
-    int nRanges = quantized_histogram_to_range(c2low, hlen, qh, VAL_RANGE);
+    int nRanges = quantized_histogram_to_range(m_c2low, hlen, qh, VAL_RANGE);
     if (nRanges > 1) {
-      for (unsigned c = hlen; c < nSymbols; ++c)
-        c2low[c] = 0;
-      prepare(c2low, c2invRange, nSymbols);
+      for (unsigned c = hlen; c < m_nSymbols; ++c)
+        m_c2low[c] = 0;
+      prepare();
     }
     return nRanges;
   }
   return 0;
 }
 
-void arithmetic_decode_model_t::prepare(uint16_t c2low[], uint32_t c2invRange[], int nSymbols)
+void arithmetic_decode_model_t::prepare()
 {
-  // c2low -> cumulative sums of ranges
+  // m_c2low -> cumulative sums of ranges
   unsigned maxC = 0;
   unsigned lo = 0;
   unsigned invI = 0;
-  for (int c = 0; c < nSymbols; ++c) {
-    unsigned range = c2low[c];
+  for (int c = 0; c < m_nSymbols; ++c) {
+    unsigned range = m_c2low[c];
     // printf("%3u: %04x %04x\n", c, range, lo);
-    c2low[c] = lo;
+    m_c2low[c] = lo;
     if (range != 0) {
-      c2invRange[c] = (1u << 31)/range; // floor(2^31/range)
+      m_c2invRange[c] = (1u << 31)/range; // floor(2^31/range)
       // build inverse index m_range2c
       maxC = c;
       lo += range;
@@ -372,7 +371,7 @@ void arithmetic_decode_model_t::prepare(uint16_t c2low[], uint32_t c2invRange[],
       }
     }
   }
-  c2low[nSymbols] = VAL_RANGE;
+  m_c2low[m_nSymbols] = VAL_RANGE;
   unsigned r2c = maxC <= 255 ? maxC : 255;
   for (; invI <= RANGE2C_SZ; ++invI) {
     m_range2c[invI] = r2c;
@@ -390,12 +389,10 @@ int decode(
   int                        maxChunkHlen,
   int                        nChunks)
 {
-  TArithmetic_decode_model_t<N_COMMON_SYMBOLS> commonModel;
-  commonModel.b.init();
+  arithmetic_decode_model_t commonModel(N_COMMON_SYMBOLS);
   int nCommonRanges = commonModel.dequantize_and_prepare(qh, commonHlen);
 
-  TArithmetic_decode_model_t<ARITH_CODER_N_DYNAMIC_SYMBOLS> chunkModel;
-  chunkModel.b.init();
+  arithmetic_decode_model_t chunkModel(ARITH_CODER_N_DYNAMIC_SYMBOLS);
 
   // initialize move-to-front decoder table
   uint8_t mtf_t[256];
@@ -455,7 +452,7 @@ int decode(
       // unsigned ri = loEst33b>>(33-9);
       // unsigned lo = loEst33b>>(33-RANGE_BITS);
       // }
-      arithmetic_decode_model_t* pModel = &chunkModel.b;
+      arithmetic_decode_model_t* pModel = &chunkModel;
       int c = pModel->val2c_estimate(value, invRange); // can be off by -1, much less likely by -2
       // keep decoder in sync with encoder
       uint64_t cLo = pModel->m_c2low[c+0];
