@@ -570,7 +570,7 @@ int arithmetic_decode(
   if (nChunks < 0)
     return nChunks;
 
-  if (nChunks * ARITH_CODER_RUNS_PER_CHUNK > dstlen)
+  if (nChunks > 1 && nChunks * ARITH_CODER_RUNS_PER_CHUNK > dstlen)
     return -16;
   // printf("nChunks=%d\n", nChunks);
 
