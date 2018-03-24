@@ -520,9 +520,11 @@ static int encode(uint8_t* dst, const uint8_t* src, const uint32_t* context, CAr
       [CONTEXT_HDR_COMMON_HISTOGRAM_I+CONTEXT_COMMON_C2LOW_SZ+CONTEXT_CHUNK_C2LOW_SZ*chunk_i]);
     const uint16_t* chunk_c2low = chunk->nRanges > 1 ? chunk->c2low : 0;
     unsigned srclen = chunk->srclen;
+    // int dbg_i = -1;
     for (unsigned i = 0; i < srclen; ++i) {
       int common_c = -1;
       do {
+        // ++dbg_i;
         const uint16_t* c2low = common_c2low;
         int c = common_c;
         common_c = -1;
@@ -540,6 +542,8 @@ static int encode(uint8_t* dst, const uint8_t* src, const uint32_t* context, CAr
             c = ARITH_CODER_N_DYNAMIC_SYMBOLS-1;
           }
         }
+        // if (chunk_i==77 && dbg_i >= 0 && dbg_i < 500)
+          // printf("%d:%3d %3d\n", dbg_i, common_c, c);
         // printf("[%3d]=%3d\n", dbg_i, c); ++dbg_i;
         if (c2low) {
           uint64_t cLo = c2low[c+0];

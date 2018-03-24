@@ -418,8 +418,6 @@ int decode(
   uint64_t invRange = int64_t(INV_RANGE_SCALE/range); // approximation of floor(2**(97-rb)/range). Maintained in [2**33..2*64)
 
   // uint64_t mxProd = 0, mnProd = uint64_t(-1);
-  uint32_t rlAcc = 0;
-  uint32_t rlMsb = 1;
   uint8_t* dst = dst0;
   // int dbg_i = 0;
   int dst_i = 0;
@@ -427,9 +425,14 @@ int decode(
     int nChunkRanges = chunkModel.dequantize_and_prepare(&qh[ARITH_CODER_N_DYNAMIC_SYMBOLS*chunk_i+N_COMMON_SYMBOLS], maxChunkHlen);
 
     const int runsPerChunk = chunk_i == nChunks-1? ARITH_CODER_RUNS_PER_CHUNK*2 : ARITH_CODER_RUNS_PER_CHUNK;
+// printf("[%d %d]\n", nChunkRanges, nCommonRanges);
+    uint32_t rlAcc = 0;
+    uint32_t rlMsb = 1;
+    // int dbg_i = -1;
     for (int run_i = 0; run_i < runsPerChunk; ) {
       bool common = false;
       do {
+        // ++dbg_i;
         #if 0
         uint64_t prod = umulh(invRange, range);
         if (prod > mxProd || prod < mnProd) {
@@ -473,7 +476,10 @@ int decode(
           nxtRange = range * (cHi-cLo);
           ++c;
         }
+        int ari_c = c;
         range = nxtRange;
+        // if (chunk_i==77 && dbg_i < 500)// && run_i > 200 && run_i < 225)
+          // printf("%d.%d:%d %3d %8u %8u\n", run_i, dbg_i, common, c, rlAcc, rlMsb);
 
         // RLE and MTF decode
         // printf("[%3d]=%3d\n", dbg_i, c); ++dbg_i;
@@ -486,6 +492,7 @@ int decode(
           rlMsb += rlMsb;
           uint32_t rl = rlAcc + rlMsb - 1;
           if (rl >= uint32_t(dstlen)) {
+// printf("%u(%u) %d %d %d(%d) %d(%d)\n", rl, rlMsb, dstlen, srclen, chunk_i, nChunks, run_i, runsPerChunk);
             if (rl == uint32_t(dstlen)) {
               // last run
               int c0 = mtf_t[0];
@@ -494,7 +501,7 @@ int decode(
               histogram[c0] += rl;
               memset(dst, c0, rl);
               dst += rl;
-              break;
+              goto done;
             }
             return -21; // zero run too long (A)
           }
@@ -545,7 +552,7 @@ int decode(
         *dst++ = dstC;
 
         if (dstlen == 0)
-          break; // success
+          goto done; // success
 
         // update move-to-front decoder table
         memmove(&mtf_t[1], &mtf_t[0], mtfC);
@@ -585,7 +592,7 @@ int decode(
         range = nxtRange;
 
         // update invRange
-        invRange = umulh(invRange, uint64_t(pModel->m_c2invRange[c]) << (63-31)) << (RANGE_BITS+1);
+        invRange = umulh(invRange, uint64_t(pModel->m_c2invRange[ari_c]) << (63-31)) << (RANGE_BITS+1);
 
         if ((dst_i & 15)==0) {
           // do one NR iteration to increase precision of invRange and assure that invRange*range <= 2**(97-rb)
@@ -595,6 +602,7 @@ int decode(
         }
       } while (common);
     }
+    done:;
   }
   return dst - dst0;
 }
