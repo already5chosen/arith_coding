@@ -488,6 +488,7 @@ static int store_model(uint8_t* dst, uint32_t * context, double* pNbits, CArithm
     }
   }
   dst = store_model_store_data(dst, qHistogram, chunkMaxHlen, CONTEXT_CHUNK_QH_LEN, nChunks, pEnc);
+  pEnc->spillOverflow(dst);
 
   int len = dst - dst0;
   *pNbits = len*8.0 + 63 - log2(pEnc->m_range);

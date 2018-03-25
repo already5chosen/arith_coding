@@ -233,6 +233,7 @@ static int store_model(uint8_t* dst, const uint8_t qh[257], unsigned maxC, doubl
         p = pEnc->put(VAL_RANGE, lo1, ra1, p);
     }
   }
+  pEnc->spillOverflow(dst);
 
   // for (int i = 0; i <= maxC; ++i)
     // printf("range[%3d]=%5d\n", i, qh[i]);
