@@ -26,6 +26,8 @@ int main(int argz, char** argv)
   if (fpinp) {
     FILE* fpout = fopen(outfilename, "wb");
     if (fpout) {
+      size_t oupfilename_len = strlen(outfilename);
+      char* nametag = oupfilename_len < 4 ? outfilename : &outfilename[oupfilename_len-4];
       const size_t MAX_TILE_SIZE = 1024*1024;
       std::vector<uint8_t> src;
       std::vector<uint8_t> ibwtInp;
@@ -33,7 +35,9 @@ int main(int argz, char** argv)
       std::vector<uint8_t> dst;
       ret = 1;
 
+      int tile_i = 0;
       while (true) {
+        ++tile_i;
         uint8_t hdr[6];
         size_t hdrlen = fread(hdr, 1, 6, fpinp);
         if (hdrlen != sizeof(hdr)) {
@@ -155,11 +159,14 @@ int main(int argz, char** argv)
 
         if (vFlag)
           printf(
+            "%4s:%-2d "
             "%7u -> %7u. Model %7.1f. Coded %7d. %9.0f clks. %5.1f+%4.1f=%5.1f clk/char"
             #ifdef ENABLE_PERF_COUNT
             " %6d %6d %6d"
             #endif
             "\n"
+            ,nametag
+            ,tile_i
             ,unsigned(codelen)
             ,unsigned(tilelen)
             ,info[0]/8.0
