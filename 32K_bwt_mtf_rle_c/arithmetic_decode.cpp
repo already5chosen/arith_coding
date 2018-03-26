@@ -417,22 +417,17 @@ int decode(
   uint64_t range = pDec->m_range >> (RANGE_BITS-1);   // scaled by 2**(64-rb).  Maintained in [2**(33-rb)+1..2*(64-rb)]
   uint64_t invRange = int64_t(INV_RANGE_SCALE/range); // approximation of floor(2**(97-rb)/range). Maintained in [2**33..2*64)
 
-  // uint64_t mxProd = 0, mnProd = uint64_t(-1);
   uint8_t* dst = dst0;
-  // int dbg_i = 0;
   int dst_i = 0;
   for (int chunk_i = 0; chunk_i < nChunks; ++chunk_i) {
     int nChunkRanges = chunkModel.dequantize_and_prepare(&qh[ARITH_CODER_N_DYNAMIC_SYMBOLS*chunk_i+N_COMMON_SYMBOLS], maxChunkHlen);
 
     const int runsPerChunk = chunk_i == nChunks-1? ARITH_CODER_RUNS_PER_CHUNK*2 : ARITH_CODER_RUNS_PER_CHUNK;
-// printf("[%d %d]\n", nChunkRanges, nCommonRanges);
     uint32_t rlAcc = 0;
     uint32_t rlMsb = 1;
-    // int dbg_i = -1;
     for (int run_i = 0; run_i < runsPerChunk; ) {
       bool common = false;
       do {
-        // ++dbg_i;
         #if 0
         uint64_t prod = umulh(invRange, range);
         if (prod > mxProd || prod < mnProd) {
@@ -476,92 +471,9 @@ int decode(
           nxtRange = range * (cHi-cLo);
           ++c;
         }
-        int ari_c = c;
         range = nxtRange;
-        // if (chunk_i==77 && dbg_i < 500)// && run_i > 200 && run_i < 225)
-          // printf("%d.%d:%d %3d %8u %8u\n", run_i, dbg_i, common, c, rlAcc, rlMsb);
-
-        // RLE and MTF decode
-        // printf("[%3d]=%3d\n", dbg_i, c); ++dbg_i;
-        if (common) {
-          common = false;
-          c += ARITH_CODER_N_DYNAMIC_SYMBOLS-1;
-        } else if (c < 2) {
-          // zero run
-          rlAcc |= (-c) & rlMsb;
-          rlMsb += rlMsb;
-          uint32_t rl = rlAcc + rlMsb - 1;
-          if (rl >= uint32_t(dstlen)) {
-// printf("%u(%u) %d %d %d(%d) %d(%d)\n", rl, rlMsb, dstlen, srclen, chunk_i, nChunks, run_i, runsPerChunk);
-            if (rl == uint32_t(dstlen)) {
-              // last run
-              int c0 = mtf_t[0];
-              // for (int ii=0; ii < rl; ++ii)
-                // {printf("[%3d]=%3d\n", dbg_i, c0); ++dbg_i;}
-              histogram[c0] += rl;
-              memset(dst, c0, rl);
-              dst += rl;
-              goto done;
-            }
-            return -21; // zero run too long (A)
-          }
-          goto process_range; // don't do MTF decode
-        } else {
-          if (rlMsb > 1) {
-            // insert zero run
-            uint32_t rl = rlAcc + rlMsb - 1;
-            // for (int ii=0; ii < rl; ++ii)
-              // {printf("[%3d]=%3d\n", dbg_i, 0); ++dbg_i;}
-            rlMsb = 1;
-            rlAcc = 0;
-            if (rl >= uint32_t(dstlen))
-              return -22; // zero run too long (B)
-            int c0 = mtf_t[0];
-            // for (int ii=0; ii < rl; ++ii)
-              // {printf("[%3d]=%3d\n", dbg_i, c0); ++dbg_i;}
-            histogram[c0] += rl;
-            memset(dst, c0, rl);
-            dst += rl;
-            dstlen -= rl;
-            ++run_i;
-          }
-          if (dstlen == 0)
-            return -23; // decoded section is longer than expected
-          dstlen -= 1;
-
-          if (c == ARITH_CODER_N_DYNAMIC_SYMBOLS-1) {
-            if (theOnlyCommonC != 0) {
-              if (__builtin_expect(nCommonRanges == 0, 0)) {
-                return -25; // we are pointed to common range that does not exist
-              }
-              c = theOnlyCommonC;
-            } else {
-              common = true;
-              goto process_range; // don't do MTF decode
-            }
-          }
-        }
-
-        // MTF decode
-        {
-        int mtfC = c - 1;
-        // printf("[%3d]=%3d\n", dbg_i, mtfC); ++dbg_i;
-        int dstC = mtf_t[mtfC];
-        // printf("[%3d]=%3d\n", dbg_i, dstC); ++dbg_i;
-        histogram[dstC] += 1;
-        *dst++ = dstC;
-
-        if (dstlen == 0)
-          goto done; // success
-
-        // update move-to-front decoder table
-        memmove(&mtf_t[1], &mtf_t[0], mtfC);
-        mtf_t[0] = dstC;
-        ++run_i;
-        }
-
-        process_range:
         nxtRange = range >> RANGE_BITS;
+
         if (nxtRange <= MIN_RANGE) {
           #ifdef ENABLE_PERF_COUNT
           ++pModel->m_renormalizationCount;
@@ -592,13 +504,82 @@ int decode(
         range = nxtRange;
 
         // update invRange
-        invRange = umulh(invRange, uint64_t(pModel->m_c2invRange[ari_c]) << (63-31)) << (RANGE_BITS+1);
+        invRange = umulh(invRange, uint64_t(pModel->m_c2invRange[c]) << (63-31)) << (RANGE_BITS+1);
 
         if ((dst_i & 15)==0) {
           // do one NR iteration to increase precision of invRange and assure that invRange*range <= 2**(97-rb)
           const uint64_t PROD_ONE = uint64_t(1) << (33-RANGE_BITS);
           uint64_t prod = umulh(invRange, range); // scaled to 2^(33-RANGE_BITS)
           invRange = umulh(invRange, (PROD_ONE*2-1-prod)<<(RANGE_BITS+30))<<1;
+        }
+
+        // RLE and MTF decode
+        if (common) {
+          common = false;
+          c += ARITH_CODER_N_DYNAMIC_SYMBOLS-1;
+        } else if (c < 2) {
+          // zero run
+          rlAcc |= (-c) & rlMsb;
+          rlMsb += rlMsb;
+          uint32_t rl = rlAcc + rlMsb - 1;
+          if (rl >= uint32_t(dstlen)) {
+            if (rl == uint32_t(dstlen)) {
+              // last run
+              int c0 = mtf_t[0];
+              histogram[c0] += rl;
+              memset(dst, c0, rl);
+              dst += rl;
+              goto done;
+            }
+            return -21; // zero run too long (A)
+          }
+          continue; // don't do MTF decode
+        } else {
+          if (rlMsb > 1) {
+            // insert zero run
+            uint32_t rl = rlAcc + rlMsb - 1;
+            rlMsb = 1;
+            rlAcc = 0;
+            if (rl >= uint32_t(dstlen))
+              return -22; // zero run too long (B)
+            int c0 = mtf_t[0];
+            histogram[c0] += rl;
+            memset(dst, c0, rl);
+            dst += rl;
+            dstlen -= rl;
+            ++run_i;
+          }
+          if (dstlen == 0)
+            return -23; // decoded section is longer than expected
+          dstlen -= 1;
+
+          if (c == ARITH_CODER_N_DYNAMIC_SYMBOLS-1) {
+            if (theOnlyCommonC != 0) {
+              if (__builtin_expect(nCommonRanges == 0, 0)) {
+                return -25; // we are pointed to common range that does not exist
+              }
+              c = theOnlyCommonC;
+            } else {
+              common = true;
+              continue; // don't do MTF decode
+            }
+          }
+        }
+
+        // MTF decode
+        {
+        int mtfC = c - 1;
+        int dstC = mtf_t[mtfC];
+        histogram[dstC] += 1;
+        *dst++ = dstC;
+
+        if (dstlen == 0)
+          goto done; // success
+
+        // update move-to-front decoder table
+        memmove(&mtf_t[1], &mtf_t[0], mtfC);
+        mtf_t[0] = dstC;
+        ++run_i;
         }
       } while (common);
     }
