@@ -50,8 +50,8 @@ int main(int argz, char** argv)
           size_t hdrlen = 6;
           int ressz  = 0;
           if (!isSingleCharacter(inptile, tilelen)) {
-            if (tilelen+260 > tmpDst.size())
-              tmpDst.resize(tilelen+260);
+            if (tilelen*3+260 > tmpDst.size())
+              tmpDst.resize(tilelen*3+260);
             uint32_t encContext[258];
             arithmetic_encode_init_context(encContext);
             uint64_t t0 = __rdtsc();

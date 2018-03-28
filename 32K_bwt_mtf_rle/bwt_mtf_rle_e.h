@@ -1,6 +1,9 @@
 #include <stdint.h>
 
-void bwt_sort(int32_t* dst, const uint8_t* src, int srclen);
+void bwt_sort(
+  int32_t*       dst_tmp,  // length = srclen*3 
+  const uint8_t* src, 
+  int            srclen);
 
 typedef struct {
  int32_t bwtPrimaryIndex;
