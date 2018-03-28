@@ -18,14 +18,18 @@ public:
   }
 };
 
-void bwt_sort(int32_t* dst, const uint8_t* src, int srclen)
+void bwt_sort(
+  int32_t*       dst_tmp,  // length = srclen*3 
+  const uint8_t* src, 
+  int            srclen)
 { // BWT sort
   int h[256]={0};
   for (int i = 0; i < srclen; ++i)
     ++h[src[i]];
 
-  int* ord = new int[srclen*2];
-  int* wrk = &ord[srclen];
+  int32_t* dst = &dst_tmp[0];
+  int32_t* ord = &dst_tmp[srclen*1];
+  int32_t* wrk = &dst_tmp[srclen*2];
   int h0[256];
   int acc=0;
   int wn = 0;
@@ -99,5 +103,4 @@ void bwt_sort(int32_t* dst, const uint8_t* src, int srclen)
     }
     wn = wi;
   }
-  delete [] ord;
 }
