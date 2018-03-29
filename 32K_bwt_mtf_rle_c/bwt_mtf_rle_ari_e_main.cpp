@@ -26,11 +26,11 @@ int main(int argz, char** argv)
   FILE* fpinp = fopen(inpfilename, "rb");
   if (fpinp) {
     size_t inpfilename_len = strlen(inpfilename);
-    char* nametag = inpfilename_len < 4 ? inpfilename : &inpfilename[inpfilename_len-4];    
+    char* nametag = inpfilename_len < 4 ? inpfilename : &inpfilename[inpfilename_len-4];
     FILE* fpout = fopen(outfilename, "wb");
     if (fpout) {
       const size_t TILE_SIZE = 1024*1024;
-      uint8_t* inptile = new uint8_t[TILE_SIZE];
+      uint8_t* inptile = new uint8_t[TILE_SIZE+8];
       std::vector<int32_t> tmpDst;
       std::vector<uint32_t> encContext;
       ret = 0;

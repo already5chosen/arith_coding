@@ -1,9 +1,9 @@
 #include <stdint.h>
 
 void bwt_sort(
-  int32_t*       dst_tmp,  // length = srclen*3 
-  const uint8_t* src, 
-  int            srclen);
+  int32_t* dst_tmp, // length = srclen*3
+  uint8_t* src,     // length = srclen+8, characters [srclen..srclen+7] modified, others preserved
+  int      srclen);
 
 typedef struct {
  int32_t bwtPrimaryIndex;

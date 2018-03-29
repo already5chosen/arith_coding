@@ -3,6 +3,13 @@
 
 #include "bwt_mtf_rle_e.h"
 
+// prepare_bwt_sort append first 8 characters to the end of the source
+static void prepare_bwt_sort(uint8_t* src, int srclen)
+{
+  for (int i = 0; i < 8; ++i)
+    src[srclen+i] = src[i];
+}
+
 class bwt_compare {
 public:
   const int* m_src;
@@ -18,46 +25,92 @@ public:
   }
 };
 
+static inline uint64_t load_8c(const uint8_t* src) {
+  uint64_t r;
+  memcpy(&r, src, sizeof(r));
+  return r;
+}
+
 void bwt_sort(
-  int32_t*       dst_tmp,  // length = srclen*3 
-  const uint8_t* src, 
-  int            srclen)
+  int32_t* dst_tmp, // length = srclen*3
+  uint8_t* src,     // length = srclen+8, characters [srclen..srclen+7] modified, others preserved
+  int      srclen)
 { // BWT sort
   int h[256]={0};
   for (int i = 0; i < srclen; ++i)
     ++h[src[i]];
 
+  prepare_bwt_sort(src, srclen);
+
   int32_t* dst = &dst_tmp[0];
   int32_t* ord = &dst_tmp[srclen*1];
   int32_t* wrk = &dst_tmp[srclen*2];
+
   int h0[256];
   int acc=0;
-  int wn = 0;
   for (int i = 0; i < 256; ++i) {
     h0[i] = acc;
     int hv = h[i];
-    if (hv > 1) {
-      // record segment that requires further sorting
-      wrk[wn+0] = acc;
-      wrk[wn+1] = hv;
-      wn += hv;
-    }
     acc += hv;
   }
-  memcpy(h, h0, sizeof(h));
 
+  // sort by 8th character, result in ord[]
+  memcpy(h, h0, sizeof(h));
   for (int i = 0; i < srclen; ++i) {
-    unsigned c = src[i];
+    unsigned c = src[i+7];
     int hv  = h[c];
-    ord[i]  = h0[c];
-    dst[hv] = i;
+    ord[hv] = i;
     h[c]    = hv + 1;
+  }
+
+  // sort by 7th, 6th, ... and 1st character, result in dst[]
+  for (int offs = 6; offs >= 0; --offs) {
+    int32_t* inp = offs % 2 == 0 ? ord : dst;
+    int32_t* out = offs % 2 == 0 ? dst : ord;
+    memcpy(h, h0, sizeof(h));
+    for (int i = 0; i < srclen; ++i) {
+      int ii = inp[i];
+      unsigned c = src[ii+offs];
+      int hv  = h[c];
+      out[hv] = ii;
+      h[c]    = hv + 1;
+    }
+  }
+
+  // build ord[] and wrk[]
+  int wn = 0;
+  int i0  = 0;
+  int ii0 = dst[0];
+  uint64_t cc0 = load_8c(&src[ii0]);
+  ord[ii0] = 0;
+  for (int i = 1; i < srclen; ++i) {
+    int ii = dst[i];
+    uint64_t cc = load_8c(&src[ii]);
+    if (cc != cc0) {
+      int seglen = i - i0;
+      if (seglen > 1) {
+        // record segment that requires further sorting
+        wrk[wn+0] = i0;
+        wrk[wn+1] = seglen;
+        wn += seglen;
+      }
+      i0 = i;
+    }
+    ord[ii] = i0;
+    cc0 = cc;
+  }
+  if (srclen - i0 > 1) {
+    // record last segment that requires further sorting
+    int seglen = srclen - i0;
+    wrk[wn+0] = i0;
+    wrk[wn+1] = seglen;
+    wn += seglen;
   }
 
   bwt_compare cmp;
   cmp.m_src = ord;
   cmp.m_srclen = srclen;
-  for (int dist = 1; dist < srclen && wn > 0; dist += dist) {
+  for (int dist = 8; dist < srclen && wn > 0; dist += dist) {
     cmp.m_dist = dist;
     int wi = 0;
     for (int ri = 0; ri < wn; ) {

@@ -30,7 +30,7 @@ int main(int argz, char** argv)
     FILE* fpout = fopen(outfilename, "wb");
     if (fpout) {
       const size_t TILE_SIZE = 1024*1024;
-      uint8_t* inptile = new uint8_t[TILE_SIZE];
+      uint8_t* inptile = new uint8_t[TILE_SIZE+8];
       std::vector<int32_t> tmpDst;
       std::vector<uint32_t> encContext;
       ret = 0;
