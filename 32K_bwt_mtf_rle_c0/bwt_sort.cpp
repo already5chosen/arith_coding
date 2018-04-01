@@ -13,15 +13,8 @@ static void prepare_bwt_sort(uint8_t* src, int srclen)
 class bwt_compare {
 public:
   const int* m_src;
-  int   m_srclen;
-  int   m_dist;
-  int get(int32_t indx) const {
-    int32_t a0 = indx + m_dist;
-    int32_t a1 = indx + (m_dist - m_srclen);
-    return  m_src[a1 < 0 ? a0 : a1];
-  }
   bool operator() (int32_t a, int32_t b) const {
-    return get(a) < get(b);
+    return m_src[a] < m_src[b];
   }
 };
 
@@ -109,23 +102,35 @@ void bwt_sort(
 
   bwt_compare cmp;
   cmp.m_src = ord;
-  cmp.m_srclen = srclen;
   for (int dist = 8; dist < srclen && wn > 0; dist += dist) {
-    cmp.m_dist = dist;
     int wi = 0;
     for (int ri = 0; ri < wn; ) {
       int beg = wrk[ri+0];
       int len = wrk[ri+1];
+
+      for (int i = beg; i < beg+len; ++i) {
+        int32_t y = dst[i] + dist;
+        if (y-srclen >= 0)
+          y = y - srclen;
+        dst[i] = y;
+      }
       std::sort(&dst[beg], &dst[beg+len], cmp);
       int i0 = 0;
-      int v0 = cmp.get(dst[beg]);
+      int v0 = ord[dst[beg]];
       wrk[ri] = 0;
       for (int i = 1; i < len; ++i) {
-        int v = cmp.get(dst[beg+i]);
+        int v = ord[dst[beg+i]];
         i0 = (v != v0) ? i : i0;
         v0 = v;
         wrk[ri+i] = i0;
       }
+      for (int i = beg; i < beg+len; ++i) {
+        int32_t y = dst[i] - dist;
+        if (y < 0)
+          y = y + srclen;
+        dst[i] = y;
+      }
+
       ord[dst[beg]] = beg;
       for (int i = 1; i < len; ++i)
         ord[dst[beg+i]] = wrk[ri+i]+beg;
