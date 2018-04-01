@@ -1,6 +1,4 @@
 #include <cstring>
-#include <algorithm>
-
 #include "bwt_mtf_rle_e.h"
 
 // prepare_bwt_sort append first 8 characters to the end of the source
@@ -10,13 +8,92 @@ static void prepare_bwt_sort(uint8_t* src, int srclen)
     src[srclen+i] = src[i];
 }
 
-class bwt_compare {
-public:
-  const int* m_src;
-  bool operator() (int32_t a, int32_t b) const {
-    return m_src[a] < m_src[b];
+static int32_t bwt_qsort_median_of_3(const int32_t* x, int len, const int32_t* ord)
+{
+  int32_t y0 = x[0];
+  int32_t y1 = x[len/2];
+  int32_t val0 = ord[y0];
+  int32_t val1 = ord[y1];
+  if (val1 < val0) {
+    val0 = val1;
+    val1 = ord[y0];
   }
-};
+  int32_t val2 = ord[x[len-1]];
+  if (val2 <= val0)
+    return val0;
+  if (val2 <= val1)
+    return val2;
+  return val1;
+}
+
+static void bwt_qsort(int32_t* x, int len, const int32_t* ord, int32_t* wrk)
+{
+  while (len > 16) {
+    int32_t valm = bwt_qsort_median_of_3(x, len, ord);
+    int32_t* pl = x;
+    int32_t* ph = wrk;
+    for (int i = 0; i < len; ++i) {
+      int32_t y = x[i];
+      int32_t val = ord[y];
+      *pl = y;
+      *ph = y;
+      pl += (val <= valm);
+      ph += (val >  valm);
+    }
+    int h = ph - wrk;
+    if (h > 0) {
+      int l = len - h;
+      if (l < h) {
+        bwt_qsort(x, l, ord, wrk+h);
+        x += l;
+        len = h;
+      } else {
+        bwt_qsort(wrk, h, ord, x+l);
+        len = l;
+      }
+    } else {
+      // ord[x[]] <= valm
+      pl = x;
+      ph = wrk;
+      for (int i = 0; i < len; ++i) {
+        int32_t y = x[i];
+        int32_t val = ord[y];
+        *pl = y;
+        *ph = y;
+        pl += (val != valm);
+        ph += (val == valm);
+      }
+      h = ph - wrk;
+      len -= h;
+    }
+    memcpy(pl, wrk, h*sizeof(*x));
+  }
+
+  // sort by straight insertion
+  int32_t val0 = ord[x[0]];
+  for (int beg = 1; beg < len; ++beg) {
+    int32_t y   = x[beg];
+    int32_t val = ord[y];
+    if (val < val0) {
+      val0 = val;
+      for (int i = 0; i < beg; ++i) {
+        int32_t y1 = x[i];
+        x[i] = y;
+        y = y1;
+      }
+      x[beg] = y;
+    } else {
+      int i;
+      for (i = beg-1; ; --i) {
+        int32_t yi  = x[i];
+        if (ord[yi] <= val)
+          break;
+        x[i+1] = yi;
+      }
+      x[i+1] = y;
+    }
+  }
+}
 
 static inline uint64_t load_8c(const uint8_t* src) {
   uint64_t r;
@@ -100,8 +177,6 @@ void bwt_sort(
     wn += seglen;
   }
 
-  bwt_compare cmp;
-  cmp.m_src = ord;
   for (int dist = 8; dist < srclen && wn > 0; dist += dist) {
     int wi = 0;
     for (int ri = 0; ri < wn; ) {
@@ -114,7 +189,7 @@ void bwt_sort(
           y = y - srclen;
         dst[i] = y;
       }
-      std::sort(&dst[beg], &dst[beg+len], cmp);
+      bwt_qsort(&dst[beg], len, ord, &wrk[ri]);
       int i0 = 0;
       int v0 = ord[dst[beg]];
       wrk[ri] = 0;
