@@ -95,10 +95,110 @@ static void bwt_qsort(int32_t* x, int len, const int32_t* ord, int32_t* wrk)
   }
 }
 
+struct flat_rec_t {
+  int32_t key, dat;
+};
+
+static int32_t bwt_flat_qsort_median_of_3(const flat_rec_t* x, unsigned len)
+{
+  int32_t key0 = x[0].key;
+  int32_t key1 = x[len/2].key;
+  if (key1 < key0) {
+    key0 = key1;
+    key1 = x[0].key;
+  }
+  int32_t key2 = x[len-1].key;
+  if (key2 <= key0)
+    return key0;
+  if (key2 <= key1)
+    return key2;
+  return key1;
+}
+static void bwt_flat_qsort(flat_rec_t* x, int len, flat_rec_t* wrk)
+{
+  while (len > 16) {
+    int32_t keym = bwt_flat_qsort_median_of_3(x, len);
+    flat_rec_t* pl = x;
+    flat_rec_t* ph = wrk;
+    for (int i = 0; i < len; ++i) {
+      flat_rec_t r = x[i];
+      *pl = r;
+      *ph = r;
+      int32_t key = r.key;
+      pl += (key <= keym);
+      ph += (key >  keym);
+    }
+    int h = ph - wrk;
+    if (h > 0) {
+      int l = len - h;
+      if (l < h) {
+        bwt_flat_qsort(x, l, wrk+h);
+        x += l;
+        len = h;
+      } else {
+        bwt_flat_qsort(wrk, h, x+l);
+        len = l;
+      }
+    } else {
+      // ord[x[]] <= keym
+      pl = x;
+      ph = wrk;
+      for (int i = 0; i < len; ++i) {
+        flat_rec_t r = x[i];
+        *pl = r;
+        *ph = r;
+        int32_t key = r.key;
+        pl += (key != keym);
+        ph += (key == keym);
+      }
+      h = ph - wrk;
+      len -= h;
+    }
+    memcpy(pl, wrk, h*sizeof(*x));
+  }
+
+  // sort by straight insertion
+  int32_t key0 = x[0].key;
+  for (int beg = 1; beg < len; ++beg) {
+    flat_rec_t r = x[beg];
+    int32_t key  = r.key;
+    if (key < key0) {
+      key0 = r.key;
+      for (int i = 0; i < beg; ++i) {
+        flat_rec_t r1 = x[i];
+        x[i] = r;
+        r = r1;
+      }
+      x[beg] = r;
+    } else {
+      int i;
+      for (i = beg-1; ; --i) {
+        flat_rec_t ri  = x[i];
+        if (ri.key <= key)
+          break;
+        x[i+1] = ri;
+      }
+      x[i+1] = r;
+    }
+  }
+}
+
 static inline uint64_t load_8c(const uint8_t* src) {
   uint64_t r;
   memcpy(&r, src, sizeof(r));
   return r;
+}
+
+static void bwt_sort_flatten(flat_rec_t* dst, const int32_t* src, int len, const int32_t* ord, int srclen, int dist)
+{
+  for (int i = 0; i < len; ++i) {
+    int32_t y = src[i];
+    int32_t idx = y + dist;
+    if (idx-srclen >= 0)
+      idx = idx - srclen;
+    dst[i].key = ord[idx];
+    dst[i].dat = y;
+  }
 }
 
 void bwt_sort(
@@ -208,6 +308,41 @@ void bwt_sort(
           // order still unresolved
           wrk[wn+0] = beg;
           wrk[wn+1] = len;
+          wn += 2;
+        }
+      } else if (len*4 <= ri-wn ) {
+        // there is sufficient space in the wrk[] to use flat structures
+        flat_rec_t* pWrk = reinterpret_cast<flat_rec_t*>(&wrk[wn]);
+        bwt_sort_flatten(pWrk, &dst[beg], len, ord, srclen, dist);
+        bwt_flat_qsort(pWrk, len, &pWrk[len]);
+
+        int v0 = pWrk[0].key;
+        int y0 = pWrk[0].dat;
+        dst[beg] = y0;
+        ord[y0] = beg;
+        int i0 = 0;
+        for (int i = 1; i < len; ++i) {
+          int v = pWrk[i].key;
+          int y = pWrk[i].dat;
+          if (v != v0) {
+            v0 = v;
+            int seglen = i - i0;
+            if (seglen > 1) {
+              // record segment that requires further sorting
+              wrk[wn+0] = beg+i0;
+              wrk[wn+1] = seglen;
+              wn += 2;
+            }
+            i0 = i;
+          }
+          dst[beg+i] = y;
+          ord[y] = beg+i0;
+        }
+        if (len-i0 > 1) {
+          // record segment that requires further sorting
+          int seglen = len-i0;
+          wrk[wn+0] = beg+i0;
+          wrk[wn+1] = seglen;
           wn += 2;
         }
       } else {
