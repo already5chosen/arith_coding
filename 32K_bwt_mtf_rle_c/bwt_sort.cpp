@@ -162,7 +162,7 @@ void bwt_sort(
         // record segment that requires further sorting
         wrk[wn+0] = i0;
         wrk[wn+1] = seglen;
-        wn += seglen;
+        wn += 2;
       }
       i0 = i;
     }
@@ -174,66 +174,94 @@ void bwt_sort(
     int seglen = srclen - i0;
     wrk[wn+0] = i0;
     wrk[wn+1] = seglen;
-    wn += seglen;
+    wn += 2;
   }
 
   for (int dist = 8; dist < srclen && wn > 0; dist += dist) {
-    int wi = 0;
-    for (int ri = 0; ri < wn; ) {
+    // copy list of segments that require sorting to the upper part of wrk[]
+    int ri = srclen - wn;
+    if (ri != 0)
+      memmove(&wrk[ri], &wrk[0], wn*sizeof(wrk[0]));
+
+    wn = 0;
+    while (ri != srclen) {
       int beg = wrk[ri+0];
       int len = wrk[ri+1];
+      ri += 2;
 
-      for (int i = beg; i < beg+len; ++i) {
-        int32_t y = dst[i] + dist;
-        if (y-srclen >= 0)
-          y = y - srclen;
-        dst[i] = y;
-      }
-      bwt_qsort(&dst[beg], len, ord, &wrk[ri]);
-      int i0 = 0;
-      int v0 = ord[dst[beg]];
-      wrk[ri] = 0;
-      for (int i = 1; i < len; ++i) {
-        int v = ord[dst[beg+i]];
-        i0 = (v != v0) ? i : i0;
-        v0 = v;
-        wrk[ri+i] = i0;
-      }
-      for (int i = beg; i < beg+len; ++i) {
-        int32_t y = dst[i] - dist;
-        if (y < 0)
-          y = y + srclen;
-        dst[i] = y;
-      }
-
-      ord[dst[beg]] = beg;
-      for (int i = 1; i < len; ++i)
-        ord[dst[beg+i]] = wrk[ri+i]+beg;
-      i0 = 0;
-      v0 = 0;
-      for (int i = 1; i < len; ++i) {
-        int v = wrk[ri+i];
-        if (v != v0) {
-          int seglen = i - i0;
-          if (seglen > 1) {
-            // record segment that requires further sorting
-            wrk[wi+0] = beg+i0;
-            wrk[wi+1] = seglen;
-            wi += seglen;
+      if (len == 2) {
+        // very common simple case
+        int32_t y0 = dst[beg+0];
+        int32_t y1 = dst[beg+1];
+        int32_t i0 = y0 + dist; if (i0-srclen >= 0) i0 = i0-srclen;
+        int32_t i1 = y1 + dist; if (i1-srclen >= 0) i1 = i1-srclen;
+        int32_t v0 = ord[i0];
+        int32_t v1 = ord[i1];
+        if (v1 != v0) {
+          if (v1 < v0) {
+            dst[beg+0] = y1;
+            dst[beg+1] = y0;
+            y1 = y0;
           }
-          i0 = i;
+          ++ord[y1];
+        } else {
+          // order still unresolved
+          wrk[wn+0] = beg;
+          wrk[wn+1] = len;
+          wn += 2;
+        }
+      } else {
+        int32_t* pWrk = &wrk[wn];
+        for (int i = beg; i < beg+len; ++i) {
+          int32_t y = dst[i] + dist;
+          if (y-srclen >= 0)
+            y = y - srclen;
+          dst[i] = y;
+        }
+        bwt_qsort(&dst[beg], len, ord, pWrk);
+        int i0 = 0;
+        int v0 = ord[dst[beg]];
+        pWrk[0] = 0;
+        for (int i = 1; i < len; ++i) {
+          int v = ord[dst[beg+i]];
+          i0 = (v != v0) ? i : i0;
           v0 = v;
+          pWrk[i] = i0;
+        }
+        for (int i = beg; i < beg+len; ++i) {
+          int32_t y = dst[i] - dist;
+          if (y < 0)
+            y = y + srclen;
+          dst[i] = y;
+        }
+
+        ord[dst[beg]] = beg;
+        for (int i = 1; i < len; ++i)
+          ord[dst[beg+i]] = pWrk[i]+beg;
+        i0 = 0;
+        v0 = 0;
+        for (int i = 1; i < len; ++i) {
+          int v = pWrk[i];
+          if (v != v0) {
+            int seglen = i - i0;
+            if (seglen > 1) {
+              // record segment that requires further sorting
+              wrk[wn+0] = beg+i0;
+              wrk[wn+1] = seglen;
+              wn += 2;
+            }
+            i0 = i;
+            v0 = v;
+          }
+        }
+        if (len-i0 > 1) {
+          // record segment that requires further sorting
+          int seglen = len-i0;
+          wrk[wn+0] = beg+i0;
+          wrk[wn+1] = seglen;
+          wn += 2;
         }
       }
-      if (len-i0 > 1) {
-        // record segment that requires further sorting
-        int seglen = len-i0;
-        wrk[wi+0] = beg+i0;
-        wrk[wi+1] = seglen;
-        wi += seglen;
-      }
-      ri += len;
     }
-    wn = wi;
   }
 }
