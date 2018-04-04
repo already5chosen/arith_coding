@@ -84,10 +84,10 @@ int CArithmeticDecoder::put(uint64_t cLo, uint64_t cRange)
 int CArithmeticDecoder::extract_1bit(const unsigned range_tab[3], int32_t* pRes)
 {
   unsigned mid = range_tab[1];
-  if (0==mid)
-    return 1;
-  if (VAL_RANGE==mid)
+  if (0==mid || VAL_RANGE==mid) {
+    *pRes = (0==mid);
     return 0;
+  }
   unsigned val = get(VAL_RANGE);
   int res = (val >= mid);
   *pRes = res;
@@ -393,7 +393,7 @@ int decode(
   for (int chunk_i = 0; chunk_i < nChunks; ++chunk_i) {
     pModel->dequantize_and_prepare(&qh[257*chunk_i], maxMaxC);
     const int runsPerChunk = chunk_i == nChunks-1? ARITH_CODER_RUNS_PER_CHUNK*2 : ARITH_CODER_RUNS_PER_CHUNK;
-    for (int run_i = 0; run_i < runsPerChunk; ) {
+    for (int run_i = 0; run_i < runsPerChunk; ++dst_i) {
       #if 0
       uint64_t prod = umulh(invRange, range);
       if (prod > mxProd || prod < mnProd) {
@@ -521,7 +521,7 @@ int decode(
         nxtRange = range << (24 - RANGE_BITS);
         invRange >>= 24;
         if (srclen < -7)
-          return dst_i;
+          return dst - dst0;
         if (value > ((nxtRange<<RANGE_BITS)-1)) {
           return -103; // should not happen
         }

@@ -229,7 +229,7 @@ static int store_model(uint8_t* dst, const uint8_t qh[258], unsigned maxC, doubl
       unsigned* range_tab1 = range_tab[val/2+1];
       unsigned lo1 = range_tab1[val1];
       unsigned ra1 = range_tab1[val1+1] - lo1;
-      if (ra1 != 0)
+      if (ra1 != 0 && ra1 != VAL_RANGE)
         p = pEnc->put(VAL_RANGE, lo1, ra1, p);
     }
   }

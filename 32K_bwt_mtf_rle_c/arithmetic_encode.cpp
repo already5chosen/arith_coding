@@ -339,7 +339,7 @@ static uint8_t* encode_value(uint8_t* dst, unsigned val, const unsigned* range_t
     unsigned bit = val % 2;
     unsigned lo1 = range_tab1[bit];
     unsigned ra1 = range_tab1[bit+1] - lo1;
-    if (ra1 != 0)
+    if (ra1 != 0 && ra1 != VAL_RANGE)
       dst = pEnc->put(VAL_RANGE, lo1, ra1, dst);
     val /= 2;
   } while (val > 1);
