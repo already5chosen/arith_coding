@@ -1,6 +1,7 @@
 #include <cstring>
 #include "bwt_mtf_rle_e.h"
 
+
 // prepare_bwt_sort append first 8 characters to the end of the source
 static void prepare_bwt_sort(uint8_t* src, int srclen)
 {
@@ -8,6 +9,7 @@ static void prepare_bwt_sort(uint8_t* src, int srclen)
     src[srclen+i] = src[i];
 }
 
+#if 1
 static int32_t bwt_qsort_median_of_3(const int32_t* x, int len, const int32_t* ord)
 {
   int32_t y0 = x[0];
@@ -94,20 +96,169 @@ static void bwt_qsort(int32_t* x, int len, const int32_t* ord, int32_t* wrk)
     }
   }
 }
+#endif
+
+#if 0
+static void bwt_mergesort_core(
+  int32_t*       dst,
+  unsigned       len,
+  const int32_t* src1, // [len/2]
+  const int32_t* src2, // [len - len/2]
+  const int32_t* ord)
+{
+  unsigned hlen1 = len / 2;
+  unsigned hlen2 = len - hlen1;
+  const int32_t* end1 = src1 + hlen1;
+  const int32_t* end2 = src2 + hlen2;
+  #if 1
+  int32_t y1 = *src1;
+  int32_t y2 = *src2;
+  int32_t val1 = ord[y1];
+  int32_t val2 = ord[y2];
+  --dst;
+  for (;;) {
+    ++dst;
+    if (val1 <= val2) {
+      *dst = y1;
+      ++src1;
+      if (src1 == end1)
+        break;
+      y1   = *src1;
+      val1 = ord[y1];
+    } else {
+      *dst = y2;
+      ++src2;
+      if (src2 == end2)
+        break;
+      y2   = *src2;
+      val2 = ord[y2];
+    }
+  }
+  ++dst;
+  for (; src1 != end1; ++src1, ++dst)
+    *dst = *src1;
+  for (; src2 != end2; ++src2, ++dst)
+    *dst = *src2;
+  #else
+  int32_t val1_max = ord[end1[-1]];
+  int32_t val2_max = ord[end2[-1]];
+  int32_t y1 = *src1++;
+  int32_t y2 = *src2++;
+  int32_t val1 = ord[y1];
+  int32_t val2 = ord[y2];
+  for (;;) {
+    if (val1_max > val2) {
+      while (val1 <= val2) {
+        *dst++ = y1;
+        y1 = *src1++;
+        val1 = ord[y1];
+      }
+    } else {
+      *dst++ = y1;
+      while (src1 != end1)
+        *dst++ = *src1++;
+      *dst++ = y2;
+      while (src2 != end2)
+        *dst++ = *src2++;
+      break;
+    }
+    if (val2_max > val1) {
+      while (val2 <= val1) {
+        *dst++ = y2;
+        y2 = *src2++;
+        val2 = ord[y2];
+      }
+    } else {
+      *dst++ = y2;
+      while (src2 != end2)
+        *dst++ = *src2++;
+      *dst++ = y1;
+      while (src1 != end1)
+        *dst++ = *src1++;
+      break;
+    }
+  }
+  #endif
+}
+
+static void bwt_mergesort(int32_t* x, unsigned len, const int32_t* ord, int32_t* wrk)
+{
+  if (len > 16) {
+    unsigned hlen1 = len / 2;
+    unsigned qlen1 = hlen1 / 2;
+    bwt_mergesort(&x[0],     qlen1,       ord, wrk);
+    bwt_mergesort(&x[qlen1], hlen1-qlen1, ord, wrk);
+    bwt_mergesort_core(&wrk[0], hlen1, &x[0], &x[qlen1], ord);
+
+    unsigned hlen2 = len - hlen1;
+    unsigned qlen3 = hlen2 / 2;
+    bwt_mergesort(&x[hlen1],       qlen3,       ord, &wrk[hlen1]);
+    bwt_mergesort(&x[hlen1+qlen3], hlen2-qlen3, ord, &wrk[hlen1]);
+    bwt_mergesort_core(&wrk[hlen1], hlen2, &x[hlen1], &x[hlen1+qlen3], ord);
+
+    bwt_mergesort_core(&x[0], len, &wrk[0], &wrk[hlen1], ord);
+    return;
+  }
+
+  // sort by straight insertion
+  int32_t val0 = ord[x[0]];
+  for (int beg = 1; beg < len; ++beg) {
+    int32_t y   = x[beg];
+    int32_t val = ord[y];
+    if (val < val0) {
+      val0 = val;
+      for (int i = 0; i < beg; ++i) {
+        int32_t y1 = x[i];
+        x[i] = y;
+        y = y1;
+      }
+      x[beg] = y;
+    } else {
+      int i;
+      for (i = beg-1; ; --i) {
+        int32_t yi  = x[i];
+        if (ord[yi] <= val)
+          break;
+        x[i+1] = yi;
+      }
+      x[i+1] = y;
+    }
+  }
+}
+#endif
 
 struct flat_rec_t {
-  int32_t key, dat;
+  uint32_t a[2];
+  void set(uint64_t val) {
+    memcpy(a, &val, sizeof(uint64_t));
+  }
+  uint64_t get() const {
+    uint64_t val;
+    memcpy(&val, a, sizeof(uint64_t));
+    return val;
+  }
+  void set(uint32_t key, uint32_t dat) {
+    set((uint64_t(key) << 32)|dat);
+  }
+  uint32_t key() const {
+    return uint32_t(get() >> 32);
+  }
+  uint32_t dat() const {
+    return uint32_t(get());
+  }
 };
 
-static int32_t bwt_flat_qsort_median_of_3(const flat_rec_t* x, unsigned len)
+#if 0
+static uint64_t bwt_flat_qsort_median_of_3(const flat_rec_t* x, unsigned len)
 {
-  int32_t key0 = x[0].key;
-  int32_t key1 = x[len/2].key;
+  uint64_t key0 = x[0].get();
+  uint64_t key1 = x[len/2].get();
   if (key1 < key0) {
+    uint64_t tmp = key0;
     key0 = key1;
-    key1 = x[0].key;
+    key1 = tmp;
   }
-  int32_t key2 = x[len-1].key;
+  uint64_t key2 = x[len-1].get();
   if (key2 <= key0)
     return key0;
   if (key2 <= key1)
@@ -117,16 +268,15 @@ static int32_t bwt_flat_qsort_median_of_3(const flat_rec_t* x, unsigned len)
 static void bwt_flat_qsort(flat_rec_t* x, int len, flat_rec_t* wrk)
 {
   while (len > 16) {
-    int32_t keym = bwt_flat_qsort_median_of_3(x, len);
+    uint64_t valm = bwt_flat_qsort_median_of_3(x, len);
     flat_rec_t* pl = x;
     flat_rec_t* ph = wrk;
     for (int i = 0; i < len; ++i) {
-      flat_rec_t r = x[i];
-      *pl = r;
-      *ph = r;
-      int32_t key = r.key;
-      pl += (key <= keym);
-      ph += (key >  keym);
+      uint64_t val = x[i].get();
+      pl->set(val);
+      ph->set(val);
+      pl += (val <= valm);
+      ph += (val >  valm);
     }
     int h = ph - wrk;
     if (h > 0) {
@@ -140,16 +290,15 @@ static void bwt_flat_qsort(flat_rec_t* x, int len, flat_rec_t* wrk)
         len = l;
       }
     } else {
-      // ord[x[]] <= keym
+      // ord[x[]] <= valm
       pl = x;
       ph = wrk;
       for (int i = 0; i < len; ++i) {
-        flat_rec_t r = x[i];
-        *pl = r;
-        *ph = r;
-        int32_t key = r.key;
-        pl += (key != keym);
-        ph += (key == keym);
+        uint64_t val = x[i].get();
+        pl->set(val);
+        ph->set(val);
+        pl += (val != valm);
+        ph += (val == valm);
       }
       h = ph - wrk;
       len -= h;
@@ -158,30 +307,223 @@ static void bwt_flat_qsort(flat_rec_t* x, int len, flat_rec_t* wrk)
   }
 
   // sort by straight insertion
-  int32_t key0 = x[0].key;
+  uint64_t val0 = x[0].get();
   for (int beg = 1; beg < len; ++beg) {
-    flat_rec_t r = x[beg];
-    int32_t key  = r.key;
-    if (key < key0) {
-      key0 = r.key;
+    uint64_t val = x[beg].get();
+    if (val < val0) {
+      val0 = val;
       for (int i = 0; i < beg; ++i) {
-        flat_rec_t r1 = x[i];
-        x[i] = r;
-        r = r1;
+        uint64_t vali = x[i].get();
+        x[i].set(val);
+        val = vali;
       }
-      x[beg] = r;
+      x[beg].set(val);
     } else {
       int i;
       for (i = beg-1; ; --i) {
-        flat_rec_t ri  = x[i];
-        if (ri.key <= key)
+        uint64_t vali = x[i].get();
+        if (vali <= val)
           break;
-        x[i+1] = ri;
+        x[i+1].set(vali);
       }
-      x[i+1] = r;
+      x[i+1].set(val);
     }
   }
 }
+#endif
+
+static void bwt_flat_mergesort_core(
+  flat_rec_t*       dst,
+  unsigned          len,
+  const flat_rec_t* src1, // [len/2]
+  const flat_rec_t* src2) // [len - len/2]
+{
+  unsigned hlen1 = len / 2;
+  unsigned hlen2 = len - hlen1;
+  const flat_rec_t* end1 = src1 + hlen1;
+  const flat_rec_t* end2 = src2 + hlen2;
+  #if 0
+  uint64_t val1 = src1->get();
+  uint64_t val2 = src2->get();
+  --dst;
+  for (;;) {
+    ++dst;
+    if (val1 <= val2) {
+      dst->set(val1);
+      ++src1;
+      if (src1 == end1)
+        break;
+      val1 = src1->get();
+    } else {
+      dst->set(val2);
+      ++src2;
+      if (src2 == end2)
+        break;
+      val2 = src2->get();
+    }
+  }
+  ++dst;
+  for (; src1 != end1; ++src1, ++dst)
+    *dst = *src1;
+  for (; src2 != end2; ++src2, ++dst)
+    *dst = *src2;
+  #elif 0
+  uint64_t val1_max = end1[-1].get();
+  uint64_t val2_max = end2[-1].get();
+  uint64_t val1 = src1->get();
+  ++src1;
+  uint64_t val2 = src2->get();
+  ++src2;
+  for (;;) {
+    if (val1_max > val2) {
+      while (val1 <= val2) {
+        dst->set(val1);
+        val1 = src1->get();
+        ++dst;
+        ++src1;
+      }
+    } else {
+      --src1;
+      while (src1 != end1)
+        *dst++ = *src1++;
+      --src2;
+      while (src2 != end2)
+        *dst++ = *src2++;
+      break;
+    }
+    if (val2_max > val1) {
+      while (val2 <= val1) {
+        dst->set(val2);
+        val2 = src2->get();
+        ++dst;
+        ++src2;
+      }
+    } else {
+      --src2;
+      while (src2 != end2)
+        *dst++ = *src2++;
+      --src1;
+      while (src1 != end1)
+        *dst++ = *src1++;
+      break;
+    }
+  }
+  #elif 1
+  uint64_t val1_max = end1[-1].get();
+  uint64_t val2_max = end2[-1].get();
+  if (val2_max < val1_max) {
+    val1_max = val2_max;
+    const flat_rec_t* tmp = src1;
+    src1 = src2;
+    src2 = tmp;
+    tmp = end1;
+    end1 = end2;
+    end2 = tmp;
+  }
+  // src1 will reach the end first
+  uint64_t val1 = src1->get();
+  ++src1;
+  uint64_t val2 = src2->get();
+  ++src2;
+  for (;;) {
+    if (val1_max > val2) {
+      while (val1 <= val2) {
+        dst->set(val1);
+        val1 = src1->get();
+        ++dst;
+        ++src1;
+      }
+    } else {
+      --src1;
+      while (src1 != end1)
+        *dst++ = *src1++;
+      --src2;
+      while (src2 != end2)
+        *dst++ = *src2++;
+      break;
+    }
+    while (val2 <= val1) {
+      dst->set(val2);
+      val2 = src2->get();
+      ++dst;
+      ++src2;
+    }
+  }
+  #else
+  uint64_t val1_max = end1[-1].get();
+  uint64_t val2_max = end2[-1].get();
+  if (val2_max < val1_max) {
+    const flat_rec_t* tmp = src1;
+    src1 = src2;
+    src2 = tmp;
+    tmp = end1;
+    end1 = end2;
+    end2 = tmp;
+  }
+  // src1 will reach the end first
+  do {
+    uint64_t val1 = src1->get();
+    uint64_t val2 = src2->get();
+    uint64_t val = val1 <= val2 ? val1 : val2;
+    dst->set(val);
+    int sel1 = (val1 <= val2);
+    src1 += sel1;
+    src2 += sel1 ^ 1;
+    ++dst;
+  } while (src1 != end1);
+  while (src2 != end2)
+    *dst++ = *src2++;
+  #endif
+}
+
+static void bwt_flat_mergesort(
+  flat_rec_t* x,
+  unsigned    len,
+  flat_rec_t* wrk) // wrk[] length = (len+1)/2
+{
+  if (len > 16) {
+    unsigned hlen1 = len / 2;
+    unsigned hlen2 = len - hlen1;
+
+    unsigned qlen3 = hlen2 / 2;
+    bwt_flat_mergesort(&x[hlen1],       qlen3,       &wrk[0]);
+    bwt_flat_mergesort(&x[hlen1+qlen3], hlen2-qlen3, &wrk[0]);
+    bwt_flat_mergesort_core(&wrk[0], hlen2, &x[hlen1], &x[hlen1+qlen3]);
+
+    unsigned qlen1 = hlen1 / 2;
+    bwt_flat_mergesort(&x[0],     qlen1,       &x[hlen1]);
+    bwt_flat_mergesort(&x[qlen1], hlen1-qlen1, &x[hlen1]);
+    bwt_flat_mergesort_core(&x[hlen2], hlen1, &x[0], &x[qlen1]);
+
+    bwt_flat_mergesort_core(&x[0], len, &x[hlen2], &wrk[0]);
+    return;
+  }
+
+  // sort by straight insertion
+  uint64_t val0 = x[0].get();
+  for (int beg = 1; beg < len; ++beg) {
+    uint64_t val = x[beg].get();
+    if (val < val0) {
+      val0 = val;
+      for (int i = 0; i < beg; ++i) {
+        uint64_t vali = x[i].get();
+        x[i].set(val);
+        val = vali;
+      }
+      x[beg].set(val);
+    } else {
+      int i;
+      for (i = beg-1; ; --i) {
+        uint64_t vali = x[i].get();
+        if (vali <= val)
+          break;
+        x[i+1].set(vali);
+      }
+      x[i+1].set(val);
+    }
+  }
+}
+
 
 static inline uint64_t load_8c(const uint8_t* src) {
   uint64_t r;
@@ -196,8 +538,7 @@ static void bwt_sort_flatten(flat_rec_t* dst, const int32_t* src, int len, const
     int32_t idx = y + dist;
     if (idx-srclen >= 0)
       idx = idx - srclen;
-    dst[i].key = ord[idx];
-    dst[i].dat = y;
+    dst[i].set(ord[idx], y);
   }
 }
 
@@ -310,20 +651,20 @@ void bwt_sort(
           wrk[wn+1] = len;
           wn += 2;
         }
-      } else if (len*4 <= ri-wn ) {
+      } else if (len*3+2 <= ri-wn ) {
         // there is sufficient space in the wrk[] to use flat structures
         flat_rec_t* pWrk = reinterpret_cast<flat_rec_t*>(&wrk[wn]);
         bwt_sort_flatten(pWrk, &dst[beg], len, ord, srclen, dist);
-        bwt_flat_qsort(pWrk, len, &pWrk[len]);
+        bwt_flat_mergesort(pWrk, len, &pWrk[len]);
 
-        int v0 = pWrk[0].key;
-        int y0 = pWrk[0].dat;
+        int v0 = pWrk[0].key();
+        int y0 = pWrk[0].dat();
         dst[beg] = y0;
         ord[y0] = beg;
         int i0 = 0;
         for (int i = 1; i < len; ++i) {
-          int v = pWrk[i].key;
-          int y = pWrk[i].dat;
+          int v = pWrk[i].key();
+          int y = pWrk[i].dat();
           if (v != v0) {
             v0 = v;
             int seglen = i - i0;
