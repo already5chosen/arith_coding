@@ -26,12 +26,12 @@ int main(int argz, char** argv)
   FILE* fpinp = fopen(inpfilename, "rb");
   if (fpinp) {
     size_t inpfilename_len = strlen(inpfilename);
-    char* nametag = inpfilename_len < 4 ? inpfilename : &inpfilename[inpfilename_len-4];    
+    char* nametag = inpfilename_len < 4 ? inpfilename : &inpfilename[inpfilename_len-4];
     FILE* fpout = fopen(outfilename, "wb");
     if (fpout) {
       const size_t TILE_SIZE = 1024*1024;
       uint8_t* inptile = new uint8_t[TILE_SIZE+8];
-      std::vector<int32_t> tmpDst;
+      std::vector<uint64_t> tmpDst;
       std::vector<uint32_t> encContext;
       ret = 0;
       int tile_i = 0;
@@ -55,15 +55,16 @@ int main(int argz, char** argv)
           size_t hdrlen = 6;
           int ressz  = 0;
           if (!isSingleCharacter(inptile, tilelen)) {
-            if (tilelen*3+256 > tmpDst.size())
-              tmpDst.resize(tilelen*3+256);
+            size_t tmpDstLen = ((tilelen*3+256)*sizeof(int32_t))/sizeof(uint64_t);
+            if (tmpDstLen > tmpDst.size())
+              tmpDst.resize(tmpDstLen);
             arithmetic_encode_init_context(&encContext, tilelen);
             uint64_t t0 = __rdtsc();
             bwt_sort(&tmpDst.at(0), inptile, tilelen);
             uint64_t t1 = __rdtsc();
             bwt_mtf_rle_meta_t meta;
             int rlesz = bwt_reorder_mtf_rle(  // return length of destination array in octets
-              &tmpDst.at(0), // both input and output
+              reinterpret_cast<int32_t*>(&tmpDst.at(0)), // both input and output
               inptile, tilelen,
               &meta,
               arithmetic_encode_chunk_callback,

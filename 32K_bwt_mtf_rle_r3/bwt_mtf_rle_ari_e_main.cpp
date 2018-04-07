@@ -29,7 +29,7 @@ int main(int argz, char** argv)
     if (fpout) {
       const size_t TILE_SIZE = 1024*1024;
       uint8_t* inptile = new uint8_t[TILE_SIZE+8];
-      std::vector<int32_t> tmpDst;
+      std::vector<uint64_t> tmpDst;
       ret = 0;
       bool done = false;
       while (!done) {
@@ -50,8 +50,9 @@ int main(int argz, char** argv)
           size_t hdrlen = 6;
           int ressz  = 0;
           if (!isSingleCharacter(inptile, tilelen)) {
-            if (tilelen*3+260 > tmpDst.size())
-              tmpDst.resize(tilelen*3+260);
+            size_t tmpDstLen = ((tilelen*3+256)*sizeof(int32_t))/sizeof(uint64_t);
+            if (tmpDstLen > tmpDst.size())
+              tmpDst.resize(tmpDstLen);
             uint32_t encContext[258];
             arithmetic_encode_init_context(encContext);
             uint64_t t0 = __rdtsc();
@@ -59,7 +60,7 @@ int main(int argz, char** argv)
             uint64_t t1 = __rdtsc();
             bwt_mtf_rle_meta_t meta;
             int rlesz = bwt_reorder_mtf_rle(  // return length of destination array in octets
-              &tmpDst.at(0), // both input and output
+              reinterpret_cast<int32_t*>(&tmpDst.at(0)), // both input and output
               inptile, tilelen,
               &meta,
               arithmetic_encode_chunk_callback,
