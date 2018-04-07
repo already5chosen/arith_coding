@@ -1,7 +1,6 @@
 #include <cstring>
 #include "bwt_mtf_rle_e.h"
 
-
 // prepare_bwt_sort append first 8 characters to the end of the source
 static void prepare_bwt_sort(uint8_t* src, int srclen)
 {
@@ -9,7 +8,83 @@ static void prepare_bwt_sort(uint8_t* src, int srclen)
     src[srclen+i] = src[i];
 }
 
-#if 1
+static void bwt_sort_indirect_sort_and_postprocess(int32_t* x, int len, const int32_t* ord, int srclen, int dist, int32_t* wrk)
+{
+  // sort by radix sort.
+  // Since ord[] < 2**24 it is sufficient to sort by 3 8-bit digits
+
+  // offset x[] by dist, calculate histograms
+  unsigned h[3][256] = {{0}};
+  for (int i = 0; i < len; ++i) {
+    int32_t y = x[i] + dist;
+    if (y-srclen >= 0)
+      y = y - srclen;
+    uint32_t val = ord[y];
+    x[i] = y;
+    ++h[0][val & 0xFF];
+    ++h[1][(val >> 8) & 0xFF];
+    ++h[2][(val >> 16)& 0xFF];
+  }
+
+  // integrate histograms
+  unsigned acc0=0, acc1=0, acc2=0;
+  for (int i = 0; i < 256; ++i) {
+    unsigned val0 = h[0][i];
+    unsigned val1 = h[1][i];
+    unsigned val2 = h[2][i];
+    h[0][i] = acc0;
+    h[1][i] = acc1;
+    h[2][i] = acc2;
+    acc0 += val0;
+    acc1 += val1;
+    acc2 += val2;
+  }
+
+  // sorting - 1st pass
+  for (int i = 0; i < len; ++i) {
+    int32_t y = x[i];
+    unsigned c = uint32_t(ord[y]) & 0xFF;
+    unsigned idx = h[0][c];
+    wrk[idx] = y;
+    h[0][c] = idx + 1;
+  }
+
+  // sorting - 2nd pass
+  for (int i = 0; i < len; ++i) {
+    int32_t y = wrk[i];
+    unsigned c = (uint32_t(ord[y]) >> 8) & 0xFF;
+    unsigned idx = h[1][c];
+    x[idx] = y;
+    h[1][c] = idx + 1;
+  }
+
+  // sorting - 3rd pass
+  for (int i = 0; i < len; ++i) {
+    int32_t y = x[i];
+    unsigned c = (uint32_t(ord[y]) >> 16) & 0xFF;
+    unsigned idx = h[2][c];
+    wrk[idx] = y;
+    h[2][c] = idx + 1;
+  }
+
+  // undo offset, fill wrk[] with next ord[]
+  int i0 = 0;
+  int32_t v0 = -1;
+  for (int i = 0; i < len; ++i) {
+    int32_t y = wrk[i];
+    int32_t v = ord[y];
+    i0 = (v != v0) ? i : i0;
+    v0 = v;
+    wrk[i] = i0;
+    y -= dist;
+    if (y < 0)
+      y = y + srclen;
+    x[i] = y;
+  }
+}
+
+
+#if 0
 static int32_t bwt_qsort_median_of_3(const int32_t* x, int len, const int32_t* ord)
 {
   int32_t y0 = x[0];
@@ -618,14 +693,15 @@ void bwt_sort(
     wn += 2;
   }
 
+  int wrklen = srclen + 256;
   for (int dist = 8; dist < srclen && wn > 0; dist += dist) {
     // copy list of segments that require sorting to the upper part of wrk[]
-    int ri = srclen - wn;
+    int ri = wrklen - wn;
     if (ri != 0)
       memmove(&wrk[ri], &wrk[0], wn*sizeof(wrk[0]));
 
     wn = 0;
-    while (ri != srclen) {
+    while (ri != wrklen) {
       int beg = wrk[ri+0];
       int len = wrk[ri+1];
       ri += 2;
@@ -688,36 +764,14 @@ void bwt_sort(
         }
       } else {
         int32_t* pWrk = &wrk[wn];
-        for (int i = beg; i < beg+len; ++i) {
-          int32_t y = dst[i] + dist;
-          if (y-srclen >= 0)
-            y = y - srclen;
-          dst[i] = y;
-        }
-        bwt_qsort(&dst[beg], len, ord, pWrk);
-        int i0 = 0;
-        int v0 = ord[dst[beg]];
-        pWrk[0] = 0;
-        for (int i = 1; i < len; ++i) {
-          int v = ord[dst[beg+i]];
-          i0 = (v != v0) ? i : i0;
-          v0 = v;
-          pWrk[i] = i0;
-        }
-        for (int i = beg; i < beg+len; ++i) {
-          int32_t y = dst[i] - dist;
-          if (y < 0)
-            y = y + srclen;
-          dst[i] = y;
-        }
+        bwt_sort_indirect_sort_and_postprocess(&dst[beg], len, ord, srclen, dist, wrk);
 
         ord[dst[beg]] = beg;
-        for (int i = 1; i < len; ++i)
-          ord[dst[beg+i]] = pWrk[i]+beg;
-        i0 = 0;
-        v0 = 0;
+        int i0 = 0;
+        int32_t v0 = 0;
         for (int i = 1; i < len; ++i) {
-          int v = pWrk[i];
+          int32_t v = pWrk[i];
+          ord[dst[beg+i]] = v+beg;
           if (v != v0) {
             int seglen = i - i0;
             if (seglen > 1) {
