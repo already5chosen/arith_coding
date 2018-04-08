@@ -8,6 +8,22 @@ static void prepare_bwt_sort(uint8_t* src, int srclen)
     src[srclen+i] = src[i];
 }
 
+static void integrate_histograms(unsigned h[3][256])
+{ // integrate histograms
+  unsigned acc0=0, acc1=0, acc2=0;
+  for (int i = 0; i < 256; ++i) {
+    unsigned val0 = h[0][i];
+    unsigned val1 = h[1][i];
+    unsigned val2 = h[2][i];
+    h[0][i] = acc0;
+    h[1][i] = acc1;
+    h[2][i] = acc2;
+    acc0 += val0;
+    acc1 += val1;
+    acc2 += val2;
+  }
+}
+
 static void bwt_sort_indirect_sort_and_postprocess(int32_t* x, int len, const int32_t* ord, int srclen, int dist, int32_t* wrk)
 {
   // sort by radix sort.
@@ -26,19 +42,7 @@ static void bwt_sort_indirect_sort_and_postprocess(int32_t* x, int len, const in
     ++h[2][(val >> 16)& 0xFF];
   }
 
-  // integrate histograms
-  unsigned acc0=0, acc1=0, acc2=0;
-  for (int i = 0; i < 256; ++i) {
-    unsigned val0 = h[0][i];
-    unsigned val1 = h[1][i];
-    unsigned val2 = h[2][i];
-    h[0][i] = acc0;
-    h[1][i] = acc1;
-    h[2][i] = acc2;
-    acc0 += val0;
-    acc1 += val1;
-    acc2 += val2;
-  }
+  integrate_histograms(h);
 
   // sorting - 1st pass
   for (int i = 0; i < len; ++i) {
@@ -518,29 +522,10 @@ static void bwt_flat_mergesort_core(
   #endif
 }
 
-static void bwt_flat_mergesort(
+static void bwt_flat_straigh_insertion_sort(
   uint64_t* x,
-  unsigned  len,
-  uint64_t* wrk) // wrk[] length = (len+1)/2
+  unsigned  len)
 {
-  if (len > 16) {
-    unsigned hlen1 = len / 2;
-    unsigned hlen2 = len - hlen1;
-
-    unsigned qlen3 = hlen2 / 2;
-    bwt_flat_mergesort(&x[hlen1],       qlen3,       &wrk[0]);
-    bwt_flat_mergesort(&x[hlen1+qlen3], hlen2-qlen3, &wrk[0]);
-    bwt_flat_mergesort_core(&wrk[0], hlen2, &x[hlen1], &x[hlen1+qlen3]);
-
-    unsigned qlen1 = hlen1 / 2;
-    bwt_flat_mergesort(&x[0],     qlen1,       &x[hlen1]);
-    bwt_flat_mergesort(&x[qlen1], hlen1-qlen1, &x[hlen1]);
-    bwt_flat_mergesort_core(&x[hlen2], hlen1, &x[0], &x[qlen1]);
-
-    bwt_flat_mergesort_core(&x[0], len, &x[hlen2], &wrk[0]);
-    return;
-  }
-
   // sort by straight insertion
   uint64_t val0 = x[0];
   for (int beg = 1; beg < len; ++beg) {
@@ -566,11 +551,31 @@ static void bwt_flat_mergesort(
   }
 }
 
+static void bwt_flat_mergesort(
+  uint64_t* x,
+  unsigned  len,
+  uint64_t* wrk) // wrk[] length = (len+1)/2
+{
+  if (len > 16) {
+    unsigned hlen1 = len / 2;
+    unsigned hlen2 = len - hlen1;
 
-static inline uint64_t load_8c(const uint8_t* src) {
-  uint64_t r;
-  memcpy(&r, src, sizeof(r));
-  return r;
+    unsigned qlen3 = hlen2 / 2;
+    bwt_flat_mergesort(&x[hlen1],       qlen3,       &wrk[0]);
+    bwt_flat_mergesort(&x[hlen1+qlen3], hlen2-qlen3, &wrk[0]);
+    bwt_flat_mergesort_core(&wrk[0], hlen2, &x[hlen1], &x[hlen1+qlen3]);
+
+    unsigned qlen1 = hlen1 / 2;
+    bwt_flat_mergesort(&x[0],     qlen1,       &x[hlen1]);
+    bwt_flat_mergesort(&x[qlen1], hlen1-qlen1, &x[hlen1]);
+    bwt_flat_mergesort_core(&x[hlen2], hlen1, &x[0], &x[qlen1]);
+
+    bwt_flat_mergesort_core(&x[0], len, &x[hlen2], &wrk[0]);
+    return;
+  }
+
+  // sort by straight insertion
+  bwt_flat_straigh_insertion_sort(x, len);
 }
 
 static void bwt_sort_flatten(uint64_t* dst, const int32_t* src, int len, const int32_t* ord, int srclen, int dist)
@@ -582,6 +587,164 @@ static void bwt_sort_flatten(uint64_t* dst, const int32_t* src, int len, const i
       idx = idx - srclen;
     dst[i] = (uint64_t(uint32_t(ord[idx])) << 32) | uint32_t(y);
   }
+}
+
+static void bwt_sort_flatten_and_count(
+  uint64_t*      dst,
+  const int32_t* src,
+  int            len,
+  const int32_t* ord,
+  int            srclen,
+  int            dist,
+  unsigned       h[3][256])
+{
+  for (int i = 0; i < len; ++i) {
+    int32_t y = src[i];
+    int32_t idx = y + dist;
+    if (idx-srclen >= 0)
+      idx = idx - srclen;
+    uint32_t key = ord[idx];
+    dst[i] = (uint64_t(key) << 32) | uint32_t(y);
+    ++h[0][key & 0xFF];
+    ++h[1][(key >> 8) & 0xFF];
+    ++h[2][(key >> 16) & 0xFF];
+  }
+}
+
+#if 0
+static void bwt_flatten_and_radixsort(
+  const int32_t* src,
+  int            len,
+  const int32_t* ord,
+  int            srclen,
+  int            dist,
+  uint64_t*      dst,
+  uint64_t*      wrk)
+{
+  unsigned h[3][256] = {{0}};
+  bwt_sort_flatten_and_count(wrk, src, len, ord, srclen, dist, h);
+
+  integrate_histograms(h);
+
+  // sorting - 1st pass. wrk->dst
+  for (int i = 0; i < len; ++i) {
+    uint64_t val = wrk[i];
+    unsigned c = (val >> (8*4)) & 0xFF;
+    unsigned idx = h[0][c];
+    dst[idx] = val;
+    h[0][c] = idx + 1;
+  }
+
+  // sorting - 2nd pass. dst->wrk
+  for (int i = 0; i < len; ++i) {
+    uint64_t val = dst[i];
+    unsigned c = (val >> (8*5)) & 0xFF;
+    unsigned idx = h[1][c];
+    wrk[idx] = val;
+    h[1][c] = idx + 1;
+  }
+
+  // sorting - 3rd pass. wrk->dst
+  for (int i = 0; i < len; ++i) {
+    uint64_t val = wrk[i];
+    unsigned c = (val >> (8*6)) & 0xFF;
+    unsigned idx = h[2][c];
+    dst[idx] = val;
+    h[2][c] = idx + 1;
+  }
+}
+#endif
+
+static void bwt_flat_radixsort_core(uint64_t* dst, const uint64_t* src, unsigned len, unsigned h[256], unsigned shift)
+{
+#if 0
+  for (unsigned i = 0; i < len; ++i) {
+    uint64_t val = src[i];
+    unsigned c = (val >> shift) & 0xFF;
+    unsigned idx = h[c];
+    dst[idx] = val;
+    h[c] = idx + 1;
+  }
+#else
+  if (len % 2) {
+    uint64_t val = src[0];
+    unsigned c = (val >> shift) & 0xFF;
+    unsigned idx = h[c];
+    dst[idx] = val;
+    h[c] = idx + 1;
+    ++src;
+  }
+  unsigned hlen = len / 2;
+  for (unsigned i = 0; i < hlen; ++i) {
+    uint64_t val0 = src[i*2+0];
+    uint64_t val1 = src[i*2+1];
+    unsigned c0 = (val0 >> shift) & 0xFF;
+    unsigned c1 = (val1 >> shift) & 0xFF;
+    unsigned idx0 = h[c0];
+    unsigned idx1 = h[c1];
+
+    h[c0] = idx0 + 1;
+    idx1 = (c0 == c1) ? idx0 + 1 : idx1;
+    h[c1] = idx1 + 1;
+
+    dst[idx0] = val0;
+    dst[idx1] = val1;
+  }
+#endif
+}
+
+static void bwt_flatten_and_radixsort(
+  const int32_t* src,
+  int            len,
+  const int32_t* ord,
+  int            srclen,
+  int            dist,
+  uint64_t*      dst,
+  uint64_t*      wrk)
+{
+  unsigned h[3][256] = {{0}};
+  bwt_sort_flatten_and_count(wrk, src, len, ord, srclen, dist, h);
+  integrate_histograms(h);
+  // sorting - 1st pass. wrk->dst
+  bwt_flat_radixsort_core(dst, wrk, len, h[0], 8*4);
+  // sorting - 2nd pass. dst->wrk
+  bwt_flat_radixsort_core(wrk, dst, len, h[1], 8*5);
+  // sorting - 3rd pass. wrk->dst
+  bwt_flat_radixsort_core(dst, wrk, len, h[2], 8*6);
+}
+
+static void bwt_flatten_and_sort(
+  int32_t*       src,
+  unsigned       len,
+  const int32_t* ord,
+  int            srclen,
+  int            dist,
+  uint64_t*      wrk,
+  int            wrklen) // wrklen >= (len*3+1)/2
+{
+  if (len <= 512) {
+    bwt_sort_flatten(wrk, src, len, ord, srclen, dist);
+    if (len <= 32)
+      bwt_flat_straigh_insertion_sort(wrk, len);
+    else
+      bwt_flat_mergesort(wrk, len, &wrk[len]);
+  } else {
+    if (len*2 <= wrklen) {
+      bwt_flatten_and_radixsort(src, len, ord, srclen, dist, &wrk[0], &wrk[len]);
+    } else {
+      unsigned hlen1 = len/2;
+      unsigned hlen2 = len-hlen1;
+      bwt_flatten_and_radixsort(&src[0],     hlen1, ord, srclen, dist, &wrk[hlen2], &wrk[len]);
+      bwt_flatten_and_radixsort(&src[hlen1], hlen2, ord, srclen, dist, &wrk[len],   &wrk[0]);
+      bwt_flat_mergesort_core(&wrk[0], len, &wrk[hlen2], &wrk[len]);
+    }
+  }
+}
+
+static inline uint64_t load_8c(const uint8_t* src) {
+  uint64_t r;
+  memcpy(&r, src, sizeof(r));
+  return r;
 }
 
 void bwt_sort(
@@ -691,11 +854,10 @@ void bwt_sort(
           wrk[wn] = (uint64_t(beg) << 32) + uint32_t(len);
           wn += 1;
         }
-      } else if (len*3+2 <= (ri-wn)*2 ) {
+      } else if (len*3+2 <= (ri-wn)*2) {
         // there is sufficient space in the wrk[] to use flat structures
         uint64_t* pWrk = &wrk[wn];
-        bwt_sort_flatten(pWrk, &dst[beg], len, ord, srclen, dist);
-        bwt_flat_mergesort(pWrk, len, &pWrk[len]);
+        bwt_flatten_and_sort(&dst[beg], len, ord, srclen, dist, pWrk, ri-wn);
 
         int v0 = uint32_t(pWrk[0] >> 32);
         int y0 = uint32_t(pWrk[0]);
