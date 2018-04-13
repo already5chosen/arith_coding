@@ -1,10 +1,5 @@
 #include <stdint.h>
 
-void bwt_sort(
-  uint64_t* dst_tmp, // length = ((srclen*3+256)*sizeof(int32_t))/sizeof(uint64_t)
-  uint8_t* src,     // length = srclen+8, characters [srclen..srclen+7] modified, others preserved
-  int      srclen);
-
 typedef struct {
  int32_t nRuns;            // number of runs in the destination array
  int32_t bwtPrimaryIndex;

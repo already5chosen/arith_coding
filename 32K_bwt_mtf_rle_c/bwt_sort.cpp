@@ -1,5 +1,5 @@
 #include <cstring>
-#include "bwt_mtf_rle_e.h"
+#include "bwt_sort.h"
 
 // prepare_bwt_sort append first 8 characters to the end of the source
 static void prepare_bwt_sort(uint8_t* src, int srclen)

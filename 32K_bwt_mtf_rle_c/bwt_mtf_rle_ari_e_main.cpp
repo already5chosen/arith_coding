@@ -4,6 +4,7 @@
 #include <vector>
 #include <x86intrin.h>
 
+#include "bwt_sort.h"
 #include "bwt_mtf_rle_e.h"
 #include "arithmetic_encode.h"
 

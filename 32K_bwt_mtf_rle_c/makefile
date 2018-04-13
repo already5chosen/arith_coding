@@ -2,13 +2,13 @@ CC = clang++ -std=c++11 -O2 -Wall -DENABLE_PERF_COUNTx
 
 all: bwt_ari_encode.exe bwt_ari_decode.exe
 
-bwt_sort.o: bwt_sort.cpp bwt_mtf_rle_e.h
+bwt_sort.o: bwt_sort.cpp bwt_sort.h
 	${CC} -c $<
 
 bwt_mtf_rle_e.o: bwt_mtf_rle_e.cpp bwt_mtf_rle_e.h
 	${CC} -c $<
 
-bwt_mtf_rle_ari_e_main.o: bwt_mtf_rle_ari_e_main.cpp bwt_mtf_rle_e.h arithmetic_encode.h
+bwt_mtf_rle_ari_e_main.o: bwt_mtf_rle_ari_e_main.cpp bwt_sort.h bwt_mtf_rle_e.h arithmetic_encode.h
 	${CC} -c $<
 
 arithmetic_encode.o: arithmetic_encode.cpp arithmetic_encode.h arithmetic_coder_ut.h arithmetic_coder_cfg.h
