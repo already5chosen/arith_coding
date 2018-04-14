@@ -2,7 +2,7 @@
 #include <vector>
 
 void arithmetic_encode_init_context(std::vector<uint32_t>* context, int tilelen);
-int  arithmetic_encode_chunk_callback(void* context, const uint8_t* chunk, int chunklen, int nRuns);
+int  arithmetic_encode_chunk_callback(void* context, const uint8_t* chunk, int chunklen, int nSymbols);
 
 // return value:
 //  0 - not compressible, because all input characters have approximately equal probability or because input is too short

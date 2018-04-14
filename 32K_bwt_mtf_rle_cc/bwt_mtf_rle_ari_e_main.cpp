@@ -63,11 +63,11 @@ int main(int argz, char** argv)
             uint64_t t0 = __rdtsc();
             bwt_sort(&tmpDst.at(0), inptile, tilelen);
             uint64_t t1 = __rdtsc();
-            bwt_mtf_rle_meta_t meta;
+            int bwtPrimaryIndex;
             int rlesz = bwt_reorder_mtf_rle(  // return length of destination array in octets
               reinterpret_cast<int32_t*>(&tmpDst.at(0)), // both input and output
               inptile, tilelen,
-              &meta,
+              &bwtPrimaryIndex,
               arithmetic_encode_chunk_callback,
               &encContext);
             uint64_t t2 = __rdtsc();
@@ -98,7 +98,7 @@ int main(int argz, char** argv)
             if (ressz > 0) {
               // normal compression
               storeAs3octets(&hdr[3], ressz);
-              storeAs3octets(&hdr[6], meta.bwtPrimaryIndex);
+              storeAs3octets(&hdr[6], bwtPrimaryIndex);
               hdrlen = 9;
               pRes = ariEncDst;
             } else {

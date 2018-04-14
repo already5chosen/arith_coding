@@ -2,15 +2,16 @@
 
 #include "bwt_mtf_rle_e.h"
 
-static uint8_t* insertZeroRun(uint8_t* dst, unsigned zRunLen)
+static int insertZeroRun(uint8_t* dst, unsigned zRunLen)
 { // encode length of zero run by method similar to bzip2' RUNA/RUNB
+  uint8_t* dst0 = dst;
   zRunLen += 1;
   do {
     int c = zRunLen % 2;
     *dst++ = c;
     zRunLen /= 2;
   } while (zRunLen > 1);
-  return dst;
+  return dst-dst0;
 }
 
 // return value - the length of destination array in octets
@@ -20,20 +21,19 @@ int bwt_reorder_mtf_rle(
                               // on output - result of BWT followed by move-to-front and by zero-run-len encoding
  const uint8_t*      src,
  int                 srclen,
- bwt_mtf_rle_meta_t* pMeta,
+ int*                pBwtPrimaryIndex,
  int                 (*chunkCallback)(void* context, const uint8_t* chunk, int nSymbols, int nRuns),
  void*               chunkCallbackContext)
 {
   // initialize callback machinery
-  const int runsPerChunk = chunkCallback(chunkCallbackContext, 0, 0, 0);
+  const int symbolsPerChunk = chunkCallback(chunkCallbackContext, 0, 0, 0);
 
   // initialize move-to-front encoder table
   uint8_t t[256];
   for (int i = 0; i < 256; ++i)
     t[i] = i;
 
-  pMeta->nRuns = 0;
-  int chunkRuns = 0;
+  int symbolsInChunk = 0;
   uint8_t* dst = reinterpret_cast<uint8_t*>(idx_dst);
   uint8_t* chunk = dst;
   unsigned zRunLen = 0;
@@ -42,7 +42,7 @@ int bwt_reorder_mtf_rle(
     if (k == 0)
       k = srclen;
     if (k == 1)
-      pMeta->bwtPrimaryIndex = i;
+      *pBwtPrimaryIndex = i;
     uint8_t c = src[k-1];
 
     // move-to-front encoder
@@ -52,9 +52,16 @@ int bwt_reorder_mtf_rle(
       ++zRunLen;
     } else {
       if (zRunLen != 0) {
-        dst = insertZeroRun(dst, zRunLen);
+        int nSym = insertZeroRun(dst, zRunLen);
+        dst += nSym;
         zRunLen = 0;
-        ++chunkRuns;
+        symbolsInChunk += nSym;
+        if (symbolsInChunk >= symbolsPerChunk) {
+          symbolsInChunk -= symbolsPerChunk;
+          int chunklen = dst - chunk - symbolsInChunk;
+          chunkCallback(chunkCallbackContext, chunk, chunklen, symbolsPerChunk);
+          chunk += chunklen;
+        }
       }
       t[0] = c;
       int v0 = v1, k;
@@ -71,22 +78,21 @@ int bwt_reorder_mtf_rle(
         *dst = mtfC;
       }
       ++dst;
-      ++chunkRuns;
-      if (chunkRuns >= runsPerChunk) {
-        chunkCallback(chunkCallbackContext, chunk, dst - chunk, chunkRuns);
+      ++symbolsInChunk;
+      if (symbolsInChunk == symbolsPerChunk) {
+        chunkCallback(chunkCallbackContext, chunk, dst - chunk, symbolsPerChunk);
         chunk = dst;
-        pMeta->nRuns += runsPerChunk;
-        chunkRuns = 0;
+        symbolsInChunk = 0;
       }
     }
   }
   if (zRunLen != 0) {
-    dst = insertZeroRun(dst, zRunLen);
-    ++chunkRuns;
+    int nSym = insertZeroRun(dst, zRunLen);
+    dst += nSym;
+    symbolsInChunk += nSym;
   }
-  if (chunkRuns != 0) {
-    chunkCallback(chunkCallbackContext, chunk, dst - chunk, chunkRuns);
-    pMeta->nRuns += chunkRuns;
+  if (symbolsInChunk != 0) {
+    chunkCallback(chunkCallbackContext, chunk, dst - chunk, symbolsInChunk);
   }
 
   return dst - reinterpret_cast<uint8_t*>(idx_dst); // return the length of destination array in octets

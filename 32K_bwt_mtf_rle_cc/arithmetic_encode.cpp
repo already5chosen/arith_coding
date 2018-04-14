@@ -31,7 +31,7 @@ struct context_chunk_c2low_t {
 enum {
   // context header
   CONTEXT_HDR_NCHUNKS_I = 0,
-  CONTEXT_HDR_LASTRUN_I,
+  CONTEXT_HDR_LASTNSYM_I,
   CONTEXT_HDR_COMMON_HLEN_I,
   CONTEXT_HDR_COMMON_NRANGES,
   CONTEXT_HDR_CHUNK_MAX_HLEN_I,
@@ -61,20 +61,20 @@ static inline size_t GetContextLength(int nChunks) {
 
 void arithmetic_encode_init_context(std::vector<uint32_t>* context, int tilelen)
 {
-  int nChunks = tilelen/(ARITH_CODER_RUNS_PER_CHUNK*2) + 1; // estimate # of chunks
+  int nChunks = tilelen/(ARITH_CODER_SYMBOLS_PER_CHUNK*2) + 1; // estimate # of chunks
   resize_up(context, GetContextLength(nChunks));
   (*context)[CONTEXT_HDR_NCHUNKS_I] = 0;
-  (*context)[CONTEXT_HDR_LASTRUN_I] = 0;
+  (*context)[CONTEXT_HDR_LASTNSYM_I] = 0;
 }
 
-int arithmetic_encode_chunk_callback(void* context, const uint8_t* src, int chunklen, int nRuns)
+int arithmetic_encode_chunk_callback(void* context, const uint8_t* src, int chunklen, int nSymbols)
 {
   if (src) {
     std::vector<uint32_t>* vec = static_cast<std::vector<uint32_t>*>(context);
     uint32_t chunk_i = (*vec)[CONTEXT_HDR_NCHUNKS_I];
     resize_up(vec, GetContextLength(chunk_i+1));
     (*vec)[CONTEXT_HDR_NCHUNKS_I] = chunk_i + 1;
-    (*vec)[CONTEXT_HDR_LASTRUN_I] = nRuns;
+    (*vec)[CONTEXT_HDR_LASTNSYM_I] = nSymbols;
 
     // calculate histogram
     uint32_t histogram[257]={0};
@@ -112,7 +112,7 @@ int arithmetic_encode_chunk_callback(void* context, const uint8_t* src, int chun
     dynHistogram[ARITH_CODER_N_DYNAMIC_SYMBOLS-1] = commonTot;
     memcpy(dynHistogram, histogram, sizeof(*dynHistogram)*(ARITH_CODER_N_DYNAMIC_SYMBOLS-1));
   }
-  return ARITH_CODER_RUNS_PER_CHUNK;
+  return ARITH_CODER_SYMBOLS_PER_CHUNK;
 }
 
 static void quantize_histogram(uint8_t* __restrict qh, const uint32_t *h, int len, uint32_t hTot)
@@ -136,8 +136,8 @@ static void quantize_histogram(uint8_t* __restrict qh, const uint32_t *h, int le
 static void prepare1(uint32_t * context, double* pInfo)
 {
   int nChunks = context[CONTEXT_HDR_NCHUNKS_I];
-  int runsInLastChunk = context[CONTEXT_HDR_LASTRUN_I];
-  if (runsInLastChunk < ARITH_CODER_RUNS_PER_CHUNK/2 && nChunks > 1) {
+  int symbolsInLastChunk = context[CONTEXT_HDR_LASTNSYM_I];
+  if (symbolsInLastChunk < ARITH_CODER_SYMBOLS_PER_CHUNK/2 && nChunks > 1) {
     // add last chunk to before-last
     uint32_t* dstChunk = &context[CONTEXT_HDR_LEN+CONTEXT_CHUNK_H_LEN*(nChunks-2)];
     uint32_t* srcChunk = &context[CONTEXT_HDR_LEN+CONTEXT_CHUNK_H_LEN*(nChunks-1)];

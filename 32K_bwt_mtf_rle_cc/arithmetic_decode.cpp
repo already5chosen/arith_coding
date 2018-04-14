@@ -399,6 +399,8 @@ int decode(
   uint8_t mtf_t[256];
   for (int i = 0; i < 256; ++i)
     mtf_t[i] = i;
+  // initialize RLE decoder
+  uint32_t rlMsb = 1;
 
   const uint64_t MIN_RANGE = uint64_t(1) << (33-RANGE_BITS);
   const double INV_RANGE_SCALE = double(int64_t(1) << (54-RANGE_BITS)) * (int64_t(1) << 43); // 2**(97-rb)
@@ -428,20 +430,24 @@ int decode(
     }
 
     int nChunkRanges = chunkModel.dequantize_and_prepare(chunkQh, maxChunkHlen);
-    const int runsPerChunk = chunk_i == nChunks-1? ARITH_CODER_RUNS_PER_CHUNK*2 : ARITH_CODER_RUNS_PER_CHUNK;
+    const int symbolsPerChunk = chunk_i == nChunks-1? ARITH_CODER_SYMBOLS_PER_CHUNK*2+32 : ARITH_CODER_SYMBOLS_PER_CHUNK;
     arithmetic_decode_model_t* pDefaultModel = &chunkModel;
     int theOnlyChunkC = 0;
+    int sym_i_incr_at_common = 0;
     if (nChunkRanges <= 1) {
       if (__builtin_expect(nChunkRanges == 0, 0))
         return -22; // chunk has to contain something
       theOnlyChunkC = chunkModel.m_c2low[0];
       if (__builtin_expect(theOnlyChunkC < 2, 0))
         return -23; // chunk has to contain non-zero runs
-      pDefaultModel = theOnlyChunkC==ARITH_CODER_N_DYNAMIC_SYMBOLS-1 ? &commonModel : 0;
+      pDefaultModel = 0;
+      if (theOnlyChunkC==ARITH_CODER_N_DYNAMIC_SYMBOLS-1) {
+        pDefaultModel = &commonModel;
+        sym_i_incr_at_common = 1;
+      }
     }
 
-    uint32_t rlMsb = 1;
-    for (int run_i = 0; run_i < runsPerChunk && dstlen != 0; ) {
+    for (int sym_i = 0; sym_i < symbolsPerChunk && dstlen != 0; ) {
       arithmetic_decode_model_t* pModel = pDefaultModel;
       for(;;++dst_i) {
         int c = theOnlyChunkC;
@@ -533,33 +539,38 @@ int decode(
           // RLE decode
           if (pModel == &commonModel) {
             c += ARITH_CODER_N_DYNAMIC_SYMBOLS-1;
-          } else if (c < 2) {
-            // zero run
-            uint32_t delta_rl = (c+1) * rlMsb;
-            rlMsb += rlMsb;
-
-            if (delta_rl > uint32_t(dstlen))
-              return -24; // zero run too long (A)
-
-            // insert zero run
-            int c0 = mtf_t[0];
-            histogram[c0] += delta_rl;
-            memset(dst, c0, delta_rl);
-            dst    += delta_rl;
-            dstlen -= delta_rl;
-            break; // don't do MTF decode
+            sym_i += sym_i_incr_at_common;
           } else {
-            run_i += (rlMsb > 1);
-            rlMsb = 1;
-            if (c == ARITH_CODER_N_DYNAMIC_SYMBOLS-1) {
-              if (theOnlyCommonC != 0) {
-                c = theOnlyCommonC;
-              } else {
-                pModel = &commonModel;
-                continue; // don't do MTF decode
+            ++sym_i;
+            if (c < 2) {
+              // zero run
+              uint32_t delta_rl = (c+1) * rlMsb;
+              rlMsb += rlMsb;
+
+              if (delta_rl > uint32_t(dstlen))
+                return -24; // zero run too long (A)
+
+              // insert zero run
+              int c0 = mtf_t[0];
+              histogram[c0] += delta_rl;
+              memset(dst, c0, delta_rl);
+              dst    += delta_rl;
+              dstlen -= delta_rl;
+              break; // don't do MTF decode
+            } else {
+              rlMsb = 1;
+              if (c == ARITH_CODER_N_DYNAMIC_SYMBOLS-1) {
+                if (theOnlyCommonC != 0) {
+                  c = theOnlyCommonC;
+                } else {
+                  pModel = &commonModel;
+                  continue; // don't do MTF decode
+                }
               }
             }
           }
+        } else {
+          ++sym_i;
         }
 
         // MTF decode
@@ -571,7 +582,6 @@ int decode(
         // update move-to-front decoder table
         memmove(&mtf_t[1], &mtf_t[0], mtfC);
         mtf_t[0] = dstC;
-        ++run_i;
         break;
       }
     }
@@ -607,7 +617,7 @@ int arithmetic_decode(
   if (nChunks < 0)
     return nChunks;
 
-  if (nChunks > 1 && nChunks * ARITH_CODER_RUNS_PER_CHUNK - ARITH_CODER_RUNS_PER_CHUNK/2 > dstlen)
+  if (nChunks > 1 && nChunks * ARITH_CODER_SYMBOLS_PER_CHUNK - ARITH_CODER_SYMBOLS_PER_CHUNK/2 > dstlen)
     return -16;
   // printf("nChunks=%d\n", nChunks);
 
