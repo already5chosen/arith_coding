@@ -507,8 +507,8 @@ static int encode(uint8_t* dst, const uint8_t* src, const uint32_t* context, CAr
 {
   const uint64_t MSB_MSK   = uint64_t(255) << 56;
   const uint64_t MIN_RANGE = uint64_t(1) << (33-RANGE_BITS);
-  uint64_t lo     = pEnc->m_lo << 1;              // scaled by 2**64
-  uint64_t range  = pEnc->m_range >> (RANGE_BITS-1); // scaled by 2**50
+  uint64_t lo     = pEnc->m_lo << 1;                 // scaled by 2**64
+  uint64_t range  = pEnc->m_range >> (RANGE_BITS-1); // scaled by 2**(64-RANGE_BITS)
   uint8_t* dst0   = dst;
   uint64_t prevLo = lo;
   // int dbg_i = 0;

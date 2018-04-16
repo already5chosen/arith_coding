@@ -290,12 +290,11 @@ static double prepare2(uint32_t * context)
 class CArithmeticEncoder {
 public:
   uint8_t* put(uint64_t cScale, uint64_t cLo, uint64_t cRange, uint8_t* dst);
-  void spillOverflow(uint8_t* dst);
   void init() {
     m_lo = 0;
     m_range = uint64_t(1) << 63;
   }
-  uint64_t m_lo;    // scaled by 2**63
+  uint64_t m_lo;    // scaled by 2**64
   uint64_t m_range; // scaled by 2**63
 };
 
@@ -488,7 +487,6 @@ static int store_model(uint8_t* dst, uint32_t * context, double* pNbits, CArithm
     }
   }
   dst = store_model_store_data(dst, qHistogram, chunkMaxHlen, CONTEXT_CHUNK_QH_LEN, nChunks, pEnc);
-  pEnc->spillOverflow(dst);
 
   int len = dst - dst0;
   *pNbits = len*8.0 + 63 - log2(pEnc->m_range);
@@ -507,8 +505,8 @@ static int encode(uint8_t* dst, const uint8_t* src, const uint32_t* context, CAr
 {
   const uint64_t MSB_MSK   = uint64_t(255) << 56;
   const uint64_t MIN_RANGE = uint64_t(1) << (33-RANGE_BITS);
-  uint64_t lo     = pEnc->m_lo << 1;              // scaled by 2**64
-  uint64_t range  = pEnc->m_range >> (RANGE_BITS-1); // scaled by 2**50
+  uint64_t lo     = pEnc->m_lo;                      // scaled by 2**64
+  uint64_t range  = pEnc->m_range >> (RANGE_BITS-1); // scaled by 2**(64-RANGE_BITS)
   uint8_t* dst0   = dst;
   uint64_t prevLo = lo;
   // int dbg_i = 0;
@@ -597,21 +595,20 @@ static int encode(uint8_t* dst, const uint8_t* src, const uint32_t* context, CAr
 uint8_t* CArithmeticEncoder::put(uint64_t cScale, uint64_t cLo, uint64_t cRange, uint8_t* dst)
 {
   const uint64_t MIN_RANGE = uint64_t(1) << (33-1);
-  const uint64_t BIT_63    = uint64_t(1) << 63;
-  const uint64_t MSK_63    = BIT_63 - 1;
   uint64_t range = m_range / cScale;
-  uint64_t lo = m_lo + range * cLo;
+  uint64_t lo = m_lo + range * cLo * 2;
   range *= cRange;
+
+  if (lo < m_lo) // lo overflow
+    inc_dst(dst);
 
   if (range <= MIN_RANGE) {
     // re-normalize
-    if (lo >= BIT_63) // lo overflow
-      inc_dst(dst);
-    dst[0] = lo >> (63-8*1);
-    dst[1] = lo >> (63-8*2);
-    dst[2] = lo >> (63-8*3);
+    dst[0] = lo >> (64-8*1);
+    dst[1] = lo >> (64-8*2);
+    dst[2] = lo >> (64-8*3);
     dst += 3;
-    lo = (lo << 24) & MSK_63;
+    lo    <<= 24;
     range <<= 24;
   }
   m_lo    = lo;
@@ -619,17 +616,7 @@ uint8_t* CArithmeticEncoder::put(uint64_t cScale, uint64_t cLo, uint64_t cRange,
   return dst;
 }
 
-void CArithmeticEncoder::spillOverflow(uint8_t* dst)
-{
-  const uint64_t BIT_63 = uint64_t(1) << 63;
-  const uint64_t MSK_63 = BIT_63 - 1;
-  if (m_lo >= BIT_63) // lo overflow
-    inc_dst(dst);
-  m_lo &= MSK_63;
-}
-
 // return value:
-// -1 - source consists of repetition of the same character
 //  0 - not compressible, because all input characters have approximately equal probability or because input is too short
 // >0 - the length of compressed buffer
 int arithmetic_encode(uint32_t* context, uint8_t* dst, const uint8_t* src, int nRuns, int origlen, double* pInfo)
