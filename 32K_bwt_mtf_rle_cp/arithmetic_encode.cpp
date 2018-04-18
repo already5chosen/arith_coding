@@ -23,8 +23,7 @@ struct context_chunk_c2low_t {
 
 enum {
   // context header
-  CONTEXT_HDR_PLAIN1_OFFSET_I=0,
-  CONTEXT_HDR_PLAIN2_OFFSET_I,
+  CONTEXT_HDR_SRC_OFFSET_I=0,
   CONTEXT_HDR_HIST_OFFSET_I,
   CONTEXT_HDR_PLAIN1_LEN_I,
   CONTEXT_HDR_PLAIN2_LEN_I,
@@ -47,11 +46,9 @@ enum {
 
 void arithmetic_encode_init_context(uint32_t* context, int tilelen)
 {
-  uint32_t plain1Offset = CONTEXT_HDR_LEN;
-  uint32_t plain2Offset = plain1Offset + (tilelen-1)/sizeof(uint32_t) + 1;
-  uint32_t histOffset   = plain2Offset + (tilelen-1)/sizeof(uint32_t) + 1;
-  context[CONTEXT_HDR_PLAIN1_OFFSET_I] = plain1Offset;
-  context[CONTEXT_HDR_PLAIN2_OFFSET_I] = plain2Offset;
+  uint32_t srcOffset  = CONTEXT_HDR_LEN;
+  uint32_t histOffset = srcOffset + (tilelen*2-1)/sizeof(uint32_t) + 1;
+  context[CONTEXT_HDR_SRC_OFFSET_I]    = srcOffset;
   context[CONTEXT_HDR_HIST_OFFSET_I]   = histOffset;
   context[CONTEXT_HDR_PLAIN1_LEN_I]    = 0;
   context[CONTEXT_HDR_PLAIN2_LEN_I]    = 0;
@@ -62,12 +59,12 @@ void arithmetic_encode_init_context(uint32_t* context, int tilelen)
 void arithmetic_encode_chunk_callback(void* context_ptr, const uint8_t* src, int srclen)
 {
   uint32_t* context = static_cast<uint32_t*>(context_ptr);
-  uint8_t*  plain1   = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_PLAIN1_OFFSET_I]]);
-  uint8_t*  plain2   = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_PLAIN2_OFFSET_I]]);
+  uint8_t*  dst = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_SRC_OFFSET_I]]);
   uint32_t* commonH  = &context[context[CONTEXT_HDR_HIST_OFFSET_I]];
   uint32_t* chunkH   = &commonH[N_COMMON_SYMBOLS];
   uint32_t plain1Len = context[CONTEXT_HDR_PLAIN1_LEN_I];
   uint32_t plain2Len = context[CONTEXT_HDR_PLAIN2_LEN_I];
+  dst += plain1Len + plain2Len;
 
   uint32_t chunk_i = plain1Len / ARITH_CODER_SYMBOLS_PER_CHUNK;
   uint32_t sym_i   = plain1Len % ARITH_CODER_SYMBOLS_PER_CHUNK;
@@ -81,17 +78,23 @@ void arithmetic_encode_chunk_callback(void* context_ptr, const uint8_t* src, int
       c = int(src[i+1]) + 1;
       ++i;
     }
+
+    dst[0] = c;
     if (c >= ARITH_CODER_N_DYNAMIC_SYMBOLS-1) {
       int c2 = c - (ARITH_CODER_N_DYNAMIC_SYMBOLS-1);
-      plain2[plain2Len++] = c2;
       ++commonH[c2];
       c = ARITH_CODER_N_DYNAMIC_SYMBOLS-1;
+      dst[0] = c;
+      dst[1] = c2;
+      ++dst;
+      ++plain2Len;
     }
+    ++dst;
 
     if (sym_i == 0)
       memset(chunkH, 0, ARITH_CODER_N_DYNAMIC_SYMBOLS*sizeof(uint32_t)); // prepare new chunk of dynamic histogram
 
-    plain1[plain1Len++] = c;
+    ++plain1Len;
     ++chunkH[c];
     ++sym_i;
     if (sym_i == ARITH_CODER_SYMBOLS_PER_CHUNK) {
@@ -503,8 +506,7 @@ static void inc_dst(uint8_t* dst) {
 
 static int encode(uint8_t* dst, const uint32_t* context, CArithmeticEncoder* pEnc)
 {
-  const uint8_t*  plain1 = reinterpret_cast<const uint8_t*>(&context[context[CONTEXT_HDR_PLAIN1_OFFSET_I]]);
-  const uint8_t*  plain2 = reinterpret_cast<const uint8_t*>(&context[context[CONTEXT_HDR_PLAIN2_OFFSET_I]]);
+  const uint8_t*  src = reinterpret_cast<const uint8_t*>(&context[context[CONTEXT_HDR_SRC_OFFSET_I]]);
   const uint32_t* commonH  = &context[context[CONTEXT_HDR_HIST_OFFSET_I]];
   uint32_t plain1Len = context[CONTEXT_HDR_PLAIN1_LEN_I];
   uint32_t nChunks = context[CONTEXT_HDR_NCHUNKS_I];
@@ -523,7 +525,9 @@ static int encode(uint8_t* dst, const uint32_t* context, CArithmeticEncoder* pEn
     const context_chunk_c2low_t* chunk = reinterpret_cast<const context_chunk_c2low_t*>(&commonH
       [CONTEXT_COMMON_C2LOW_SZ+CONTEXT_CHUNK_C2LOW_SZ*chunk_i]);
     const uint16_t* chunk_c2low = chunk->nRanges > 1 ? chunk->c2low : 0;
-    unsigned srclen = chunk_i == nChunks-1 ? plain1Len - chunk_i*ARITH_CODER_SYMBOLS_PER_CHUNK: ARITH_CODER_SYMBOLS_PER_CHUNK;
+    unsigned srclen = (chunk_i == nChunks-1) ?
+      plain1Len - chunk_i*ARITH_CODER_SYMBOLS_PER_CHUNK:
+      ARITH_CODER_SYMBOLS_PER_CHUNK;
     // int dbg_i = -1;
     for (unsigned i = 0; i < srclen; ++i) {
       int common_c = -1;
@@ -534,10 +538,10 @@ static int encode(uint8_t* dst, const uint32_t* context, CArithmeticEncoder* pEn
         common_c = -1;
         if (c < 0) {
           // process next input character
-          c = plain1[i];
+          c = *src++;
           c2low = chunk_c2low;
           if (c == ARITH_CODER_N_DYNAMIC_SYMBOLS-1) {
-            common_c = *plain2++;
+            common_c = *src++;
           }
         }
         // if (chunk_i==77 && dbg_i >= 0 && dbg_i < 500)
@@ -567,7 +571,6 @@ static int encode(uint8_t* dst, const uint32_t* context, CArithmeticEncoder* pEn
         }
       } while (common_c >= 0);
     }
-    plain1 += srclen;
     // printf(": %10d\n", dst-dst0);
   }
 
