@@ -55,7 +55,7 @@ int main(int argz, char** argv)
           size_t hdrlen = 6;
           int ressz  = 0;
           if (!isSingleCharacter(inptile, tilelen)) {
-            size_t tmpDstLen = ((tilelen*3+256*2)*sizeof(int32_t))/sizeof(uint64_t);
+            size_t tmpDstLen = ((tilelen*3+256*3)*sizeof(int32_t))/sizeof(uint64_t);
             if (tmpDstLen > tmpDst.size())
               tmpDst.resize(tmpDstLen);
 
