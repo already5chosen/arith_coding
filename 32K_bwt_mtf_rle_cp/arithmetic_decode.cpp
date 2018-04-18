@@ -622,10 +622,10 @@ int arithmetic_decode(
   // printf("plain1NChunks=%d\n", plain1NChunks);
 
   std::vector<uint8_t> qhVec(plain1NChunks*ARITH_CODER_N_P1_SYMBOLS+ARITH_CODER_N_P2_SYMBOLS);
-  int plain2Hlen = load_quantized_histogram(&qhVec.at(plain1NChunks*ARITH_CODER_N_P1_SYMBOLS), ARITH_CODER_N_P2_SYMBOLS, 1, &dec);
-  if (plain2Hlen >= 0) {
-    int plain1MaxHlen = load_quantized_histogram(&qhVec.at(0), ARITH_CODER_N_P1_SYMBOLS, plain1NChunks, &dec);
-    if (plain1MaxHlen >= 0) {
+  int plain1MaxHlen = load_quantized_histogram(&qhVec.at(0), ARITH_CODER_N_P1_SYMBOLS, plain1NChunks, &dec);
+  if (plain1MaxHlen >= 0) {
+    int plain2Hlen = load_quantized_histogram(&qhVec.at(plain1NChunks*ARITH_CODER_N_P1_SYMBOLS), ARITH_CODER_N_P2_SYMBOLS, 1, &dec);
+    if (plain2Hlen >= 0) {
       int modellen = srclen - dec.m_srclen;
       if (pInfo) {
         pInfo[0] = modellen*8;
@@ -642,7 +642,7 @@ int arithmetic_decode(
       #endif
       return textlen;
     }
-    return plain1MaxHlen;
+    return plain2Hlen;
   }
-  return plain2Hlen;
+  return plain1MaxHlen;
 }

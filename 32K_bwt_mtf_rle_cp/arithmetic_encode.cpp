@@ -490,12 +490,6 @@ static int store_model(uint8_t* dst, uint32_t * context, double* pNbits, CArithm
   dst = store_model_store_nChunks(dst, plain1nChunks, pEnc);
 
   uint8_t* qHistogram1 = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_QH_OFFSET_I]]);
-  uint8_t* qHistogram2 = &qHistogram1[plain1nChunks*CONTEXT_P1_QH_LEN];
-
-  uint32_t* plain2H = &context[context[CONTEXT_HDR_PLAIN2_HIST_OFFSET_I]];
-  int plain2hlen = plain2H[CONTEXT_CHK_HLEN_I];
-  dst = store_model_store_data(dst, qHistogram2, plain2hlen, CONTEXT_P2_QH_LEN, 1, pEnc);
-
   int chunkMaxHlen = context[CONTEXT_HDR_CHUNK_MAX_HLEN_I];
   if (chunkMaxHlen > 0) {
     uint32_t* plain1H = &context[context[CONTEXT_HDR_PLAIN1_HIST_OFFSET_I]];
@@ -506,6 +500,11 @@ static int store_model(uint8_t* dst, uint32_t * context, double* pNbits, CArithm
     }
   }
   dst = store_model_store_data(dst, qHistogram1, chunkMaxHlen, CONTEXT_P1_QH_LEN, plain1nChunks, pEnc);
+
+  uint8_t* qHistogram2 = &qHistogram1[plain1nChunks*CONTEXT_P1_QH_LEN];
+  uint32_t* plain2H = &context[context[CONTEXT_HDR_PLAIN2_HIST_OFFSET_I]];
+  int plain2hlen = plain2H[CONTEXT_CHK_HLEN_I];
+  dst = store_model_store_data(dst, qHistogram2, plain2hlen, CONTEXT_P2_QH_LEN, 1, pEnc);
 
   int len = dst - dst0;
   *pNbits = len*8.0 + 63 - log2(pEnc->m_range);
