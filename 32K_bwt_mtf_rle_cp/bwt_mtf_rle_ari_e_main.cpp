@@ -33,7 +33,6 @@ int main(int argz, char** argv)
       const size_t TILE_SIZE = 1024*1024;
       uint8_t* inptile = new uint8_t[TILE_SIZE+8];
       std::vector<uint64_t> tmpDst;
-      std::vector<uint32_t> encContext;
       ret = 0;
       int tile_i = 0;
       bool done = false;
@@ -56,25 +55,30 @@ int main(int argz, char** argv)
           size_t hdrlen = 6;
           int ressz  = 0;
           if (!isSingleCharacter(inptile, tilelen)) {
-            size_t tmpDstLen = ((tilelen*3+256)*sizeof(int32_t))/sizeof(uint64_t);
+            size_t tmpDstLen = ((tilelen*3+256*2)*sizeof(int32_t))/sizeof(uint64_t);
             if (tmpDstLen > tmpDst.size())
               tmpDst.resize(tmpDstLen);
-            arithmetic_encode_init_context(&encContext, tilelen);
+
             uint64_t t0 = __rdtsc();
             bwt_sort(&tmpDst.at(0), inptile, tilelen);
             uint64_t t1 = __rdtsc();
+
+            int32_t* bwtIdx = reinterpret_cast<int32_t*>(&tmpDst.at(0));
+            uint32_t* encContext = reinterpret_cast<uint32_t*>(&bwtIdx[tilelen+256]);
+            arithmetic_encode_init_context(encContext, tilelen);
             int bwtPrimaryIndex;
-            int rlesz = bwt_reorder_mtf_rle(  // return length of destination array in octets
-              reinterpret_cast<int32_t*>(&tmpDst.at(0)), // both input and output
-              inptile, tilelen,
+            bwt_reorder_mtf_rle(
+              bwtIdx,
+              inptile,
+              tilelen,
               &bwtPrimaryIndex,
               arithmetic_encode_chunk_callback,
-              &encContext);
+              encContext);
             uint64_t t2 = __rdtsc();
-            uint8_t* ariEncSrc = reinterpret_cast<uint8_t*>(&tmpDst.at(0));
-            uint8_t* ariEncDst = &ariEncSrc[rlesz];
+
+            uint8_t* ariEncDst = reinterpret_cast<uint8_t*>(bwtIdx);
             double info[8];
-            ressz = arithmetic_encode(&encContext.at(0), ariEncDst, ariEncSrc, rlesz, tilelen, vFlag ? info : 0);
+            ressz = arithmetic_encode(encContext, ariEncDst, tilelen, vFlag ? info : 0);
             uint64_t t3 = __rdtsc();
             if (vFlag)
               printf(
