@@ -83,7 +83,7 @@ int main(int argz, char** argv)
             if (vFlag)
               printf(
                "%4s:%d "
-               "%7u->%7u. Model %9.3f. Coded %9.0f. Entropy %11.3f (%11.3f). %10.0f clks. %6.1f+%5.1f+%4.1f=%6.1f clk/char (%.0f)\n"
+               "%7u->%7u. Model %9.3f. Coded %9.0f. Entropy %11.3f (%11.3f). %10.0f clks. %6.1f+%5.1f+%4.1f=%6.1f clk/char (%.0f+%.0f)\n"
                ,nametag
                ,tile_i
                ,unsigned(tilelen)
@@ -98,6 +98,7 @@ int main(int argz, char** argv)
                ,double(t3-t2)/tilelen
                ,double(t3-t0)/tilelen
                ,info[4]
+               ,info[5]
              );
             if (ressz > 0) {
               // normal compression

@@ -1,6 +1,7 @@
 #include <cstdint>
 #include <cstring>
 #include <cstdio>
+#include <climits>
 #include <vector>
 // #include <cmath>
 // #include <cctype>
@@ -385,15 +386,15 @@ int decode(
   int32_t                    histogram[256],
   CArithmeticDecoder*        pDec,
   const uint8_t*             qh,
-  int                        plain2Hlen,
+  int                        plain1NChunks,
   int                        maxPlain1Hlen,
-  int                        plain1NChunks)
+  int                        plain2NChunks,
+  int                        maxPlain2Hlen)
 {
-  arithmetic_decode_model_t plain2Model(ARITH_CODER_N_P2_SYMBOLS);
-  int nPlain2Ranges = plain2Model.dequantize_and_prepare(&qh[plain1NChunks*ARITH_CODER_N_P1_SYMBOLS], plain2Hlen);
-  int theOnlyPlain2C = (nPlain2Ranges <= 1) ? plain2Model.m_c2low[0] + ARITH_CODER_N_P1_SYMBOLS-1 : 0;
-
   arithmetic_decode_model_t plain1Model(ARITH_CODER_N_P1_SYMBOLS);
+  arithmetic_decode_model_t plain2Model(ARITH_CODER_N_P2_SYMBOLS);
+  const uint8_t* plain1Qh = qh;
+  const uint8_t* plain2Qh = &qh[ARITH_CODER_N_P1_SYMBOLS*plain1NChunks];
 
   // initialize move-to-front decoder table
   uint8_t mtf_t[256];
@@ -421,16 +422,21 @@ int decode(
 
   uint8_t* dst = dst0;
   int dst_i = 0;
-  for (int chunk_i = 0; chunk_i < plain1NChunks; ++chunk_i) {
-    const uint8_t* plain1Qh = &qh[ARITH_CODER_N_P1_SYMBOLS*chunk_i];
-    if (nPlain2Ranges == 0 && maxPlain1Hlen == ARITH_CODER_N_P1_SYMBOLS) {
-      if (__builtin_expect(plain1Qh[ARITH_CODER_N_P1_SYMBOLS-1] != 0, 0)) {
-        return -21; // a plain1 range does not exist but plain2 histogram says that it exists
-      }
-    }
+  int plain2chunk_i = 0;
+  int plain2sym_i = 0;
+  int theOnlyPlain2C = 0;
+  int symbolsPerP2Chunk = 0;
+  for (int plain1chunk_i = 0; plain1chunk_i < plain1NChunks; ++plain1chunk_i) {
+    // if (nPlain2Ranges == 0 && maxPlain1Hlen == ARITH_CODER_N_P1_SYMBOLS) {
+      // if (__builtin_expect(plain1Qh[ARITH_CODER_N_P1_SYMBOLS-1] != 0, 0)) {
+        // return -21; // a plain1 range does not exist but plain2 histogram says that it exists
+      // }
+    // }
 
-    int nPlain1Ranges = plain1Model.dequantize_and_prepare(plain1Qh, maxPlain1Hlen);
-    const int symbolsPerP1Chunk = chunk_i == plain1NChunks-1? ARITH_CODER_P1_SYMBOLS_PER_CHUNK*2+32 : ARITH_CODER_P1_SYMBOLS_PER_CHUNK;
+    int nPlain1Ranges = plain1Model.dequantize_and_prepare(&plain1Qh[plain1chunk_i*ARITH_CODER_N_P1_SYMBOLS], maxPlain1Hlen);
+    const int symbolsPerP1Chunk = (plain1chunk_i == plain1NChunks-1) ?
+      ARITH_CODER_P1_SYMBOLS_PER_CHUNK*2+32 :
+      ARITH_CODER_P1_SYMBOLS_PER_CHUNK;
     arithmetic_decode_model_t* pDefaultModel = &plain1Model;
     int theOnlyPlain1C = 0;
     int sym_i_incr_at_plain2 = 0;
@@ -447,7 +453,7 @@ int decode(
       }
     }
 
-    for (int sym_i = 0; sym_i < symbolsPerP1Chunk && dstlen != 0; ) {
+    for (int plain1sym_i = 0; plain1sym_i < symbolsPerP1Chunk && dstlen != 0; ) {
       arithmetic_decode_model_t* pModel = pDefaultModel;
       for(;;++dst_i) {
         int c = theOnlyPlain1C;
@@ -539,9 +545,9 @@ int decode(
           // RLE decode
           if (pModel == &plain2Model) {
             c += ARITH_CODER_N_P1_SYMBOLS-1;
-            sym_i += sym_i_incr_at_plain2;
+            plain1sym_i += sym_i_incr_at_plain2;
           } else {
-            ++sym_i;
+            ++plain1sym_i;
             if (c < 2) {
               // zero run
               uint32_t delta_rl = (c+1) * rlMsb;
@@ -560,6 +566,16 @@ int decode(
             } else {
               rlMsb = 1;
               if (c == ARITH_CODER_N_P1_SYMBOLS-1) {
+                if (plain2sym_i == 0) {
+                  int nPlain2Ranges = plain2Model.dequantize_and_prepare(&plain2Qh[plain2chunk_i*ARITH_CODER_N_P2_SYMBOLS], maxPlain2Hlen);
+                  theOnlyPlain2C = (nPlain2Ranges <= 1) ? plain2Model.m_c2low[0] + ARITH_CODER_N_P1_SYMBOLS-1 : 0;
+                  symbolsPerP2Chunk = (plain2chunk_i == plain2NChunks-1) ? INT_MAX : ARITH_CODER_P2_SYMBOLS_PER_CHUNK;
+                }
+                ++plain2sym_i;
+                if (plain2sym_i == symbolsPerP2Chunk) {
+                  plain2sym_i = 0;
+                  ++plain2chunk_i;
+                }
                 if (theOnlyPlain2C != 0) {
                   c = theOnlyPlain2C;
                 } else {
@@ -570,7 +586,7 @@ int decode(
             }
           }
         } else {
-          ++sym_i;
+          ++plain1sym_i;
         }
 
         // MTF decode
@@ -617,22 +633,36 @@ int arithmetic_decode(
   if (plain1NChunks < 0)
     return plain1NChunks;
 
+  if (plain1NChunks > INT_MAX/ARITH_CODER_P1_SYMBOLS_PER_CHUNK/2)
+    return -31;
   if (plain1NChunks > 1 && plain1NChunks * ARITH_CODER_P1_SYMBOLS_PER_CHUNK - ARITH_CODER_P1_SYMBOLS_PER_CHUNK/2 > dstlen)
-    return -16;
+    return -32;
   // printf("plain1NChunks=%d\n", plain1NChunks);
 
-  std::vector<uint8_t> qhVec(plain1NChunks*ARITH_CODER_N_P1_SYMBOLS+ARITH_CODER_N_P2_SYMBOLS);
+  int plain2NChunks = load_nChunks(&dec);
+  if (plain2NChunks < 0)
+    return plain2NChunks;
+
+  if (plain2NChunks > INT_MAX/ARITH_CODER_P2_SYMBOLS_PER_CHUNK/2)
+    return -33;
+  if (plain2NChunks > 1 && plain2NChunks * ARITH_CODER_P2_SYMBOLS_PER_CHUNK - ARITH_CODER_P2_SYMBOLS_PER_CHUNK/2 > dstlen)
+    return -34;
+  // printf("plain2NChunks=%d\n", plain2NChunks);
+
+  int qh1Len = plain1NChunks*ARITH_CODER_N_P1_SYMBOLS;
+  int qh2Len = plain2NChunks*ARITH_CODER_N_P2_SYMBOLS;
+  std::vector<uint8_t> qhVec(qh1Len+qh2Len);
   int plain1MaxHlen = load_quantized_histogram(&qhVec.at(0), ARITH_CODER_N_P1_SYMBOLS, plain1NChunks, &dec);
   if (plain1MaxHlen >= 0) {
-    int plain2Hlen = load_quantized_histogram(&qhVec.at(plain1NChunks*ARITH_CODER_N_P1_SYMBOLS), ARITH_CODER_N_P2_SYMBOLS, 1, &dec);
-    if (plain2Hlen >= 0) {
+    int plain2MaxHlen = load_quantized_histogram(&qhVec.at(qh1Len), ARITH_CODER_N_P2_SYMBOLS, plain2NChunks, &dec);
+    if (plain2MaxHlen >= 0) {
       int modellen = srclen - dec.m_srclen;
       if (pInfo) {
         pInfo[0] = modellen*8;
         pInfo[1] = dec.m_srclen;
       }
       memset(histogram, 0, sizeof(histogram[0])*256);
-      int textlen = decode(dst, dstlen, histogram, &dec, &qhVec.at(0), plain2Hlen, plain1MaxHlen, plain1NChunks);
+      int textlen = decode(dst, dstlen, histogram, &dec, &qhVec.at(0), plain1NChunks, plain1MaxHlen, plain2NChunks, plain2MaxHlen);
       #ifdef ENABLE_PERF_COUNT
       if (pInfo) {
         pInfo[2] = model.m_extLookupCount;
@@ -642,7 +672,7 @@ int arithmetic_decode(
       #endif
       return textlen;
     }
-    return plain2Hlen;
+    return plain2MaxHlen;
   }
   return plain1MaxHlen;
 }

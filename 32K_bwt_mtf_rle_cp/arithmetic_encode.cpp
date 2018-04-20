@@ -22,17 +22,27 @@ struct context_plain1_c2low_t {
   uint16_t c2low[ARITH_CODER_N_P1_SYMBOLS+1];
 };
 
+struct context_plain_hdr_t {
+  uint32_t histOffset;
+  uint32_t len;
+  uint32_t nChunks;
+  uint32_t maxHLen;
+  uint32_t nSymbols;
+  uint32_t symbolsPerChunk;
+  uint32_t c2lowSz;
+};
+
+struct context_plain_hdrs_t {
+  context_plain_hdr_t a[2];
+};
+
 enum {
   // context header
   CONTEXT_HDR_SRC_OFFSET_I=0,
-  CONTEXT_HDR_PLAIN1_HIST_OFFSET_I,
-  CONTEXT_HDR_PLAIN2_HIST_OFFSET_I,
   CONTEXT_HDR_QH_OFFSET_I,
-  CONTEXT_HDR_PLAIN1_LEN_I,
-  CONTEXT_HDR_PLAIN2_LEN_I,
-  CONTEXT_HDR_PLAIN1_NCHUNKS_I,
-  CONTEXT_HDR_CHUNK_MAX_HLEN_I,
-  CONTEXT_HDR_LEN,
+  CONTEXT_HDR_PLAIN_HDRS_I,
+  CONTEXT_PLAINS_HDRS_SZ = (sizeof(context_plain_hdrs_t)-1)/sizeof(uint32_t) + 1,
+  CONTEXT_HDR_LEN = CONTEXT_HDR_PLAIN_HDRS_I + CONTEXT_PLAINS_HDRS_SZ,
   // context plain1 histogram chunk
   CONTEXT_CHK_HLEN_I = 0,
   CONTEXT_CHK_HISTOGRAM_I,
@@ -52,27 +62,37 @@ void arithmetic_encode_init_context(uint32_t* context, int tilelen)
   uint32_t plain1HistOffset = srcOffset + (tilelen*2-1)/sizeof(uint32_t) + 1;
   uint32_t plain2HistOffset = plain1HistOffset + ((tilelen-1)/ARITH_CODER_P1_SYMBOLS_PER_CHUNK + 1)*CONTEXT_P1_CHK_LEN;
   context[CONTEXT_HDR_SRC_OFFSET_I] = srcOffset;
-  context[CONTEXT_HDR_PLAIN1_HIST_OFFSET_I] = plain1HistOffset;
-  context[CONTEXT_HDR_PLAIN2_HIST_OFFSET_I] = plain2HistOffset;
-  context[CONTEXT_HDR_PLAIN1_LEN_I]    = 0;
-  context[CONTEXT_HDR_PLAIN2_LEN_I]    = 0;
-  uint32_t* plain2H  = &context[plain2HistOffset];
-  memset(plain2H, 0, CONTEXT_P2_CHK_LEN*sizeof(uint32_t));
+  context_plain_hdrs_t* hdrs = reinterpret_cast<context_plain_hdrs_t*>(&context[CONTEXT_HDR_PLAIN_HDRS_I]);
+  hdrs->a[0].histOffset = plain1HistOffset;
+  hdrs->a[1].histOffset = plain2HistOffset;
+  hdrs->a[0].len = 0;
+  hdrs->a[1].len = 0;
+  hdrs->a[0].nSymbols = ARITH_CODER_N_P1_SYMBOLS;
+  hdrs->a[1].nSymbols = ARITH_CODER_N_P2_SYMBOLS;
+  hdrs->a[0].symbolsPerChunk = ARITH_CODER_P1_SYMBOLS_PER_CHUNK;
+  hdrs->a[1].symbolsPerChunk = ARITH_CODER_P2_SYMBOLS_PER_CHUNK;
+  hdrs->a[0].c2lowSz = CONTEXT_P1_C2LOW_SZ;
+  hdrs->a[1].c2lowSz = CONTEXT_P2_C2LOW_SZ;
 }
 
 void arithmetic_encode_chunk_callback(void* context_ptr, const uint8_t* src, int srclen)
 {
   uint32_t* context = static_cast<uint32_t*>(context_ptr);
   uint8_t*  dst = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_SRC_OFFSET_I]]);
-  uint32_t* plain1H  = &context[context[CONTEXT_HDR_PLAIN1_HIST_OFFSET_I]+CONTEXT_CHK_HISTOGRAM_I];
-  uint32_t* plain2H  = &context[context[CONTEXT_HDR_PLAIN2_HIST_OFFSET_I]+CONTEXT_CHK_HISTOGRAM_I];
-  uint32_t plain1Len = context[CONTEXT_HDR_PLAIN1_LEN_I];
-  uint32_t plain2Len = context[CONTEXT_HDR_PLAIN2_LEN_I];
+  context_plain_hdrs_t* hdrs = reinterpret_cast<context_plain_hdrs_t*>(&context[CONTEXT_HDR_PLAIN_HDRS_I]);
+  uint32_t* plain1H  = &context[hdrs->a[0].histOffset+CONTEXT_CHK_HISTOGRAM_I];
+  uint32_t* plain2H  = &context[hdrs->a[1].histOffset+CONTEXT_CHK_HISTOGRAM_I];
+  uint32_t plain1Len = hdrs->a[0].len;
+  uint32_t plain2Len = hdrs->a[1].len;
   dst += plain1Len + plain2Len;
 
   uint32_t plain1_chunk_i = plain1Len / ARITH_CODER_P1_SYMBOLS_PER_CHUNK;
   uint32_t plain1_sym_i   = plain1Len % ARITH_CODER_P1_SYMBOLS_PER_CHUNK;
   plain1H += CONTEXT_P1_CHK_LEN*plain1_chunk_i;
+
+  uint32_t plain2_chunk_i = plain2Len / ARITH_CODER_P2_SYMBOLS_PER_CHUNK;
+  uint32_t plain2_sym_i   = plain2Len % ARITH_CODER_P2_SYMBOLS_PER_CHUNK;
+  plain2H += CONTEXT_P2_CHK_LEN*plain2_chunk_i;
 
   // split source in two plains and update histograms
   for (int i = 0; i < srclen; ++i) {
@@ -86,17 +106,26 @@ void arithmetic_encode_chunk_callback(void* context_ptr, const uint8_t* src, int
     dst[0] = c;
     if (c >= ARITH_CODER_N_P1_SYMBOLS-1) {
       int c2 = c - (ARITH_CODER_N_P1_SYMBOLS-1);
-      ++plain2H[c2];
       c = ARITH_CODER_N_P1_SYMBOLS-1;
       dst[0] = c;
       dst[1] = c2;
       ++dst;
+
+      if (plain2_sym_i == 0)
+        memset(plain2H, 0, ARITH_CODER_N_P2_SYMBOLS*sizeof(uint32_t)); // prepare new chunk of histogram
+
       ++plain2Len;
+      ++plain2H[c2];
+      ++plain2_sym_i;
+      if (plain2_sym_i == ARITH_CODER_P2_SYMBOLS_PER_CHUNK) {
+        plain2_sym_i = 0;
+        plain2H += CONTEXT_P2_CHK_LEN;
+      }
     }
     ++dst;
 
     if (plain1_sym_i == 0)
-      memset(plain1H, 0, ARITH_CODER_N_P1_SYMBOLS*sizeof(uint32_t)); // prepare new chunk of dynamic histogram
+      memset(plain1H, 0, ARITH_CODER_N_P1_SYMBOLS*sizeof(uint32_t)); // prepare new chunk of histogram
 
     ++plain1Len;
     ++plain1H[c];
@@ -107,8 +136,8 @@ void arithmetic_encode_chunk_callback(void* context_ptr, const uint8_t* src, int
     }
   }
 
-  context[CONTEXT_HDR_PLAIN1_LEN_I] = plain1Len;
-  context[CONTEXT_HDR_PLAIN2_LEN_I] = plain2Len;
+  hdrs->a[0].len = plain1Len;
+  hdrs->a[1].len = plain2Len;
 }
 
 static void quantize_histogram(uint8_t* __restrict qh, const uint32_t *h, int len, uint32_t hTot)
@@ -129,41 +158,45 @@ static void quantize_histogram(uint8_t* __restrict qh, const uint32_t *h, int le
   }
 }
 
-static void prepare1(uint32_t* context, double* pInfo)
+static void HandleLastChunk(uint32_t* context, context_plain_hdr_t* hdr)
 {
-  uint32_t* plain1H = &context[context[CONTEXT_HDR_PLAIN1_HIST_OFFSET_I]];
-  uint32_t plain1Len = context[CONTEXT_HDR_PLAIN1_LEN_I];
-  uint32_t plain1nChunks = plain1Len / ARITH_CODER_P1_SYMBOLS_PER_CHUNK; // full chunks
-  uint32_t symbolsInLastChunk = plain1Len % ARITH_CODER_P1_SYMBOLS_PER_CHUNK;
+  uint32_t* plainH = &context[hdr->histOffset];
+  uint32_t plainLen = hdr->len;
+  uint32_t symbolsPerChunk = hdr->symbolsPerChunk;
+  uint32_t nChunks = plainLen / symbolsPerChunk; // full chunks
+  uint32_t symbolsInLastChunk = plainLen % symbolsPerChunk;
   if (symbolsInLastChunk > 0) {
     // partial chunk exists
-    if (symbolsInLastChunk < ARITH_CODER_P1_SYMBOLS_PER_CHUNK/2 && plain1nChunks > 0) {
+    if (symbolsInLastChunk < symbolsPerChunk/2 && nChunks > 0) {
       // add last chunk to before-last
-      uint32_t* dstChunk = &plain1H[CONTEXT_P1_CHK_LEN*(plain1nChunks-1)];
-      uint32_t* srcChunk = &plain1H[CONTEXT_P1_CHK_LEN*(plain1nChunks-0)];
-      for (int i = 0; i < ARITH_CODER_N_P1_SYMBOLS; ++i) {
+      uint32_t nSymbols = hdr->nSymbols;
+      uint32_t* dstChunk = &plainH[(nSymbols+CONTEXT_CHK_HISTOGRAM_I)*(nChunks-1)];
+      uint32_t* srcChunk = &plainH[(nSymbols+CONTEXT_CHK_HISTOGRAM_I)*(nChunks-0)];
+      for (int i = 0; i < nSymbols; ++i) {
         dstChunk[CONTEXT_CHK_HISTOGRAM_I+i] += srcChunk[CONTEXT_CHK_HISTOGRAM_I+i];
       }
     } else {
-      plain1nChunks += 1;
+      nChunks += 1;
     }
   }
-  context[CONTEXT_HDR_PLAIN1_NCHUNKS_I] = plain1nChunks;
+  hdr->nChunks = nChunks;
+}
 
-  uint32_t plain2nChunks = 1;
-  uint32_t qhOffset = context[CONTEXT_HDR_PLAIN2_HIST_OFFSET_I]+CONTEXT_P2_CHK_LEN*plain2nChunks;
-  context[CONTEXT_HDR_QH_OFFSET_I] = qhOffset;
-  uint8_t* qHistogram = reinterpret_cast<uint8_t*>(&context[qhOffset]);
-
+static double Prepare1Plain(uint32_t* context, double* pInfo, context_plain_hdr_t* hdr, uint8_t* qHistogram)
+{
   double entropy = 0;
   int maxMaxC = -1;
-  for (int chunk_i = 0; chunk_i < plain1nChunks; ++chunk_i) {
-    uint32_t* chunk = &plain1H[CONTEXT_P1_CHK_LEN*chunk_i];
+  uint32_t* plainH = &context[hdr->histOffset];
+  uint32_t nChunks = hdr->nChunks;
+  uint32_t nSymbols = hdr->nSymbols;
+  uint32_t contextChkLen = CONTEXT_CHK_HISTOGRAM_I + nSymbols;
+  for (int chunk_i = 0; chunk_i < nChunks; ++chunk_i) {
+    uint32_t* chunk = &plainH[contextChkLen*chunk_i];
     uint32_t* histogram = &chunk[CONTEXT_CHK_HISTOGRAM_I];
     // find highest-numbered character that occurred at least once
     int maxC = -1;
     int32_t tot = 0;
-    for (int c = 0; c < CONTEXT_P1_QH_LEN; ++c) {
+    for (int c = 0; c < nSymbols; ++c) {
       tot += histogram[c];
       if (histogram[c] != 0)
         maxC = c;
@@ -184,46 +217,35 @@ static void prepare1(uint32_t* context, double* pInfo)
       }
       quantize_histogram(qHistogram, histogram, maxC+1, tot);
     }
-    qHistogram += CONTEXT_P1_QH_LEN;
+    qHistogram += nSymbols;
   }
-  context[CONTEXT_HDR_CHUNK_MAX_HLEN_I] = maxMaxC+1;
+  hdr->maxHLen = maxMaxC+1;
 
-  uint32_t* plain2H = &context[context[CONTEXT_HDR_PLAIN2_HIST_OFFSET_I]];
-  for (int chunk_i = 0; chunk_i < plain2nChunks; ++chunk_i) {
-    uint32_t* chunk = &plain2H[CONTEXT_P2_CHK_LEN*chunk_i];
-    uint32_t* histogram = &chunk[CONTEXT_CHK_HISTOGRAM_I];
-    // find highest-numbered character that occurred at least once
-    int maxC = -1;
-    int32_t tot = 0;
-    for (int c = 0; c < CONTEXT_P2_QH_LEN; ++c) {
-      tot += histogram[c];
-      if (histogram[c] != 0)
-        maxC = c;
-    }
-    chunk[CONTEXT_CHK_HLEN_I] = maxC + 1;
-
-    if (maxC >= 0) {
-      if (pInfo) {
-        // calculate source entropy of static part of histogram
-        entropy += log2(double(tot))*tot;
-        for (int c = 0; c <= maxC; ++c) {
-          int32_t cnt = histogram[c];
-          if (cnt)
-            entropy -= log2(double(cnt))*cnt;
-        }
-      }
-      quantize_histogram(qHistogram, histogram, maxC+1, tot);
-    }
-    qHistogram += CONTEXT_P2_QH_LEN;
-  }
-
-  if (pInfo) {
-    pInfo[0] = entropy;
-    pInfo[3] = 0;
-    pInfo[4] = plain1nChunks;
-  }
+  return entropy;
 }
 
+static void prepare1(uint32_t* context, double* pInfo)
+{
+  context_plain_hdrs_t* hdrs = reinterpret_cast<context_plain_hdrs_t*>(&context[CONTEXT_HDR_PLAIN_HDRS_I]);
+
+  HandleLastChunk(context, &hdrs->a[0]);
+  HandleLastChunk(context, &hdrs->a[1]);
+
+  uint32_t qhOffset = hdrs->a[1].histOffset + CONTEXT_P2_CHK_LEN*hdrs->a[1].nChunks;
+  context[CONTEXT_HDR_QH_OFFSET_I] = qhOffset;
+  uint8_t* qHistogram1 = reinterpret_cast<uint8_t*>(&context[qhOffset]);
+  uint8_t* qHistogram2 = qHistogram1 + hdrs->a[0].nChunks * ARITH_CODER_N_P1_SYMBOLS;
+
+  double entropy1 = Prepare1Plain(context, pInfo, &hdrs->a[0], qHistogram1);
+  double entropy2 = Prepare1Plain(context, pInfo, &hdrs->a[1], qHistogram2);
+
+  if (pInfo) {
+    pInfo[0] = entropy1+entropy2;
+    pInfo[3] = 0;
+    pInfo[4] = hdrs->a[0].nChunks;
+    pInfo[5] = hdrs->a[1].nChunks;
+  }
+}
 
 static void range2low(uint16_t* c2low, const uint16_t* c2range, unsigned len)
 {
@@ -236,21 +258,22 @@ static void range2low(uint16_t* c2low, const uint16_t* c2range, unsigned len)
 }
 
 // return entropy estimate after quantization
-static double prepare2(uint32_t * context)
+static double Prepare2Plain(uint32_t* context, context_plain_hdr_t* hdr, uint8_t* qHistogram)
 {
-  uint8_t* qHistogram = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_QH_OFFSET_I]]);
   double entropy = 0;
-
   // calculate c2low tables for p1 chunks
-  uint32_t plain1nChunks = context[CONTEXT_HDR_PLAIN1_NCHUNKS_I];
-  uint32_t* src = &context[context[CONTEXT_HDR_PLAIN1_HIST_OFFSET_I]];
+  uint32_t nChunks = hdr->nChunks;
+  uint32_t nSymbols = hdr->nSymbols;
+  uint32_t contextChkLen = CONTEXT_CHK_HISTOGRAM_I + nSymbols;
+  uint32_t c2lowSz = hdr->c2lowSz;
+  uint32_t* src = &context[hdr->histOffset];
   uint32_t* dst = src;
-  for (uint32_t chunk_i = 0; chunk_i < plain1nChunks; ++chunk_i) {
+  for (uint32_t chunk_i = 0; chunk_i < nChunks; ++chunk_i) {
     int hlen = src[CONTEXT_CHK_HLEN_I];
     int nRanges = 0;
     context_plain1_c2low_t* dstChunk = reinterpret_cast<context_plain1_c2low_t*>(dst);
     if (hlen > 0) {
-      uint16_t ranges[CONTEXT_P1_QH_LEN];
+      uint16_t ranges[258];
       nRanges = quantized_histogram_to_range(ranges, hlen, qHistogram, VAL_RANGE);
       if (nRanges > 1) {
         // calculate entropy after quantization
@@ -267,40 +290,25 @@ static double prepare2(uint32_t * context)
     }
     dstChunk->nRanges = nRanges;
 
-    src        += CONTEXT_P1_CHK_LEN;
-    qHistogram += CONTEXT_P1_QH_LEN;
-    dst        += CONTEXT_P1_C2LOW_SZ;
+    src        += contextChkLen;
+    qHistogram += nSymbols;
+    dst        += c2lowSz;
   }
-
-  // calculate c2low tables for p2 chunks
-  uint32_t plain2nChunks = 1;
-  src = &context[context[CONTEXT_HDR_PLAIN2_HIST_OFFSET_I]];
-  dst = src;
-  for (uint32_t chunk_i = 0; chunk_i < plain2nChunks; ++chunk_i) {
-    int hlen = src[CONTEXT_CHK_HLEN_I];
-    int nRanges = 0;
-    context_plain2_c2low_t* dstChunk = reinterpret_cast<context_plain2_c2low_t*>(dst);
-    if (hlen > 0) {
-      uint16_t ranges[CONTEXT_P2_QH_LEN];
-      nRanges = quantized_histogram_to_range(ranges, hlen, qHistogram, VAL_RANGE);
-      if (nRanges > 1) {
-        // calculate entropy after quantization
-        for (int c = 0; c < hlen; ++c) {
-          unsigned cnt = src[CONTEXT_CHK_HISTOGRAM_I+c];
-          if (cnt)
-            entropy -= log2(ranges[c]/double(VAL_RANGE))*cnt;
-        }
-        range2low(dstChunk->c2low, ranges, hlen);
-      }
-    }
-    dstChunk->nRanges = nRanges;
-
-    src        += CONTEXT_P2_CHK_LEN;
-    qHistogram += CONTEXT_P2_QH_LEN;
-    dst        += CONTEXT_P2_C2LOW_SZ;
-  }
-
   return entropy;
+}
+
+// return entropy estimate after quantization
+static double prepare2(uint32_t * context)
+{
+  context_plain_hdrs_t* hdrs = reinterpret_cast<context_plain_hdrs_t*>(&context[CONTEXT_HDR_PLAIN_HDRS_I]);
+  uint32_t qhOffset = context[CONTEXT_HDR_QH_OFFSET_I];
+  uint8_t* qHistogram1 = reinterpret_cast<uint8_t*>(&context[qhOffset]);
+  uint8_t* qHistogram2 = qHistogram1 + hdrs->a[0].nChunks * ARITH_CODER_N_P1_SYMBOLS;
+
+  double entropy1 = Prepare2Plain(context, &hdrs->a[0], qHistogram1);
+  double entropy2 = Prepare2Plain(context, &hdrs->a[1], qHistogram2);
+
+  return entropy1+entropy2;
 }
 
 class CArithmeticEncoder {
@@ -486,25 +494,29 @@ static uint8_t* store_model_store_data(uint8_t* dst, const uint8_t* qh, int len,
 static int store_model(uint8_t* dst, uint32_t * context, double* pNbits, CArithmeticEncoder* pEnc)
 {
   uint8_t* dst0 = dst;
-  uint32_t plain1nChunks = context[CONTEXT_HDR_PLAIN1_NCHUNKS_I];
-  dst = store_model_store_nChunks(dst, plain1nChunks, pEnc);
+  context_plain_hdrs_t* hdrs = reinterpret_cast<context_plain_hdrs_t*>(&context[CONTEXT_HDR_PLAIN_HDRS_I]);
 
-  uint8_t* qHistogram1 = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_QH_OFFSET_I]]);
-  int chunkMaxHlen = context[CONTEXT_HDR_CHUNK_MAX_HLEN_I];
-  if (chunkMaxHlen > 0) {
-    uint32_t* plain1H = &context[context[CONTEXT_HDR_PLAIN1_HIST_OFFSET_I]];
-    for (int chunk_i = 0; chunk_i < plain1nChunks; ++chunk_i) {
-      int hlen = plain1H[CONTEXT_P1_CHK_LEN*chunk_i+CONTEXT_CHK_HLEN_I];
-      if (hlen < chunkMaxHlen)
-        memset(&qHistogram1[CONTEXT_P1_QH_LEN*chunk_i+hlen], 0, chunkMaxHlen-hlen);
+  dst = store_model_store_nChunks(dst, hdrs->a[0].nChunks, pEnc);
+  dst = store_model_store_nChunks(dst, hdrs->a[1].nChunks, pEnc);
+
+  uint8_t* qHistogram = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_QH_OFFSET_I]]);
+  for (int plain_i = 0; plain_i < 2; ++plain_i) {
+    context_plain_hdr_t* hdr = &hdrs->a[plain_i];
+    uint32_t nChunks = hdr->nChunks;
+    uint32_t nSymbols = hdr->nSymbols;
+    uint32_t maxHlen = hdr->maxHLen;
+    if (maxHlen > 0) {
+      uint32_t* plainH = &context[hdr->histOffset];
+      uint32_t contextChkLen = CONTEXT_CHK_HISTOGRAM_I + nSymbols;
+      for (uint32_t chunk_i = 0; chunk_i < nChunks; ++chunk_i) {
+        uint32_t hlen = plainH[contextChkLen*chunk_i+CONTEXT_CHK_HLEN_I];
+        if (hlen < maxHlen)
+          memset(&qHistogram[nSymbols*chunk_i+hlen], 0, maxHlen-hlen);
+      }
     }
+    dst = store_model_store_data(dst, qHistogram, maxHlen, nSymbols, nChunks, pEnc);
+    qHistogram += nSymbols*nChunks;
   }
-  dst = store_model_store_data(dst, qHistogram1, chunkMaxHlen, CONTEXT_P1_QH_LEN, plain1nChunks, pEnc);
-
-  uint8_t* qHistogram2 = &qHistogram1[plain1nChunks*CONTEXT_P1_QH_LEN];
-  uint32_t* plain2H = &context[context[CONTEXT_HDR_PLAIN2_HIST_OFFSET_I]];
-  int plain2hlen = plain2H[CONTEXT_CHK_HLEN_I];
-  dst = store_model_store_data(dst, qHistogram2, plain2hlen, CONTEXT_P2_QH_LEN, 1, pEnc);
 
   int len = dst - dst0;
   *pNbits = len*8.0 + 63 - log2(pEnc->m_range);
@@ -522,8 +534,10 @@ static void inc_dst(uint8_t* dst) {
 static int encode(uint8_t* dst, const uint32_t* context, CArithmeticEncoder* pEnc)
 {
   const uint8_t*  src = reinterpret_cast<const uint8_t*>(&context[context[CONTEXT_HDR_SRC_OFFSET_I]]);
-  uint32_t plain1Len = context[CONTEXT_HDR_PLAIN1_LEN_I];
-  uint32_t plain1nChunks = context[CONTEXT_HDR_PLAIN1_NCHUNKS_I];
+  const context_plain_hdrs_t* hdrs = reinterpret_cast<const context_plain_hdrs_t*>(&context[CONTEXT_HDR_PLAIN_HDRS_I]);
+  uint32_t plain1Len = hdrs->a[0].len;
+  uint32_t plain1nChunks = hdrs->a[0].nChunks;
+  uint32_t plain2nChunks = hdrs->a[1].nChunks;
 
   const uint64_t MSB_MSK   = uint64_t(255) << 56;
   const uint64_t MIN_RANGE = uint64_t(1) << (33-RANGE_BITS);
@@ -532,18 +546,19 @@ static int encode(uint8_t* dst, const uint32_t* context, CArithmeticEncoder* pEn
   uint8_t* dst0   = dst;
   uint64_t prevLo = lo;
   // int dbg_i = 0;
-  const context_plain2_c2low_t* p_p2_c2low = reinterpret_cast<const context_plain2_c2low_t*>(
-    &context[context[CONTEXT_HDR_PLAIN2_HIST_OFFSET_I]]);
-  const uint16_t* plain2_c2low = p_p2_c2low->nRanges > 1 ? p_p2_c2low->c2low : 0;
-  for (uint32_t chunk_i = 0; chunk_i < plain1nChunks; ++chunk_i) {
+  const uint16_t* plain2_c2low = 0;
+  uint32_t plain2chunk_i = 0;
+  unsigned plain2_i = 0;
+  unsigned srclen2 = 0;
+  for (uint32_t plain1chunk_i = 0; plain1chunk_i < plain1nChunks; ++plain1chunk_i) {
     const context_plain1_c2low_t* p_p1_c2low = reinterpret_cast<const context_plain1_c2low_t*>(
-      &context[context[CONTEXT_HDR_PLAIN1_HIST_OFFSET_I]+CONTEXT_P1_C2LOW_SZ*chunk_i]);
+      &context[hdrs->a[0].histOffset+hdrs->a[0].c2lowSz*plain1chunk_i]);
     const uint16_t* plain1_c2low = p_p1_c2low->nRanges > 1 ? p_p1_c2low->c2low : 0;
-    unsigned srclen = (chunk_i == plain1nChunks-1) ?
-      plain1Len - chunk_i*ARITH_CODER_P1_SYMBOLS_PER_CHUNK:
+    unsigned srclen1 = (plain1chunk_i == plain1nChunks-1) ?
+      plain1Len - plain1chunk_i*ARITH_CODER_P1_SYMBOLS_PER_CHUNK:
       ARITH_CODER_P1_SYMBOLS_PER_CHUNK;
     // int dbg_i = -1;
-    for (unsigned i = 0; i < srclen; ++i) {
+    for (unsigned i = 0; i < srclen1; ++i) {
       int plain2_c = -1;
       do {
         // ++dbg_i;
@@ -556,9 +571,21 @@ static int encode(uint8_t* dst, const uint32_t* context, CArithmeticEncoder* pEn
           c2low = plain1_c2low;
           if (c == ARITH_CODER_N_P1_SYMBOLS-1) {
             plain2_c = *src++;
+            if (plain2_i == 0) {
+              const context_plain2_c2low_t* p_p2_c2low =
+                reinterpret_cast<const context_plain2_c2low_t*>
+                (&context[hdrs->a[1].histOffset + hdrs->a[1].c2lowSz*plain2chunk_i]);
+              plain2_c2low = p_p2_c2low->nRanges > 1 ? p_p2_c2low->c2low : 0;
+              srclen2 = (plain2chunk_i == plain2nChunks-1) ? UINT_MAX: ARITH_CODER_P2_SYMBOLS_PER_CHUNK;
+            }
+            ++plain2_i;
+            if (plain2_i == srclen2) {
+              ++plain2chunk_i;
+              plain2_i = 0;
+            }
           }
         }
-        // if (chunk_i==77 && dbg_i >= 0 && dbg_i < 500)
+        // if (plain1chunk_i==77 && dbg_i >= 0 && dbg_i < 500)
           // printf("%d:%3d %3d\n", dbg_i, plain2_c, c);
         // printf("[%3d]=%3d\n", dbg_i, c); ++dbg_i;
         if (c2low) {
