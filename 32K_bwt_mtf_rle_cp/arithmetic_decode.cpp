@@ -427,11 +427,11 @@ int decode(
   int theOnlyPlain2C = 0;
   int symbolsPerP2Chunk = 0;
   for (int plain1chunk_i = 0; plain1chunk_i < plain1NChunks; ++plain1chunk_i) {
-    // if (nPlain2Ranges == 0 && maxPlain1Hlen == ARITH_CODER_N_P1_SYMBOLS) {
-      // if (__builtin_expect(plain1Qh[ARITH_CODER_N_P1_SYMBOLS-1] != 0, 0)) {
-        // return -21; // a plain1 range does not exist but plain2 histogram says that it exists
-      // }
-    // }
+    if (plain2NChunks == 0 && maxPlain1Hlen == ARITH_CODER_N_P1_SYMBOLS) {
+      if (__builtin_expect(plain1Qh[ARITH_CODER_N_P1_SYMBOLS-1] != 0, 0)) {
+        return -21; // a plain1 range does not exist but plain2 histogram says that it exists
+      }
+    }
 
     int nPlain1Ranges = plain1Model.dequantize_and_prepare(&plain1Qh[plain1chunk_i*ARITH_CODER_N_P1_SYMBOLS], maxPlain1Hlen);
     const int symbolsPerP1Chunk = (plain1chunk_i == plain1NChunks-1) ?
@@ -455,8 +455,29 @@ int decode(
 
     for (int plain1sym_i = 0; plain1sym_i < symbolsPerP1Chunk && dstlen != 0; ) {
       arithmetic_decode_model_t* pModel = pDefaultModel;
-      for(;;++dst_i) {
+      for(;;) {
         int c = theOnlyPlain1C;
+        if (pModel == &plain2Model) {
+          if (plain2sym_i == 0) {
+            int nPlain2Ranges = plain2Model.dequantize_and_prepare(&plain2Qh[plain2chunk_i*ARITH_CODER_N_P2_SYMBOLS], maxPlain2Hlen);
+            theOnlyPlain2C = 0;
+            if (nPlain2Ranges <= 1) {
+              if (__builtin_expect(nPlain2Ranges == 0, 0))
+                return -24; // chunk has to contain something
+              theOnlyPlain2C = plain2Model.m_c2low[0] + ARITH_CODER_N_P1_SYMBOLS-1;
+            }
+            symbolsPerP2Chunk = (plain2chunk_i == plain2NChunks-1) ? INT_MAX : ARITH_CODER_P2_SYMBOLS_PER_CHUNK;
+          }
+          ++plain2sym_i;
+          if (plain2sym_i == symbolsPerP2Chunk) {
+            plain2sym_i = 0;
+            ++plain2chunk_i;
+          }
+          if (theOnlyPlain2C != 0) {
+            c = theOnlyPlain2C;
+            goto mtf_decode;
+          }
+        }
         if (pModel) {
           #if 0
           uint64_t prod = umulh(invRange, range);
@@ -541,6 +562,7 @@ int decode(
             uint64_t prod = umulh(invRange, range); // scaled to 2^(33-RANGE_BITS)
             invRange = umulh(invRange, (PROD_ONE*2-1-prod)<<(RANGE_BITS+30))<<1;
           }
+          ++dst_i;
 
           // RLE decode
           if (pModel == &plain2Model) {
@@ -554,7 +576,7 @@ int decode(
               rlMsb += rlMsb;
 
               if (delta_rl > uint32_t(dstlen))
-                return -24; // zero run too long (A)
+                return -25; // zero run too long (A)
 
               // insert zero run
               int c0 = mtf_t[0];
@@ -566,22 +588,8 @@ int decode(
             } else {
               rlMsb = 1;
               if (c == ARITH_CODER_N_P1_SYMBOLS-1) {
-                if (plain2sym_i == 0) {
-                  int nPlain2Ranges = plain2Model.dequantize_and_prepare(&plain2Qh[plain2chunk_i*ARITH_CODER_N_P2_SYMBOLS], maxPlain2Hlen);
-                  theOnlyPlain2C = (nPlain2Ranges <= 1) ? plain2Model.m_c2low[0] + ARITH_CODER_N_P1_SYMBOLS-1 : 0;
-                  symbolsPerP2Chunk = (plain2chunk_i == plain2NChunks-1) ? INT_MAX : ARITH_CODER_P2_SYMBOLS_PER_CHUNK;
-                }
-                ++plain2sym_i;
-                if (plain2sym_i == symbolsPerP2Chunk) {
-                  plain2sym_i = 0;
-                  ++plain2chunk_i;
-                }
-                if (theOnlyPlain2C != 0) {
-                  c = theOnlyPlain2C;
-                } else {
-                  pModel = &plain2Model;
-                  continue; // don't do MTF decode
-                }
+                pModel = &plain2Model;
+                continue; // don't do MTF decode
               }
             }
           }
@@ -590,6 +598,7 @@ int decode(
         }
 
         // MTF decode
+        mtf_decode:
         int mtfC = c - 1;
         int dstC = mtf_t[mtfC];
         histogram[dstC] += 1;
@@ -601,6 +610,7 @@ int decode(
         break;
       }
     }
+    // printf("%016I64x %d %d %d %d\n", range, nPlain1Ranges, plain2chunk_i, plain2sym_i, theOnlyPlain2C);
   }
   return dst - dst0;
 }
@@ -633,10 +643,12 @@ int arithmetic_decode(
   if (plain1NChunks < 0)
     return plain1NChunks;
 
-  if (plain1NChunks > INT_MAX/ARITH_CODER_P1_SYMBOLS_PER_CHUNK/2)
+  if (plain1NChunks == 0)
     return -31;
-  if (plain1NChunks > 1 && plain1NChunks * ARITH_CODER_P1_SYMBOLS_PER_CHUNK - ARITH_CODER_P1_SYMBOLS_PER_CHUNK/2 > dstlen)
+  if (plain1NChunks > INT_MAX/ARITH_CODER_P1_SYMBOLS_PER_CHUNK/2)
     return -32;
+  if (plain1NChunks > 1 && plain1NChunks * ARITH_CODER_P1_SYMBOLS_PER_CHUNK - ARITH_CODER_P1_SYMBOLS_PER_CHUNK/2 > dstlen)
+    return -33;
   // printf("plain1NChunks=%d\n", plain1NChunks);
 
   int plain2NChunks = load_nChunks(&dec);
@@ -644,9 +656,9 @@ int arithmetic_decode(
     return plain2NChunks;
 
   if (plain2NChunks > INT_MAX/ARITH_CODER_P2_SYMBOLS_PER_CHUNK/2)
-    return -33;
-  if (plain2NChunks > 1 && plain2NChunks * ARITH_CODER_P2_SYMBOLS_PER_CHUNK - ARITH_CODER_P2_SYMBOLS_PER_CHUNK/2 > dstlen)
     return -34;
+  if (plain2NChunks > 1 && plain2NChunks * ARITH_CODER_P2_SYMBOLS_PER_CHUNK - ARITH_CODER_P2_SYMBOLS_PER_CHUNK/2 > dstlen)
+    return -35;
   // printf("plain2NChunks=%d\n", plain2NChunks);
 
   int qh1Len = plain1NChunks*ARITH_CODER_N_P1_SYMBOLS;

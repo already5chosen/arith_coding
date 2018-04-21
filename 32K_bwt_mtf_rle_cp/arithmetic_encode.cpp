@@ -279,10 +279,8 @@ static double Prepare2Plain(uint32_t* context, context_plain_hdr_t* hdr, uint8_t
         // calculate entropy after quantization
         for (int c = 0; c < hlen; ++c) {
           unsigned cnt = src[CONTEXT_CHK_HISTOGRAM_I+c];
-          if (cnt) {
+          if (cnt)
             entropy -= log2(ranges[c]/double(VAL_RANGE))*cnt;
-            ++nRanges;
-          }
         }
         // printf("%10d\n", int(entropy/8));
         range2low(dstChunk->c2low, ranges, hlen);
@@ -547,6 +545,7 @@ static int encode(uint8_t* dst, const uint32_t* context, CArithmeticEncoder* pEn
   uint64_t prevLo = lo;
   // int dbg_i = 0;
   const uint16_t* plain2_c2low = 0;
+  int uu = -1;
   uint32_t plain2chunk_i = 0;
   unsigned plain2_i = 0;
   unsigned srclen2 = 0;
@@ -575,6 +574,7 @@ static int encode(uint8_t* dst, const uint32_t* context, CArithmeticEncoder* pEn
               const context_plain2_c2low_t* p_p2_c2low =
                 reinterpret_cast<const context_plain2_c2low_t*>
                 (&context[hdrs->a[1].histOffset + hdrs->a[1].c2lowSz*plain2chunk_i]);
+              uu = p_p2_c2low->nRanges;
               plain2_c2low = p_p2_c2low->nRanges > 1 ? p_p2_c2low->c2low : 0;
               srclen2 = (plain2chunk_i == plain2nChunks-1) ? UINT_MAX: ARITH_CODER_P2_SYMBOLS_PER_CHUNK;
             }
@@ -613,6 +613,7 @@ static int encode(uint8_t* dst, const uint32_t* context, CArithmeticEncoder* pEn
       } while (plain2_c >= 0);
     }
     // printf(": %10d\n", dst-dst0);
+    // printf("%016I64x %d %d %d %d\n", range, p_p1_c2low->nRanges, plain2chunk_i, plain2_i, uu);
   }
 
   // output last bits
