@@ -269,10 +269,8 @@ static double prepare2(uint32_t * context)
         // calculate entropy after quantization
         for (int c = 0; c < hlen; ++c) {
           unsigned cnt = srcChunk[CONTEXT_CHK_HISTOGRAM_I+c];
-          if (cnt) {
+          if (cnt)
             entropy -= log2(ranges[c]/double(VAL_RANGE))*cnt;
-            ++nRanges;
-          }
         }
         // printf("%10d\n", int(entropy/8));
         range2low(dstChunk->c2low, ranges, hlen);

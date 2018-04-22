@@ -433,7 +433,6 @@ int decode(
     const int symbolsPerChunk = chunk_i == nChunks-1? ARITH_CODER_SYMBOLS_PER_CHUNK*2+32 : ARITH_CODER_SYMBOLS_PER_CHUNK;
     arithmetic_decode_model_t* pDefaultModel = &chunkModel;
     int theOnlyChunkC = 0;
-    int sym_i_incr_at_common = 0;
     if (nChunkRanges <= 1) {
       if (__builtin_expect(nChunkRanges == 0, 0))
         return -22; // chunk has to contain something
@@ -443,136 +442,132 @@ int decode(
       pDefaultModel = 0;
       if (theOnlyChunkC==ARITH_CODER_N_DYNAMIC_SYMBOLS-1) {
         pDefaultModel = &commonModel;
-        sym_i_incr_at_common = 1;
+        theOnlyChunkC = theOnlyCommonC;
+        if (theOnlyCommonC != 0)
+          pDefaultModel = 0;
       }
     }
 
-    for (int sym_i = 0; sym_i < symbolsPerChunk && dstlen != 0; ) {
+    for (int sym_i = 0; sym_i < symbolsPerChunk && dstlen != 0; ++sym_i) {
       arithmetic_decode_model_t* pModel = pDefaultModel;
-      for(;;++dst_i) {
-        int c = theOnlyChunkC;
-        if (pModel) {
-          #if 0
-          uint64_t prod = umulh(invRange, range);
-          if (prod > mxProd || prod < mnProd) {
-            const int64_t PROD_ONE = int64_t(1) << (33-RANGE_BITS);
-            if (prod > mxProd) mxProd=prod;
-            if (prod < mnProd) mnProd=prod;
-            printf("%016llx*%016llx=%3lld [%3lld..%3lld] %d (%d)\n"
-              ,(unsigned long long)range, (unsigned long long)invRange
-              ,(long long)(prod-PROD_ONE), (long long)(mnProd-PROD_ONE), (long long)(mxProd-PROD_ONE)
-              ,i, i & 15
-              );
-          }
-          #endif
-
-          if (value > (range << RANGE_BITS)-1) return -12;
-          // That is an input error, rather than internal error of decoder.
-          // Due to way that encoder works, not any bit stream is possible as its output
-          // That's the case of illegal code stream.
-          // The case is extremely unlikely, but not impossible.
-
-          // {
-          // uint64_t loEst33b = umulh(value,invRange);
-          // unsigned ri = loEst33b>>(33-9);
-          // unsigned lo = loEst33b>>(33-RANGE_BITS);
-          // }
-          c = pModel->val2c_estimate(value, invRange); // can be off by -1, much less likely by -2
-          // keep decoder in sync with encoder
-          uint64_t cLo = pModel->m_c2low[c+0];
-          uint64_t cHi = pModel->m_c2low[c+1];
-          value -= range * cLo;
-          uint64_t nxtRange = range * (cHi-cLo);
-          // at this point range is scaled by 2**64 - the same scale as value
-          while (__builtin_expect(value >= nxtRange, 0)) {
-            #ifdef ENABLE_PERF_COUNT
-            ++pModel->m_longLookupCount;
-            #endif
-            value -= nxtRange;
-            cLo = cHi;
-            cHi = pModel->m_c2low[c+2];
-            nxtRange = range * (cHi-cLo);
-            ++c;
-          }
-          range = nxtRange;
-          nxtRange = range >> RANGE_BITS;
-
-          if (nxtRange <= MIN_RANGE) {
-            #ifdef ENABLE_PERF_COUNT
-            ++pModel->m_renormalizationCount;
-            #endif
-            if (srclen < 8) {
-              if (!useTmpbuf && srclen > 0) {
-                memcpy(tmpbuf, src, srclen);
-                src = tmpbuf;
-                useTmpbuf = true;
-              }
-            }
-
-            uint32_t threeOctets =
-              (uint32_t(src[2])       ) |
-              (uint32_t(src[1]) << 1*8) |
-              (uint32_t(src[0]) << 2*8);
-            value = (value << 24) + threeOctets;
-            src    += 3;
-            srclen -= 3;
-            nxtRange = range << (24 - RANGE_BITS);
-            invRange >>= 24;
-            if (srclen < -7)
-              return dst-dst0;
-            if (value > ((nxtRange<<RANGE_BITS)-1)) {
-              return -103; // should not happen
-            }
-          }
-          range = nxtRange;
-
-          // update invRange
-          invRange = umulh(invRange, uint64_t(pModel->m_c2invRange[c]) << (63-31)) << (RANGE_BITS+1);
-
-          if ((dst_i & 15)==0) {
-            // do one NR iteration to increase precision of invRange and assure that invRange*range <= 2**(97-rb)
-            const uint64_t PROD_ONE = uint64_t(1) << (33-RANGE_BITS);
-            uint64_t prod = umulh(invRange, range); // scaled to 2^(33-RANGE_BITS)
-            invRange = umulh(invRange, (PROD_ONE*2-1-prod)<<(RANGE_BITS+30))<<1;
-          }
-
-          // RLE decode
-          if (pModel == &commonModel) {
-            c += ARITH_CODER_N_DYNAMIC_SYMBOLS-1;
-            sym_i += sym_i_incr_at_common;
-          } else {
-            ++sym_i;
-            if (c < 2) {
-              // zero run
-              uint32_t delta_rl = (c+1) * rlMsb;
-              rlMsb += rlMsb;
-
-              if (delta_rl > uint32_t(dstlen))
-                return -24; // zero run too long (A)
-
-              // insert zero run
-              int c0 = mtf_t[0];
-              histogram[c0] += delta_rl;
-              memset(dst, c0, delta_rl);
-              dst    += delta_rl;
-              dstlen -= delta_rl;
-              break; // don't do MTF decode
-            } else {
-              rlMsb = 1;
-              if (c == ARITH_CODER_N_DYNAMIC_SYMBOLS-1) {
-                if (theOnlyCommonC != 0) {
-                  c = theOnlyCommonC;
-                } else {
-                  pModel = &commonModel;
-                  continue; // don't do MTF decode
-                }
-              }
-            }
-          }
-        } else {
-          ++sym_i;
+      int c = theOnlyChunkC;
+      if (pModel) for (;;) {
+        // begin arithmetic decode of one character
+        #if 0
+        uint64_t prod = umulh(invRange, range);
+        if (prod > mxProd || prod < mnProd) {
+          const int64_t PROD_ONE = int64_t(1) << (33-RANGE_BITS);
+          if (prod > mxProd) mxProd=prod;
+          if (prod < mnProd) mnProd=prod;
+          printf("%016llx*%016llx=%3lld [%3lld..%3lld] %d (%d)\n"
+            ,(unsigned long long)range, (unsigned long long)invRange
+            ,(long long)(prod-PROD_ONE), (long long)(mnProd-PROD_ONE), (long long)(mxProd-PROD_ONE)
+            ,i, i & 15
+            );
         }
+        #endif
 
+        if (value > (range << RANGE_BITS)-1) return -12;
+        // That is an input error, rather than internal error of decoder.
+        // Due to way that encoder works, not any bit stream is possible as its output
+        // That's the case of illegal code stream.
+        // The case is extremely unlikely, but not impossible.
+
+        // {
+        // uint64_t loEst33b = umulh(value,invRange);
+        // unsigned ri = loEst33b>>(33-9);
+        // unsigned lo = loEst33b>>(33-RANGE_BITS);
+        // }
+        c = pModel->val2c_estimate(value, invRange); // can be off by -1, much less likely by -2
+        // keep decoder in sync with encoder
+        uint64_t cLo = pModel->m_c2low[c+0];
+        uint64_t cHi = pModel->m_c2low[c+1];
+        value -= range * cLo;
+        uint64_t nxtRange = range * (cHi-cLo);
+        // at this point range is scaled by 2**64 - the same scale as value
+        while (__builtin_expect(value >= nxtRange, 0)) {
+          #ifdef ENABLE_PERF_COUNT
+          ++pModel->m_longLookupCount;
+          #endif
+          value -= nxtRange;
+          cLo = cHi;
+          cHi = pModel->m_c2low[c+2];
+          nxtRange = range * (cHi-cLo);
+          ++c;
+        }
+        range = nxtRange;
+        nxtRange = range >> RANGE_BITS;
+
+        if (nxtRange <= MIN_RANGE) {
+          #ifdef ENABLE_PERF_COUNT
+          ++pModel->m_renormalizationCount;
+          #endif
+          if (srclen < 8) {
+            if (!useTmpbuf && srclen > 0) {
+              memcpy(tmpbuf, src, srclen);
+              src = tmpbuf;
+              useTmpbuf = true;
+            }
+          }
+
+          uint32_t threeOctets =
+            (uint32_t(src[2])       ) |
+            (uint32_t(src[1]) << 1*8) |
+            (uint32_t(src[0]) << 2*8);
+          value = (value << 24) + threeOctets;
+          src    += 3;
+          srclen -= 3;
+          nxtRange = range << (24 - RANGE_BITS);
+          invRange >>= 24;
+          if (srclen < -7)
+            return dst-dst0;
+          if (value > ((nxtRange<<RANGE_BITS)-1)) {
+            return -103; // should not happen
+          }
+        }
+        range = nxtRange;
+
+        // update invRange
+        invRange = umulh(invRange, uint64_t(pModel->m_c2invRange[c]) << (63-31)) << (RANGE_BITS+1);
+
+        if ((dst_i & 15)==0) {
+          // do one NR iteration to increase precision of invRange and assure that invRange*range <= 2**(97-rb)
+          const uint64_t PROD_ONE = uint64_t(1) << (33-RANGE_BITS);
+          uint64_t prod = umulh(invRange, range); // scaled to 2^(33-RANGE_BITS)
+          invRange = umulh(invRange, (PROD_ONE*2-1-prod)<<(RANGE_BITS+30))<<1;
+        }
+        ++dst_i;
+        // arithmetic decode of one character done
+
+        if (pModel == &commonModel) {
+          c += ARITH_CODER_N_DYNAMIC_SYMBOLS-1;
+        } else if (c == ARITH_CODER_N_DYNAMIC_SYMBOLS-1) {
+          c = theOnlyCommonC;
+          if (c == 0) {
+            pModel = &commonModel;
+            continue; // decode common symbol
+          }
+        }
+        break;
+      }
+
+      // RLE decode
+      if (c < 2) {
+        // zero run
+        uint32_t delta_rl = (c+1) * rlMsb;
+        rlMsb += rlMsb;
+
+        if (delta_rl > uint32_t(dstlen))
+          return -24; // zero run too long (A)
+
+        // insert zero run
+        int c0 = mtf_t[0];
+        histogram[c0] += delta_rl;
+        memset(dst, c0, delta_rl);
+        dst    += delta_rl;
+        dstlen -= delta_rl;
+      } else {
+        rlMsb = 1;
         // MTF decode
         int mtfC = c - 1;
         int dstC = mtf_t[mtfC];
@@ -582,7 +577,6 @@ int decode(
         // update move-to-front decoder table
         memmove(&mtf_t[1], &mtf_t[0], mtfC);
         mtf_t[0] = dstC;
-        break;
       }
     }
   }

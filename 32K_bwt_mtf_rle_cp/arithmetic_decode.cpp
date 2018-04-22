@@ -439,7 +439,6 @@ int decode(
       ARITH_CODER_P1_SYMBOLS_PER_CHUNK;
     arithmetic_decode_model_t* pDefaultModel = &plain1Model;
     int theOnlyPlain1C = 0;
-    int sym_i_incr_at_plain2 = 0;
     if (nPlain1Ranges <= 1) {
       if (__builtin_expect(nPlain1Ranges == 0, 0))
         return -22; // chunk has to contain something
@@ -449,14 +448,13 @@ int decode(
       pDefaultModel = 0;
       if (theOnlyPlain1C==ARITH_CODER_N_P1_SYMBOLS-1) {
         pDefaultModel = &plain2Model;
-        sym_i_incr_at_plain2 = 1;
       }
     }
 
-    for (int plain1sym_i = 0; plain1sym_i < symbolsPerP1Chunk && dstlen != 0; ) {
+    for (int plain1sym_i = 0; plain1sym_i < symbolsPerP1Chunk && dstlen != 0; ++plain1sym_i) {
       arithmetic_decode_model_t* pModel = pDefaultModel;
-      for(;;) {
-        int c = theOnlyPlain1C;
+      int c = theOnlyPlain1C;
+      if (pModel) for(;;) {
         if (pModel == &plain2Model) {
           if (plain2sym_i == 0) {
             int nPlain2Ranges = plain2Model.dequantize_and_prepare(&plain2Qh[plain2chunk_i*ARITH_CODER_N_P2_SYMBOLS], maxPlain2Hlen);
@@ -475,130 +473,124 @@ int decode(
           }
           if (theOnlyPlain2C != 0) {
             c = theOnlyPlain2C;
-            goto mtf_decode;
+            break;
           }
         }
-        if (pModel) {
-          #if 0
-          uint64_t prod = umulh(invRange, range);
-          if (prod > mxProd || prod < mnProd) {
-            const int64_t PROD_ONE = int64_t(1) << (33-RANGE_BITS);
-            if (prod > mxProd) mxProd=prod;
-            if (prod < mnProd) mnProd=prod;
-            printf("%016llx*%016llx=%3lld [%3lld..%3lld] %d (%d)\n"
-              ,(unsigned long long)range, (unsigned long long)invRange
-              ,(long long)(prod-PROD_ONE), (long long)(mnProd-PROD_ONE), (long long)(mxProd-PROD_ONE)
-              ,i, i & 15
-              );
-          }
+         
+        // begin arithmetic decode of one character
+        #if 0
+        uint64_t prod = umulh(invRange, range);
+        if (prod > mxProd || prod < mnProd) {
+          const int64_t PROD_ONE = int64_t(1) << (33-RANGE_BITS);
+          if (prod > mxProd) mxProd=prod;
+          if (prod < mnProd) mnProd=prod;
+          printf("%016llx*%016llx=%3lld [%3lld..%3lld] %d (%d)\n"
+            ,(unsigned long long)range, (unsigned long long)invRange
+            ,(long long)(prod-PROD_ONE), (long long)(mnProd-PROD_ONE), (long long)(mxProd-PROD_ONE)
+            ,i, i & 15
+            );
+        }
+        #endif
+
+        if (value > (range << RANGE_BITS)-1) return -12;
+        // That is an input error, rather than internal error of decoder.
+        // Due to way that encoder works, not any bit stream is possible as its output
+        // That's the case of illegal code stream.
+        // The case is extremely unlikely, but not impossible.
+
+        // {
+        // uint64_t loEst33b = umulh(value,invRange);
+        // unsigned ri = loEst33b>>(33-9);
+        // unsigned lo = loEst33b>>(33-RANGE_BITS);
+        // }
+        c = pModel->val2c_estimate(value, invRange); // can be off by -1, much less likely by -2
+        // keep decoder in sync with encoder
+        uint64_t cLo = pModel->m_c2low[c+0];
+        uint64_t cHi = pModel->m_c2low[c+1];
+        value -= range * cLo;
+        uint64_t nxtRange = range * (cHi-cLo);
+        // at this point range is scaled by 2**64 - the same scale as value
+        while (__builtin_expect(value >= nxtRange, 0)) {
+          #ifdef ENABLE_PERF_COUNT
+          ++pModel->m_longLookupCount;
           #endif
-
-          if (value > (range << RANGE_BITS)-1) return -12;
-          // That is an input error, rather than internal error of decoder.
-          // Due to way that encoder works, not any bit stream is possible as its output
-          // That's the case of illegal code stream.
-          // The case is extremely unlikely, but not impossible.
-
-          // {
-          // uint64_t loEst33b = umulh(value,invRange);
-          // unsigned ri = loEst33b>>(33-9);
-          // unsigned lo = loEst33b>>(33-RANGE_BITS);
-          // }
-          c = pModel->val2c_estimate(value, invRange); // can be off by -1, much less likely by -2
-          // keep decoder in sync with encoder
-          uint64_t cLo = pModel->m_c2low[c+0];
-          uint64_t cHi = pModel->m_c2low[c+1];
-          value -= range * cLo;
-          uint64_t nxtRange = range * (cHi-cLo);
-          // at this point range is scaled by 2**64 - the same scale as value
-          while (__builtin_expect(value >= nxtRange, 0)) {
-            #ifdef ENABLE_PERF_COUNT
-            ++pModel->m_longLookupCount;
-            #endif
-            value -= nxtRange;
-            cLo = cHi;
-            cHi = pModel->m_c2low[c+2];
-            nxtRange = range * (cHi-cLo);
-            ++c;
-          }
-          range = nxtRange;
-          nxtRange = range >> RANGE_BITS;
-
-          if (nxtRange <= MIN_RANGE) {
-            #ifdef ENABLE_PERF_COUNT
-            ++pModel->m_renormalizationCount;
-            #endif
-            if (srclen < 8) {
-              if (!useTmpbuf && srclen > 0) {
-                memcpy(tmpbuf, src, srclen);
-                src = tmpbuf;
-                useTmpbuf = true;
-              }
-            }
-
-            uint32_t threeOctets =
-              (uint32_t(src[2])       ) |
-              (uint32_t(src[1]) << 1*8) |
-              (uint32_t(src[0]) << 2*8);
-            value = (value << 24) + threeOctets;
-            src    += 3;
-            srclen -= 3;
-            nxtRange = range << (24 - RANGE_BITS);
-            invRange >>= 24;
-            if (srclen < -7)
-              return dst-dst0;
-            if (value > ((nxtRange<<RANGE_BITS)-1)) {
-              return -103; // should not happen
-            }
-          }
-          range = nxtRange;
-
-          // update invRange
-          invRange = umulh(invRange, uint64_t(pModel->m_c2invRange[c]) << (63-31)) << (RANGE_BITS+1);
-
-          if ((dst_i & 15)==0) {
-            // do one NR iteration to increase precision of invRange and assure that invRange*range <= 2**(97-rb)
-            const uint64_t PROD_ONE = uint64_t(1) << (33-RANGE_BITS);
-            uint64_t prod = umulh(invRange, range); // scaled to 2^(33-RANGE_BITS)
-            invRange = umulh(invRange, (PROD_ONE*2-1-prod)<<(RANGE_BITS+30))<<1;
-          }
-          ++dst_i;
-
-          // RLE decode
-          if (pModel == &plain2Model) {
-            c += ARITH_CODER_N_P1_SYMBOLS-1;
-            plain1sym_i += sym_i_incr_at_plain2;
-          } else {
-            ++plain1sym_i;
-            if (c < 2) {
-              // zero run
-              uint32_t delta_rl = (c+1) * rlMsb;
-              rlMsb += rlMsb;
-
-              if (delta_rl > uint32_t(dstlen))
-                return -25; // zero run too long (A)
-
-              // insert zero run
-              int c0 = mtf_t[0];
-              histogram[c0] += delta_rl;
-              memset(dst, c0, delta_rl);
-              dst    += delta_rl;
-              dstlen -= delta_rl;
-              break; // don't do MTF decode
-            } else {
-              rlMsb = 1;
-              if (c == ARITH_CODER_N_P1_SYMBOLS-1) {
-                pModel = &plain2Model;
-                continue; // don't do MTF decode
-              }
-            }
-          }
-        } else {
-          ++plain1sym_i;
+          value -= nxtRange;
+          cLo = cHi;
+          cHi = pModel->m_c2low[c+2];
+          nxtRange = range * (cHi-cLo);
+          ++c;
         }
+        range = nxtRange;
+        nxtRange = range >> RANGE_BITS;
 
+        if (nxtRange <= MIN_RANGE) {
+          #ifdef ENABLE_PERF_COUNT
+          ++pModel->m_renormalizationCount;
+          #endif
+          if (srclen < 8) {
+            if (!useTmpbuf && srclen > 0) {
+              memcpy(tmpbuf, src, srclen);
+              src = tmpbuf;
+              useTmpbuf = true;
+            }
+          }
+
+          uint32_t threeOctets =
+            (uint32_t(src[2])       ) |
+            (uint32_t(src[1]) << 1*8) |
+            (uint32_t(src[0]) << 2*8);
+          value = (value << 24) + threeOctets;
+          src    += 3;
+          srclen -= 3;
+          nxtRange = range << (24 - RANGE_BITS);
+          invRange >>= 24;
+          if (srclen < -7)
+            return dst-dst0;
+          if (value > ((nxtRange<<RANGE_BITS)-1)) {
+            return -103; // should not happen
+          }
+        }
+        range = nxtRange;
+
+        // update invRange
+        invRange = umulh(invRange, uint64_t(pModel->m_c2invRange[c]) << (63-31)) << (RANGE_BITS+1);
+
+        if ((dst_i & 15)==0) {
+          // do one NR iteration to increase precision of invRange and assure that invRange*range <= 2**(97-rb)
+          const uint64_t PROD_ONE = uint64_t(1) << (33-RANGE_BITS);
+          uint64_t prod = umulh(invRange, range); // scaled to 2^(33-RANGE_BITS)
+          invRange = umulh(invRange, (PROD_ONE*2-1-prod)<<(RANGE_BITS+30))<<1;
+        }
+        ++dst_i;
+        // arithmetic decode of one character done
+
+        if (pModel == &plain2Model) {
+          c += ARITH_CODER_N_P1_SYMBOLS-1;
+        } else if (c == ARITH_CODER_N_P1_SYMBOLS-1) {
+          pModel = &plain2Model;
+          continue; // decode plain2 symbol
+        }
+        break;        
+      }
+
+      // RLE decode
+      if (c < 2) {
+        // zero run
+        uint32_t delta_rl = (c+1) * rlMsb;
+        rlMsb += rlMsb;
+
+        if (delta_rl > uint32_t(dstlen))
+          return -25; // zero run too long (A)
+
+        // insert zero run
+        int c0 = mtf_t[0];
+        histogram[c0] += delta_rl;
+        memset(dst, c0, delta_rl);
+        dst    += delta_rl;
+        dstlen -= delta_rl;
+      } else {
+        rlMsb = 1;
         // MTF decode
-        mtf_decode:
         int mtfC = c - 1;
         int dstC = mtf_t[mtfC];
         histogram[dstC] += 1;
@@ -607,7 +599,6 @@ int decode(
         // update move-to-front decoder table
         memmove(&mtf_t[1], &mtf_t[0], mtfC);
         mtf_t[0] = dstC;
-        break;
       }
     }
     // printf("%016I64x %d %d %d %d\n", range, nPlain1Ranges, plain2chunk_i, plain2sym_i, theOnlyPlain2C);
