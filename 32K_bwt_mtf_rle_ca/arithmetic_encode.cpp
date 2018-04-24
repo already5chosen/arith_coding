@@ -12,15 +12,16 @@ static const int      QH_SCALE  = 1 << QH_BITS;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 
 static const int ARITH_CODER_N_P2_SYMBOLS = 257 + 1 - ARITH_CODER_N_P1_SYMBOLS;
-struct context_plain2_c2low_t {
+
+template <int N_SYMBOLS>
+struct context_plainN_c2low_t {
   uint32_t nRanges;
-  uint16_t c2low[ARITH_CODER_N_P2_SYMBOLS+1];
+  uint32_t symbolsPerChunk;
+  uint16_t c2low[N_SYMBOLS+1];
 };
 
-struct context_plain1_c2low_t {
-  uint32_t nRanges;
-  uint16_t c2low[ARITH_CODER_N_P1_SYMBOLS+1];
-};
+typedef context_plainN_c2low_t<ARITH_CODER_N_P1_SYMBOLS> context_plain1_c2low_t;
+typedef context_plainN_c2low_t<ARITH_CODER_N_P2_SYMBOLS> context_plain2_c2low_t;
 
 struct context_plain_hdr_t {
   uint32_t histOffset;
@@ -45,6 +46,7 @@ enum {
   CONTEXT_HDR_LEN = CONTEXT_HDR_PLAIN_HDRS_I + CONTEXT_PLAINS_HDRS_SZ,
   // context plain1 histogram chunk
   CONTEXT_CHK_HLEN_I = 0,
+  CONTEXT_CHK_PG_PER_CHUNK_I,
   CONTEXT_CHK_HISTOGRAM_I,
   CONTEXT_P1_CHK_LEN = CONTEXT_CHK_HISTOGRAM_I + ARITH_CODER_N_P1_SYMBOLS,
   CONTEXT_P2_CHK_LEN = CONTEXT_CHK_HISTOGRAM_I + ARITH_CODER_N_P2_SYMBOLS,
@@ -158,26 +160,165 @@ static void quantize_histogram(uint8_t* __restrict qh, const uint32_t *h, int le
   }
 }
 
-static void HandleLastChunk(uint32_t* context, context_plain_hdr_t* hdr)
+static void AdaptAdd(uint32_t* dst, const uint32_t* prev, unsigned len)
 {
-  uint32_t* plainH = &context[hdr->histOffset];
+  for (unsigned c = 0; c < len; ++c)
+    dst[c] += prev[c];
+}
+
+static void AdaptSub(uint32_t* dst, const uint32_t* prev, unsigned len)
+{
+  for (unsigned c = 0; c < len; ++c)
+    dst[c] -= prev[c];
+}
+
+static std::pair<double, double> AdaptCalculateTwoEntropies(
+  uint32_t* h0, // base
+  uint32_t* h1, // last page of the first half
+  uint32_t* h2, // last page of the second half
+  unsigned hlen)
+{
+  double entropy1=0, entropy2=0;
+  uint32_t tot1 = 0, tot2 = 0;
+  if (h0 == 0) {
+    for (unsigned c = 0; c < hlen; ++c) {
+      uint32_t val1 = h1[c];
+      uint32_t val2 = h2[c]-h1[c];
+      if (val1 != 0) {
+        tot1 += val1;
+        entropy1 -= log2(val1)*val1;
+      }
+      if (val2 != 0) {
+        tot2 += val2;
+        entropy2 -= log2(val2)*val2;
+      }
+    }
+  } else {
+    for (unsigned c = 0; c < hlen; ++c) {
+      uint32_t val1 = h1[c]-h0[c];
+      uint32_t val2 = h2[c]-h1[c];
+      if (val1 != 0) {
+        tot1 += val1;
+        entropy1 -= log2(val1)*val1;
+      }
+      if (val2 != 0) {
+        tot2 += val2;
+        entropy2 -= log2(val2)*val2;
+      }
+    }
+  }
+  if (tot1 > 0) entropy1 += log2(tot1)*tot1;
+  if (tot2 > 0) entropy2 += log2(tot2)*tot2;
+  return std::make_pair(entropy1, entropy2);
+}
+
+static double AdaptCalculateOneEntropy(
+  uint32_t* h0,
+  uint32_t* h1,
+  unsigned  hlen)
+{
+  double entropy=0;
+  uint32_t tot = 0;
+  if (h0 == 0) {
+    for (unsigned c = 0; c < hlen; ++c) {
+      uint32_t val = h1[c];
+      if (val != 0) {
+        tot += val;
+        entropy -= log2(val)*val;
+      }
+    }
+  } else {
+    for (unsigned c = 0; c < hlen; ++c) {
+      uint32_t val = h1[c]-h0[c];
+      if (val != 0) {
+        tot += val;
+        entropy -= log2(val)*val;
+      }
+    }
+  }
+  if (tot > 0) entropy += log2(tot)*tot;
+  return entropy;
+}
+
+static void Adapt(uint32_t* context, context_plain_hdr_t* hdr)
+{
+  uint32_t* h = &context[hdr->histOffset];
   uint32_t plainLen = hdr->len;
   uint32_t symbolsPerChunk = hdr->symbolsPerChunk;
-  uint32_t nChunks = plainLen / symbolsPerChunk; // full chunks
-  uint32_t symbolsInLastChunk = plainLen % symbolsPerChunk;
-  if (symbolsInLastChunk > 0) {
-    // partial chunk exists
-    if (symbolsInLastChunk < symbolsPerChunk/2 && nChunks > 0) {
-      // add last chunk to before-last
-      uint32_t nSymbols = hdr->nSymbols;
-      uint32_t* dstChunk = &plainH[(nSymbols+CONTEXT_CHK_HISTOGRAM_I)*(nChunks-1)];
-      uint32_t* srcChunk = &plainH[(nSymbols+CONTEXT_CHK_HISTOGRAM_I)*(nChunks-0)];
-      for (int i = 0; i < nSymbols; ++i) {
-        dstChunk[CONTEXT_CHK_HISTOGRAM_I+i] += srcChunk[CONTEXT_CHK_HISTOGRAM_I+i];
-      }
-    } else {
-      nChunks += 1;
+  unsigned nChunks = (plainLen+symbolsPerChunk-1)/symbolsPerChunk;
+  if (nChunks > 1) {
+    h[CONTEXT_CHK_PG_PER_CHUNK_I] = 0;
+    unsigned nSymbols = hdr->nSymbols;
+    unsigned contextChnkLen = CONTEXT_CHK_HISTOGRAM_I + nSymbols;
+    double ee_sum = 0;
+    unsigned i0 = 0;
+    const double DICT_LEN = (nSymbols+1)*5.5; // estimate for a size of the dictionary (model)
+    for (unsigned i2 = 1; i2 < nChunks; ++i2) {
+      h[i2*contextChnkLen+CONTEXT_CHK_PG_PER_CHUNK_I] = 0;
+      // h[i] - histogram of all chunks in range [0..i]
+      AdaptAdd(
+        &h[i2    *contextChnkLen+CONTEXT_CHK_HISTOGRAM_I],
+        &h[(i2-1)*contextChnkLen+CONTEXT_CHK_HISTOGRAM_I],
+        nSymbols);
+      do {
+        uint32_t* h0 = i0==0 ? 0 : &h[(i0-1)*contextChnkLen+CONTEXT_CHK_HISTOGRAM_I];
+        double ee2_min  = 1e100;
+        double e1st_min = 0;
+        unsigned i1_min = i0;
+        // find the best split of pages [i0..i2]
+        for (unsigned i1 = i0; i1 < i2; ++i1) {
+          std::pair<double, double> e2 = AdaptCalculateTwoEntropies(
+            h0,
+            &h[i1*contextChnkLen+CONTEXT_CHK_HISTOGRAM_I],
+            &h[i2*contextChnkLen+CONTEXT_CHK_HISTOGRAM_I],
+            nSymbols);
+          double ee = e2.first + e2.second;
+          // printf("%d %d %d %d %f %f\n", i0, i1, i2, nSymbols, e2.first, e2.second);
+          if (ee < ee2_min) {
+            ee2_min = ee;
+            e1st_min = e2.first;
+            i1_min = i1;
+          }
+        }
+        double ee1 = AdaptCalculateOneEntropy(h0, &h[i2*contextChnkLen+CONTEXT_CHK_HISTOGRAM_I], nSymbols);
+        // printf("%d %d %d %d %f %f * %d\n", i0, i1_min, i2, nSymbols, ee1, ee2_min + DICT_LEN, nChunks);
+        if (ee2_min + DICT_LEN < ee1) {
+          // segment ends at page i1_min
+          h[i1_min*contextChnkLen+CONTEXT_CHK_PG_PER_CHUNK_I] = 1; // mark
+          ee_sum += e1st_min;
+          i0 = i1_min + 1;
+        } else {
+          // the best split is not as good as no split
+          break;
+        }
+      } while (i0 < i2);
+      h[(nChunks-1)*contextChnkLen+CONTEXT_CHK_PG_PER_CHUNK_I] = 1; // mark last page
     }
+
+    // database compaction
+    unsigned nSeg = 0;
+    unsigned prev_i = 0;
+    for (unsigned i = 0; i < nChunks; ++i) {
+      uint32_t* hi = &h[i*contextChnkLen];
+      if (hi[CONTEXT_CHK_PG_PER_CHUNK_I] != 0) {
+        h[CONTEXT_CHK_PG_PER_CHUNK_I] = (nSeg == 0) ? i+1 : i-prev_i;
+        if (nSeg != i)
+          memcpy(&h[nSeg*contextChnkLen+CONTEXT_CHK_HISTOGRAM_I], &hi[CONTEXT_CHK_HISTOGRAM_I], sizeof(h[0])*nSymbols);
+        ++nSeg;
+        prev_i = i;
+      }
+    }
+    nChunks = nSeg;
+
+    // change format of histogram from cumulative sum to sum of specific chunk
+    for (unsigned i = nChunks-1; i > 0; --i) {
+      AdaptSub(
+        &h[i    *contextChnkLen+CONTEXT_CHK_HISTOGRAM_I],
+        &h[(i-1)*contextChnkLen+CONTEXT_CHK_HISTOGRAM_I],
+        nSymbols);
+    }
+  } else if (nChunks > 0) {
+    h[CONTEXT_CHK_PG_PER_CHUNK_I] = 1;
   }
   hdr->nChunks = nChunks;
 }
@@ -228,8 +369,8 @@ static void prepare1(uint32_t* context, double* pInfo)
 {
   context_plain_hdrs_t* hdrs = reinterpret_cast<context_plain_hdrs_t*>(&context[CONTEXT_HDR_PLAIN_HDRS_I]);
 
-  HandleLastChunk(context, &hdrs->a[0]);
-  HandleLastChunk(context, &hdrs->a[1]);
+  Adapt(context, &hdrs->a[0]);
+  Adapt(context, &hdrs->a[1]);
 
   uint32_t qhOffset = hdrs->a[1].histOffset + CONTEXT_P2_CHK_LEN*hdrs->a[1].nChunks;
   context[CONTEXT_HDR_QH_OFFSET_I] = qhOffset;
