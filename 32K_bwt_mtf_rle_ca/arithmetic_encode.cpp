@@ -163,78 +163,26 @@ static void AdaptAdd(uint32_t* dst, const uint32_t* prev, unsigned len)
     dst[c] += prev[c];
 }
 
-static void AdaptSub(uint32_t* dst, const uint32_t* prev, unsigned len)
-{
-  for (unsigned c = 0; c < len; ++c)
-    dst[c] -= prev[c];
-}
-
-static std::pair<double, double> AdaptCalculateTwoEntropies(
-  uint32_t* h0, // base
-  uint32_t* h1, // last page of the first half
-  uint32_t* h2, // last page of the second half
-  unsigned hlen)
-{
-  double entropy1=0, entropy2=0;
-  uint32_t tot1 = 0, tot2 = 0;
-  if (h0 == 0) {
-    for (unsigned c = 0; c < hlen; ++c) {
-      uint32_t val1 = h1[c];
-      uint32_t val2 = h2[c]-h1[c];
-      if (val1 != 0) {
-        tot1 += val1;
-        entropy1 -= log2(val1)*val1;
-      }
-      if (val2 != 0) {
-        tot2 += val2;
-        entropy2 -= log2(val2)*val2;
-      }
-    }
-  } else {
-    for (unsigned c = 0; c < hlen; ++c) {
-      uint32_t val1 = h1[c]-h0[c];
-      uint32_t val2 = h2[c]-h1[c];
-      if (val1 != 0) {
-        tot1 += val1;
-        entropy1 -= log2(val1)*val1;
-      }
-      if (val2 != 0) {
-        tot2 += val2;
-        entropy2 -= log2(val2)*val2;
-      }
-    }
-  }
-  if (tot1 > 0) entropy1 += log2(tot1)*tot1;
-  if (tot2 > 0) entropy2 += log2(tot2)*tot2;
-  return std::make_pair(entropy1, entropy2);
-}
-
-static double AdaptCalculateOneEntropy(
-  uint32_t* h0,
-  uint32_t* h1,
-  unsigned  hlen)
+static double AdaptAddAndCalculateEntropy(uint32_t* hAcc, const uint32_t* h, unsigned  hlen)
 {
   double entropy=0;
   uint32_t tot = 0;
-  if (h0 == 0) {
-    for (unsigned c = 0; c < hlen; ++c) {
-      uint32_t val = h1[c];
-      if (val != 0) {
-        tot += val;
-        entropy -= log2(val)*val;
-      }
-    }
-  } else {
-    for (unsigned c = 0; c < hlen; ++c) {
-      uint32_t val = h1[c]-h0[c];
-      if (val != 0) {
-        tot += val;
-        entropy -= log2(val)*val;
-      }
+  for (unsigned c = 0; c < hlen; ++c) {
+    uint32_t val = h[c] + hAcc[c];
+    hAcc[c] = val;
+    if (val != 0) {
+      tot += val;
+      entropy -= log2(val)*val;
     }
   }
   if (tot > 0) entropy += log2(tot)*tot;
   return entropy;
+}
+
+static int EntrArrIdx(int iBeg, int iEnd) {
+  int ri = iEnd - iBeg;
+  int rowLen = 257-ri;
+  return ((257+rowLen+1)*ri)/2 + (iBeg % rowLen);
 }
 
 static void Adapt(uint32_t* context, context_plain_hdr_t* hdr)
@@ -247,77 +195,83 @@ static void Adapt(uint32_t* context, context_plain_hdr_t* hdr)
     h[CONTEXT_CHK_PG_PER_CHUNK_I] = 0;
     unsigned nSymbols = hdr->nSymbols;
     unsigned contextChnkLen = CONTEXT_CHK_HISTOGRAM_I + nSymbols;
-    double ee_sum = 0;
-    unsigned i0 = 0;
+    int i0 = 0;
     const double DICT_LEN = (nSymbols+1)*5.5; // estimate for a size of the dictionary (model)
-    for (unsigned i2 = 1; i2 < nChunks; ++i2) {
+
+    float entrArr[(257*258)/2]; // entropy estimates for sections of pages
+    // 2D matrix,
+    // Each row contains entropies for given number of pages, starting with 1 page and up to 257
+    // A column corresponds to particular starting index of the page, modulo # of columns in the row.
+    // In order to minimize storage, only upper-left triangle+diagonal is stored
+
+    for (int i2 = 0; i2 < nChunks; ++i2) {
+      uint32_t accH[256]={0};
+      // calculate and store entropy for all sections that start at [i0..i2] and end at page i2
+      int entrArrRowBegI = 0;
+      for (int i1 = i2; i1 >= i0; --i1) {
+        double e = AdaptAddAndCalculateEntropy(accH, &h[i1*contextChnkLen+CONTEXT_CHK_HISTOGRAM_I], nSymbols);
+        int rowLen = 257-(i2-i1);
+        entrArr[entrArrRowBegI + (i1 % rowLen)] = static_cast<float>(e);
+        entrArrRowBegI += rowLen;
+      }
+
       h[i2*contextChnkLen+CONTEXT_CHK_PG_PER_CHUNK_I] = 0;
-      // h[i] - histogram of all chunks in range [0..i]
-      AdaptAdd(
-        &h[i2    *contextChnkLen+CONTEXT_CHK_HISTOGRAM_I],
-        &h[(i2-1)*contextChnkLen+CONTEXT_CHK_HISTOGRAM_I],
-        nSymbols);
-      do {
-        uint32_t* h0 = i0==0 ? 0 : &h[(i0-1)*contextChnkLen+CONTEXT_CHK_HISTOGRAM_I];
+      while (i0 < i2) {
         double ee2_min  = 1e100;
         double e1st_min = 0;
         unsigned i1_min = i0;
         // find the best split of pages [i0..i2]
-        for (unsigned i1 = i0; i1 < i2; ++i1) {
-          std::pair<double, double> e2 = AdaptCalculateTwoEntropies(
-            h0,
-            &h[i1*contextChnkLen+CONTEXT_CHK_HISTOGRAM_I],
-            &h[i2*contextChnkLen+CONTEXT_CHK_HISTOGRAM_I],
-            nSymbols);
-          double ee = e2.first + e2.second;
-          // printf("%d %d %d %d %f %f\n", i0, i1, i2, nSymbols, e2.first, e2.second);
+        for (int i1 = i0; i1 < i2; ++i1) {
+          double e1 = entrArr[EntrArrIdx(i0,i1)];   // entropy of segment[i0..i1]
+          double e2 = entrArr[EntrArrIdx(i1+1,i2)]; // entropy of segment[i1+1..i2]
+          double ee = e1 + e2;
+          // printf("%d %d %d %d %f %f\n", i0, i1, i2, nSymbols, e1, e2);
           if (ee < ee2_min) {
             ee2_min = ee;
-            e1st_min = e2.first;
+            e1st_min = e1;
             i1_min = i1;
           }
         }
         bool split = true;
         if (i2-i0 < 256) {
-          double ee1 = AdaptCalculateOneEntropy(h0, &h[i2*contextChnkLen+CONTEXT_CHK_HISTOGRAM_I], nSymbols);
+          double ee1 = entrArr[EntrArrIdx(i0,i2)];
           // printf("%d %d %d %d %f %f * %d\n", i0, i1_min, i2, nSymbols, ee1, ee2_min + DICT_LEN, nChunks);
           split = ee2_min + DICT_LEN < ee1;
         }
         if (split) {
+          // printf("%d %d %d %d * %d\n", i0, i1_min, i2, nSymbols, nChunks);
           // segment ends at page i1_min
           h[i1_min*contextChnkLen+CONTEXT_CHK_PG_PER_CHUNK_I] = 1; // mark
-          ee_sum += e1st_min;
           i0 = i1_min + 1;
         } else {
           // the best split is not as good as no split
           break;
         }
-      } while (i0 < i2);
-      h[(nChunks-1)*contextChnkLen+CONTEXT_CHK_PG_PER_CHUNK_I] = 1; // mark last page
+      }
     }
+    h[(nChunks-1)*contextChnkLen+CONTEXT_CHK_PG_PER_CHUNK_I] = 1; // mark last page
+    // printf("%d: %f\n", nSymbols, ee_sum/8);
 
     // database compaction
     unsigned nSeg = 0;
-    unsigned prev_i = 0;
+    unsigned pgPerSeg = 0;
     for (unsigned i = 0; i < nChunks; ++i) {
-      uint32_t* hi = &h[i*contextChnkLen];
-      if (hi[CONTEXT_CHK_PG_PER_CHUNK_I] != 0) {
-        h[nSeg*contextChnkLen+CONTEXT_CHK_PG_PER_CHUNK_I] = (nSeg == 0) ? i+1 : i-prev_i;
-        if (nSeg != i)
-          memcpy(&h[nSeg*contextChnkLen+CONTEXT_CHK_HISTOGRAM_I], &hi[CONTEXT_CHK_HISTOGRAM_I], sizeof(h[0])*nSymbols);
+      uint32_t* pSrc = &h[i*contextChnkLen];
+      uint32_t* pDst = &h[nSeg*contextChnkLen];
+      if (pgPerSeg == 0) {
+        if (i != nSeg)
+          memcpy(&pDst[CONTEXT_CHK_HISTOGRAM_I], &pSrc[CONTEXT_CHK_HISTOGRAM_I], sizeof(h[0])*nSymbols);
+      } else {
+        AdaptAdd(&pDst[CONTEXT_CHK_HISTOGRAM_I], &pSrc[CONTEXT_CHK_HISTOGRAM_I], nSymbols);
+      }
+      ++pgPerSeg;
+      if (pSrc[CONTEXT_CHK_PG_PER_CHUNK_I] != 0) {
+        pDst[CONTEXT_CHK_PG_PER_CHUNK_I] = pgPerSeg;
         ++nSeg;
-        prev_i = i;
+        pgPerSeg = 0;
       }
     }
     nChunks = nSeg;
-
-    // change format of histogram from cumulative sum to sum of specific chunk
-    for (unsigned i = nChunks-1; i > 0; --i) {
-      AdaptSub(
-        &h[i    *contextChnkLen+CONTEXT_CHK_HISTOGRAM_I],
-        &h[(i-1)*contextChnkLen+CONTEXT_CHK_HISTOGRAM_I],
-        nSymbols);
-    }
   } else if (nChunks > 0) {
     h[CONTEXT_CHK_PG_PER_CHUNK_I] = 1;
   }
@@ -350,7 +304,7 @@ static double Prepare1Plain(uint32_t* context, double* pInfo, context_plain_hdr_
 
     if (maxC >= 0) {
       if (pInfo) {
-        // calculate source entropy of static part of histogram
+        // calculate source entropy of histogram
         entropy += log2(double(tot))*tot;
         for (int c = 0; c <= maxC; ++c) {
           int32_t cnt = histogram[c];
@@ -381,6 +335,7 @@ static void prepare1(uint32_t* context, double* pInfo)
 
   double entropy1 = Prepare1Plain(context, pInfo, &hdrs->a[0], qHistogram1);
   double entropy2 = Prepare1Plain(context, pInfo, &hdrs->a[1], qHistogram2);
+  // printf("%f+%f\n", entropy1/8, entropy2/8);
 
   if (pInfo) {
     pInfo[0] = entropy1+entropy2;
