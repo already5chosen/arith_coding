@@ -40,31 +40,29 @@ static const uint32_t tab1[64] = {
  971571443  , 810237358  , 651769995  , 496213457  ,
 };
 
-static const double poly_tab[4] = {
-  -0.350964418702816,   0.480791924089072,  -0.721347115690035,   1.442695040541489
-};
+static const double poly0_tab[] = { -0.350964418702816 };
+static const double poly1_tab[] = { -1.64239457381948  };
+static const double poly2_tab[] = { 0.272478142216230,  2.502844961116389 };
 double fast_log2(uint32_t x)
 {
-  int prt = x==113;
-  // static const double POW2_31 = (uint32_t)1 << 31;
-  static const double INV_POW2_31 = 1.0/ ((uint32_t)1 << 31);
-  static const double INV_POW2_35 = 1.0/16.0/((uint32_t)1 << 31);
+  static const double INV_POW2_35 = 1.0/ ((int64_t)1 << 35);
+  static const double INV_POW2_40 = 1.0/ ((int64_t)1 << 40);
   int lz = __builtin_clz(x);
+  int64_t iRes = (uint64_t)(31 - lz) << 35; // integer part of result, scaled by 2^35
   x <<= lz;
   uint32_t idx1 = (x >> 25) & 63;
-  uint32_t x2 = ((uint64_t)x * (tab1i[idx1] + 257)) >> 9;
-  // double res = idx1*(1.0/64) + tab1[idx1]*INV_POW2_35;
-  double res = (((int64_t)idx1 << 29) - (1<<29) + tab1[idx1])*INV_POW2_35;
-  double dx = (x2 - ((uint32_t)1 << 31))*INV_POW2_31;
-  double polyval = (((poly_tab[0]*dx + poly_tab[1])*dx) + poly_tab[2])*dx + poly_tab[3];
-  res += polyval*dx;
-  // res += (x2 - ((uint32_t)1 << 31)) * 6.71807229932846e-010;
-  
-  // if (prt) {
-    // printf("x = %08x idx1=%u ti=%d xx=%011I64x\n", x, idx1, tab1i[idx1] + 257, (uint64_t)x * (tab1i[idx1] + 257));
-  // }
-  
-  
-  return 31 - lz + res;
-  // return 31 - lz + (x*INV_POW2_31 - 1.0);
+  int64_t x2 = (uint64_t)x * (tab1i[idx1] + 257);
+
+  iRes += (uint64_t)idx1 << 29;
+  iRes -= (uint64_t)1    << 29;
+  iRes += tab1[idx1];
+  double res = iRes*INV_POW2_35;
+  double dx  = (x2 - ((int64_t)1 << 40))*INV_POW2_40;
+  double polyval0 = dx * poly0_tab[0];
+  double polyval1 = dx + poly1_tab[0];
+  double polyval2 = (dx + poly2_tab[0]) * dx + poly2_tab[1];
+  double polyval = polyval0*polyval1*polyval2;
+  res += polyval;
+
+  return res;
 }
