@@ -191,7 +191,7 @@ static const uint32_t lg2_tab[71] = {
 double fast_log2(uint32_t x)
 {
   static const double INV_POW2_37 = 1.0/ ((int64_t)1 << 37);
-  static const double POLY_1      = 1.4426950408889633870/(((int64_t)1 << 16));
+  static const double POLY_1      = 1.4424763739753376779/(((int64_t)1 << 16));
   int lz = __builtin_clz(x);
   int64_t iRes = (uint64_t)(31 - lz) << 37; // integer part of result, scaled by 2^37
   x <<= lz;
