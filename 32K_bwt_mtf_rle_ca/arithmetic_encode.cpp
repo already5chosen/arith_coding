@@ -7,6 +7,7 @@
 #include "arithmetic_encode.h"
 #include "arithmetic_coder_ut.h"
 #include "arithmetic_coder_cfg.h"
+#include "fast_log2.h"
 
 static const int      QH_SCALE  = 1 << QH_BITS;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
@@ -172,10 +173,10 @@ static double AdaptAddAndCalculateEntropy(uint32_t* hAcc, const uint32_t* h, uns
     hAcc[c] = val;
     if (val != 0) {
       tot += val;
-      entropy -= log2(val)*val;
+      entropy -= fast_log2(val)*val;
     }
   }
-  if (tot > 0) entropy += log2(tot)*tot;
+  if (tot > 0) entropy += fast_log2(tot)*tot;
   return entropy;
 }
 
@@ -376,11 +377,14 @@ static double Prepare2Plain(uint32_t* context, context_plain_hdr_t* hdr, uint8_t
       nRanges = quantized_histogram_to_range(ranges, hlen, qHistogram+1, VAL_RANGE);
       if (nRanges > 1) {
         // calculate entropy after quantization
+        int32_t tot = 0;
         for (int c = 0; c < hlen; ++c) {
           unsigned cnt = src[CONTEXT_CHK_HISTOGRAM_I+c];
           if (cnt)
-            entropy -= log2(ranges[c]/double(VAL_RANGE))*cnt;
+            entropy -= fast_log2(ranges[c])*cnt;
+          tot += cnt;
         }
+        entropy += RANGE_BITS*tot;
         // printf("%10d\n", int(entropy/8));
         range2low(dstChunk->c2low, ranges, hlen);
       }
