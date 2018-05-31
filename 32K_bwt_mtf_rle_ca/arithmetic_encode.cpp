@@ -30,7 +30,7 @@ struct context_plain_hdr_t {
   uint32_t nChunks;
   uint32_t maxHLen;
   uint32_t nSymbols;
-  uint32_t symbolsPerChunk;
+  uint32_t pageSz;
   uint32_t c2lowSz;
 };
 
@@ -69,8 +69,8 @@ void arithmetic_encode_init_context(uint32_t* context, int tilelen)
   hdrs->a[1].len = 0;
   hdrs->a[0].nSymbols = ARITH_CODER_N_P1_SYMBOLS;
   hdrs->a[1].nSymbols = ARITH_CODER_N_P2_SYMBOLS;
-  hdrs->a[0].symbolsPerChunk = ARITH_CODER_P1_PAGE_SZ;
-  hdrs->a[1].symbolsPerChunk = ARITH_CODER_P2_PAGE_SZ;
+  hdrs->a[0].pageSz = ARITH_CODER_P1_PAGE_SZ;
+  hdrs->a[1].pageSz = ARITH_CODER_P2_PAGE_SZ;
   hdrs->a[0].c2lowSz = CONTEXT_P1_C2LOW_SZ;
   hdrs->a[1].c2lowSz = CONTEXT_P2_C2LOW_SZ;
 }
@@ -189,10 +189,11 @@ static int EntrArrIdx(int iBeg, int iEnd) {
 static void Adapt(uint32_t* context, context_plain_hdr_t* hdr)
 {
   uint32_t* h = &context[hdr->histOffset];
-  uint32_t plainLen = hdr->len;
-  uint32_t symbolsPerChunk = hdr->symbolsPerChunk;
-  unsigned nChunks = (plainLen+symbolsPerChunk-1)/symbolsPerChunk;
-  if (nChunks > 1) {
+  const uint32_t plainLen = hdr->len;
+  const uint32_t pageSz = hdr->pageSz;
+  const unsigned nPages = (plainLen+pageSz-1)/pageSz;
+  hdr->nChunks = nPages;
+  if (nPages > 1) {
     h[CONTEXT_CHK_PG_PER_CHUNK_I] = 0;
     unsigned nSymbols = hdr->nSymbols;
     unsigned contextChnkLen = CONTEXT_CHK_HISTOGRAM_I + nSymbols;
@@ -205,7 +206,7 @@ static void Adapt(uint32_t* context, context_plain_hdr_t* hdr)
     // A column corresponds to particular starting index of the page, modulo # of columns in the row.
     // In order to minimize storage, only upper-left triangle+diagonal is stored
 
-    for (int i2 = 0; i2 < nChunks; ++i2) {
+    for (int i2 = 0; i2 < nPages; ++i2) {
       uint32_t accH[256]={0};
       // calculate and store entropy for all sections that start at [i0..i2] and end at page i2
       int entrArrRowBegI = 0;
@@ -236,11 +237,11 @@ static void Adapt(uint32_t* context, context_plain_hdr_t* hdr)
         bool split = true;
         if (i2-i0 < 256) {
           double ee1 = entrArr[EntrArrIdx(i0,i2)];
-          // printf("%d %d %d %d %f %f * %d\n", i0, i1_min, i2, nSymbols, ee1, ee2_min + DICT_LEN, nChunks);
+          // printf("%d %d %d %d %f %f * %d\n", i0, i1_min, i2, nSymbols, ee1, ee2_min + DICT_LEN, nPages);
           split = ee2_min + DICT_LEN < ee1;
         }
         if (split) {
-          // printf("%d %d %d %d * %d\n", i0, i1_min, i2, nSymbols, nChunks);
+          // printf("%d %d %d %d * %d\n", i0, i1_min, i2, nSymbols, nPages);
           // segment ends at page i1_min
           h[i1_min*contextChnkLen+CONTEXT_CHK_PG_PER_CHUNK_I] = 1; // mark
           i0 = i1_min + 1;
@@ -250,13 +251,13 @@ static void Adapt(uint32_t* context, context_plain_hdr_t* hdr)
         }
       }
     }
-    h[(nChunks-1)*contextChnkLen+CONTEXT_CHK_PG_PER_CHUNK_I] = 1; // mark last page
+    h[(nPages-1)*contextChnkLen+CONTEXT_CHK_PG_PER_CHUNK_I] = 1; // mark last page
     // printf("%d: %f\n", nSymbols, ee_sum/8);
 
     // database compaction
     unsigned nSeg = 0;
     unsigned pgPerSeg = 0;
-    for (unsigned i = 0; i < nChunks; ++i) {
+    for (unsigned i = 0; i < nPages; ++i) {
       uint32_t* pSrc = &h[i*contextChnkLen];
       uint32_t* pDst = &h[nSeg*contextChnkLen];
       if (pgPerSeg == 0) {
@@ -272,11 +273,10 @@ static void Adapt(uint32_t* context, context_plain_hdr_t* hdr)
         pgPerSeg = 0;
       }
     }
-    nChunks = nSeg;
-  } else if (nChunks > 0) {
+    hdr->nChunks = nSeg;
+  } else if (nPages > 0) {
     h[CONTEXT_CHK_PG_PER_CHUNK_I] = 1;
   }
-  hdr->nChunks = nChunks;
 }
 
 static double Prepare1Plain(uint32_t* context, double* pInfo, context_plain_hdr_t* hdr, uint8_t* qHistogram)
@@ -390,7 +390,7 @@ static double Prepare2Plain(uint32_t* context, context_plain_hdr_t* hdr, uint8_t
       }
     }
     dstChunk->nRanges = nRanges;
-    dstChunk->symbolsPerChunk = pgPerChunk*hdr->symbolsPerChunk;
+    dstChunk->symbolsPerChunk = pgPerChunk*hdr->pageSz;
 
     src        += contextChkLen;
     qHistogram += nSymbols+1;
