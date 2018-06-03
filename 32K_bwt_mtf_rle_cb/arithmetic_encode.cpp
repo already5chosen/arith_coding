@@ -12,8 +12,6 @@
 static const int      QH_SCALE  = 1 << QH_BITS;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 
-static const int ARITH_CODER_N_P2_SYMBOLS = 257 + 1 - ARITH_CODER_N_P1_SYMBOLS;
-
 struct context_plain_hdr_t {
   uint32_t headOffset;
   uint32_t tailOffset;
@@ -26,7 +24,7 @@ struct context_plain_hdr_t {
 };
 
 struct context_plain_hdrs_t {
-  context_plain_hdr_t a[2];
+  context_plain_hdr_t a[9];
 };
 
 enum {
@@ -54,11 +52,28 @@ void arithmetic_encode_init_context(uint32_t* context, int tilelen)
   context[CONTEXT_HDR_SRC_OFFSET_I] = srcOffset;
   context[CONTEXT_HDR_QH_OFFSET_I]  = srcOffset + (tilelen*2-1)/sizeof(uint32_t) + 1;
   context_plain_hdrs_t* hdrs = reinterpret_cast<context_plain_hdrs_t*>(&context[CONTEXT_HDR_PLAIN_HDRS_I]);
-  hdrs->a[0].nSymbols  = ARITH_CODER_N_P1_SYMBOLS;
-  hdrs->a[1].nSymbols  = ARITH_CODER_N_P2_SYMBOLS;
-  hdrs->a[0].pageSz    = ARITH_CODER_P1_PAGE_SZ;
-  hdrs->a[1].pageSz    = ARITH_CODER_P2_PAGE_SZ;
-  for (int i = 0; i < 2; ++i) {
+
+  hdrs->a[0].nSymbols  = 8;
+  hdrs->a[1].nSymbols  = 2;
+  hdrs->a[2].nSymbols  = 2;
+  hdrs->a[3].nSymbols  = 5;
+  hdrs->a[4].nSymbols  = 8;
+  hdrs->a[5].nSymbols  = 16;
+  hdrs->a[6].nSymbols  = 32;
+  hdrs->a[7].nSymbols  = 64;
+  hdrs->a[8].nSymbols  = 128;
+
+  hdrs->a[0].pageSz    = ARITH_CODER_L1_PAGE_SZ;
+  hdrs->a[1].pageSz    = ARITH_CODER_L2_0_PAGE_SZ;
+  hdrs->a[2].pageSz    = ARITH_CODER_L2_1_PAGE_SZ;
+  hdrs->a[3].pageSz    = ARITH_CODER_L2_3_PAGE_SZ;
+  hdrs->a[4].pageSz    = ARITH_CODER_L2_8_PAGE_SZ;
+  hdrs->a[5].pageSz    = ARITH_CODER_L2_16_PAGE_SZ;
+  hdrs->a[6].pageSz    = ARITH_CODER_L2_32_PAGE_SZ;
+  hdrs->a[7].pageSz    = ARITH_CODER_L2_64_PAGE_SZ;
+  hdrs->a[8].pageSz    = ARITH_CODER_L2_128_PAGE_SZ;
+
+  for (int i = 0; i < 9; ++i) {
     hdrs->a[i].headOffset = 0;
     hdrs->a[i].tailOffset = 0;
     hdrs->a[i].len = 0;
@@ -95,17 +110,18 @@ void arithmetic_encode_chunk_callback(void* context_ptr, const uint8_t* src, int
   uint32_t* context = static_cast<uint32_t*>(context_ptr);
   uint8_t*  dst = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_SRC_OFFSET_I]]);
   context_plain_hdrs_t* hdrs = reinterpret_cast<context_plain_hdrs_t*>(&context[CONTEXT_HDR_PLAIN_HDRS_I]);
-  uint32_t plain1Len = hdrs->a[0].len;
-  uint32_t plain2Len = hdrs->a[1].len;
-  dst += plain1Len + plain2Len;
 
-  uint32_t plain1_sym_i = plain1Len % ARITH_CODER_P1_PAGE_SZ;
-  uint32_t* plain1H  = &context[hdrs->a[0].tailOffset+CONTEXT_CHK_HISTOGRAM_I];
+  unsigned lvl2_sym_i_arr[8];
+  for (int i = 0; i < 8; ++i)
+    lvl2_sym_i_arr[i] = hdrs->a[i+1].len % hdrs->a[i+1].pageSz;
 
-  uint32_t plain2_sym_i = plain2Len % ARITH_CODER_P2_PAGE_SZ;
-  uint32_t* plain2H  = &context[hdrs->a[1].tailOffset+CONTEXT_CHK_HISTOGRAM_I];
+  uint32_t lvl1Len = hdrs->a[0].len;
+  dst += lvl1Len*2;
 
-  // split source in two plains and update histograms
+  uint32_t lvl1_sym_i = lvl1Len % ARITH_CODER_L1_PAGE_SZ;
+  uint32_t* lvl1H = &context[hdrs->a[0].tailOffset+CONTEXT_CHK_HISTOGRAM_I];
+
+  // split source in two two levels and update histograms
   for (int i = 0; i < srclen; ++i) {
     int c = src[i];
     if (c == 255) {
@@ -114,37 +130,48 @@ void arithmetic_encode_chunk_callback(void* context_ptr, const uint8_t* src, int
       ++i;
     }
 
-    dst[0] = c;
-    if (c >= ARITH_CODER_N_P1_SYMBOLS-1) {
-      int c2 = c - (ARITH_CODER_N_P1_SYMBOLS-1);
-      c = ARITH_CODER_N_P1_SYMBOLS-1;
-      dst[0] = c;
-      dst[1] = c2;
-      ++dst;
+    static const uint8_t class_tab[32][2] = {
+      {0, 0},  {0, 0},
+      {1, 2},  {1, 2},
+      {2, 4},  {2, 4}, {2, 4}, {2, 4}, {2, 4},
+      {3, 9},  {3, 9}, {3, 9}, {3, 9},
+      {3, 9},  {3, 9}, {3, 9}, {3, 9},
+      {4, 17},
+      {5, 33},  {5, 33},
+      {6, 65},  {6, 65},  {6, 65},  {6, 65},
+      {7, 129}, {7, 129}, {7, 129}, {7, 129},
+      {7, 129}, {7, 129}, {7, 129}, {7, 129},
+    };
+    int tab_i = c < 17 ? c : (c + 17*15) >> 4;
+    int c0 = class_tab[tab_i][0];
+    int c1 = c - class_tab[tab_i][1];
 
-      if (plain2_sym_i == 0)
-        plain2H = allocate_chunk(context, 1) + CONTEXT_CHK_HISTOGRAM_I;
+    dst[0] = c0;
+    dst[1] = c1;
+    dst += 2;
 
-      ++plain2Len;
-      ++plain2H[c2];
-      ++plain2_sym_i;
-      if (plain2_sym_i == ARITH_CODER_P2_PAGE_SZ)
-        plain2_sym_i = 0;
-    }
-    ++dst;
+    if (lvl1_sym_i == 0)
+      lvl1H = allocate_chunk(context, 0) + CONTEXT_CHK_HISTOGRAM_I;
 
-    if (plain1_sym_i == 0)
-      plain1H = allocate_chunk(context, 0) + CONTEXT_CHK_HISTOGRAM_I;
+    ++lvl1Len;
+    ++lvl1H[c0];
+    ++lvl1_sym_i;
+    if (lvl1_sym_i == ARITH_CODER_L1_PAGE_SZ)
+      lvl1_sym_i = 0;
 
-    ++plain1Len;
-    ++plain1H[c];
-    ++plain1_sym_i;
-    if (plain1_sym_i == ARITH_CODER_P1_PAGE_SZ)
-      plain1_sym_i = 0;
+    context_plain_hdr_t* hdr = &hdrs->a[c0+1];
+    unsigned lvl2_sym_i = lvl2_sym_i_arr[c0];
+    uint32_t* lvl2H = &context[hdr->tailOffset];
+    if (lvl2_sym_i == 0)
+      lvl2H = allocate_chunk(context, c0+1);
+    ++lvl2H[CONTEXT_CHK_HISTOGRAM_I+c1];
+    ++hdr->len;
+    ++lvl2_sym_i;
+    if (lvl2_sym_i == hdr->pageSz)
+      lvl2_sym_i = 0;
+    lvl2_sym_i_arr[c0] = lvl2_sym_i;
   }
-
-  hdrs->a[0].len = plain1Len;
-  hdrs->a[1].len = plain2Len;
+  hdrs->a[0].len = lvl1Len;
 }
 
 static void quantize_histogram(uint8_t* __restrict qh, const uint32_t *h, int len, uint32_t hTot)
@@ -335,20 +362,16 @@ static double Prepare1Plain(uint32_t* context, double* pInfo, context_plain_hdr_
 static void prepare1(uint32_t* context, double* pInfo)
 {
   context_plain_hdrs_t* hdrs = reinterpret_cast<context_plain_hdrs_t*>(&context[CONTEXT_HDR_PLAIN_HDRS_I]);
-
-  Adapt(context, &hdrs->a[0]);
-  Adapt(context, &hdrs->a[1]);
-
+  for (int i = 0; i < 9; ++i)
+    Adapt(context, &hdrs->a[i]);
   uint32_t qhOffset = context[CONTEXT_HDR_QH_OFFSET_I];
-  uint8_t* qHistogram1 = reinterpret_cast<uint8_t*>(&context[qhOffset]);
-  uint8_t* qHistogram2 = qHistogram1 + hdrs->a[0].nChunks * (ARITH_CODER_N_P1_SYMBOLS+1);
-
-  double entropy1 = Prepare1Plain(context, pInfo, &hdrs->a[0], qHistogram1);
-  double entropy2 = Prepare1Plain(context, pInfo, &hdrs->a[1], qHistogram2);
-  // printf("%f+%f\n", entropy1/8, entropy2/8);
-
+  double entropy = 0;
+  for (int i = 0; i < 9; ++i) {
+    entropy += Prepare1Plain(context, pInfo, &hdrs->a[i], reinterpret_cast<uint8_t*>(&context[qhOffset]));
+    qhOffset += hdrs->a[i].nChunks * (hdrs->a[i].nSymbols+1);
+  }
   if (pInfo) {
-    pInfo[0] = entropy1+entropy2;
+    pInfo[0] = entropy;
     pInfo[3] = 0;
     pInfo[4] = hdrs->a[0].nChunks;
     pInfo[5] = hdrs->a[1].nChunks;
@@ -409,13 +432,12 @@ static double prepare2(uint32_t * context)
 {
   context_plain_hdrs_t* hdrs = reinterpret_cast<context_plain_hdrs_t*>(&context[CONTEXT_HDR_PLAIN_HDRS_I]);
   uint32_t qhOffset = context[CONTEXT_HDR_QH_OFFSET_I];
-  uint8_t* qHistogram1 = reinterpret_cast<uint8_t*>(&context[qhOffset]);
-  uint8_t* qHistogram2 = qHistogram1 + hdrs->a[0].nChunks * (ARITH_CODER_N_P1_SYMBOLS+1);
-
-  double entropy1 = Prepare2Plain(context, &hdrs->a[0], qHistogram1);
-  double entropy2 = Prepare2Plain(context, &hdrs->a[1], qHistogram2);
-
-  return entropy1+entropy2;
+  double entropy = 0;
+  for (int i = 0; i < 9; ++i) {
+    entropy += Prepare2Plain(context, &hdrs->a[i], reinterpret_cast<uint8_t*>(&context[qhOffset]));
+    qhOffset += hdrs->a[i].nChunks * (hdrs->a[i].nSymbols+1);
+  }
+  return entropy;
 }
 
 class CArithmeticEncoder {
@@ -603,15 +625,15 @@ static int store_model(uint8_t* dst, uint32_t * context, double* pNbits, CArithm
   uint8_t* dst0 = dst;
   context_plain_hdrs_t* hdrs = reinterpret_cast<context_plain_hdrs_t*>(&context[CONTEXT_HDR_PLAIN_HDRS_I]);
 
-  dst = store_model_store_nChunks(dst, hdrs->a[0].nChunks, pEnc);
-  dst = store_model_store_nChunks(dst, hdrs->a[1].nChunks, pEnc);
+  for (int i = 0; i < 9; ++i)
+    dst = store_model_store_nChunks(dst, hdrs->a[i].nChunks, pEnc);
 
   uint8_t* qHistogram = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_QH_OFFSET_I]]);
-  for (int plain_i = 0; plain_i < 2; ++plain_i) {
-    context_plain_hdr_t* hdr = &hdrs->a[plain_i];
-    uint32_t nChunks = hdr->nChunks;
+  for (int i = 0; i < 9; ++i) {
+    context_plain_hdr_t* hdr = &hdrs->a[i];
+    uint32_t nChunks  = hdr->nChunks;
     uint32_t nSymbols = hdr->nSymbols;
-    uint32_t maxHlen = hdr->maxHLen;
+    uint32_t maxHlen  = hdr->maxHLen;
     if (maxHlen > 0) {
       uint32_t* plainH = &context[hdr->headOffset];
       for (uint32_t chunk_i = 0; chunk_i < nChunks; ++chunk_i, plainH = &context[plainH[CONTEXT_CHK_NEXT_I]]) {
@@ -641,9 +663,22 @@ static int encode(uint8_t* dst, const uint32_t* context, CArithmeticEncoder* pEn
 {
   const uint8_t*  src = reinterpret_cast<const uint8_t*>(&context[context[CONTEXT_HDR_SRC_OFFSET_I]]);
   const context_plain_hdrs_t* hdrs = reinterpret_cast<const context_plain_hdrs_t*>(&context[CONTEXT_HDR_PLAIN_HDRS_I]);
-  uint32_t plain1Len = hdrs->a[0].len;
-  uint32_t plain1nChunks = hdrs->a[0].nChunks;
-  uint32_t plain2nChunks = hdrs->a[1].nChunks;
+  struct lvl2Rec_t {
+    const uint16_t* c2low;
+    uint32_t        lvl2_i;
+    uint32_t        offset;
+    uint32_t        srclen;
+    uint32_t        nChunks;
+  };
+  lvl2Rec_t lvl2Records[8];
+  for (int i = 0; i < 8; ++i) {
+    lvl2Records[i].lvl2_i = 0;
+    lvl2Records[i].offset = hdrs->a[i+1].headOffset;
+    lvl2Records[i].nChunks = hdrs->a[i+1].nChunks;
+  }
+
+  uint32_t lvl1Len     = hdrs->a[0].len;
+  uint32_t lvl1nChunks = hdrs->a[0].nChunks;
 
   const uint64_t MSB_MSK   = uint64_t(255) << 56;
   const uint64_t MIN_RANGE = uint64_t(1) << (33-RANGE_BITS);
@@ -651,48 +686,19 @@ static int encode(uint8_t* dst, const uint32_t* context, CArithmeticEncoder* pEn
   uint64_t range  = pEnc->m_range >> (RANGE_BITS-1); // scaled by 2**(64-RANGE_BITS)
   uint8_t* dst0   = dst;
   uint64_t prevLo = lo;
-  // int dbg_i = 0;
-  const uint16_t* plain2_c2low = 0;
-  uint32_t plain2chunk_i = 0;
-  unsigned plain2_i = 0;
-  unsigned srclen2 = 0;
+
   const uint32_t* p_p1_c2low = &context[hdrs->a[0].headOffset];
-  const uint32_t* p_p2_c2low = &context[hdrs->a[1].headOffset];
-  for (uint32_t plain1chunk_i = 0; plain1chunk_i < plain1nChunks; ++plain1chunk_i, p_p1_c2low = &context[p_p1_c2low[CONTEXT_CHK_NEXT_I]]) {
-    const uint16_t* plain1_c2low = p_p1_c2low[CONTEXT_CHK_N_RANGES_I] > 1 ?
+  for (uint32_t lvl1chunk_i = 0; lvl1chunk_i < lvl1nChunks; ++lvl1chunk_i, p_p1_c2low = &context[p_p1_c2low[CONTEXT_CHK_NEXT_I]]) {
+    const uint16_t* lvl1_c2low = p_p1_c2low[CONTEXT_CHK_N_RANGES_I] > 1 ?
       reinterpret_cast<const uint16_t*>(&p_p1_c2low[CONTEXT_CHK_C2LOW_I]) : 0;
-    unsigned srclen1 = (plain1chunk_i == plain1nChunks-1) ? plain1Len : p_p1_c2low[CONTEXT_CHK_SYMBOLS_PER_CHUNK_I];
-    plain1Len -= srclen1;
-    // int dbg_i = -1;
+    unsigned srclen1 = (lvl1chunk_i == lvl1nChunks-1) ? lvl1Len : p_p1_c2low[CONTEXT_CHK_SYMBOLS_PER_CHUNK_I];
+    lvl1Len -= srclen1;
     for (unsigned i = 0; i < srclen1; ++i) {
-      int plain2_c = -1;
-      do {
-        // ++dbg_i;
-        const uint16_t* c2low = plain2_c2low;
-        int c = plain2_c;
-        plain2_c = -1;
-        if (c < 0) {
-          // process next input character
-          c = *src++;
-          c2low = plain1_c2low;
-          if (c == ARITH_CODER_N_P1_SYMBOLS-1) {
-            plain2_c = *src++;
-            if (plain2_i == 0) {
-              plain2_c2low = p_p2_c2low[CONTEXT_CHK_N_RANGES_I] > 1 ?
-                reinterpret_cast<const uint16_t*>(&p_p2_c2low[CONTEXT_CHK_C2LOW_I]) : 0;
-              srclen2 = (plain2chunk_i == plain2nChunks-1) ? UINT_MAX: p_p2_c2low[CONTEXT_CHK_SYMBOLS_PER_CHUNK_I];
-            }
-            ++plain2_i;
-            if (plain2_i == srclen2) {
-              ++plain2chunk_i;
-              p_p2_c2low = &context[p_p2_c2low[CONTEXT_CHK_NEXT_I]];
-              plain2_i = 0;
-            }
-          }
-        }
-        // if (plain1chunk_i==77 && dbg_i >= 0 && dbg_i < 500)
-          // printf("%d:%3d %3d\n", dbg_i, plain2_c, c);
-        // printf("[%3d]=%3d\n", dbg_i, c); ++dbg_i;
+      const uint16_t* c2low = lvl1_c2low;
+      lvl2Rec_t* lvl2Rec;
+      uint32_t lvl2_i;
+      for (int lvl = 0; lvl < 2; ++lvl) {
+        int c = src[lvl];
         if (c2low) {
           uint64_t cLo = c2low[c+0];
           uint64_t cRa = c2low[c+1] - cLo;
@@ -715,7 +721,28 @@ static int encode(uint8_t* dst, const uint32_t* context, CArithmeticEncoder* pEn
           }
           range = nxtRange;
         }
-      } while (plain2_c >= 0);
+
+        if (lvl==0) {
+          lvl2Rec = &lvl2Records[c];
+          c2low   = lvl2Rec->c2low;
+          lvl2_i  = lvl2Rec->lvl2_i;
+          if (lvl2_i == 0) {
+            const uint32_t* c2lowRec = &context[lvl2Rec->offset];
+            lvl2Rec->c2low =
+            c2low = c2lowRec[CONTEXT_CHK_N_RANGES_I] > 1 ?
+              reinterpret_cast<const uint16_t*>(&c2lowRec[CONTEXT_CHK_C2LOW_I]) : 0;
+            lvl2Rec->srclen = (lvl2Rec->nChunks==1) ? UINT_MAX: c2lowRec[CONTEXT_CHK_SYMBOLS_PER_CHUNK_I];
+          }
+        }
+      }
+      src += 2;
+      ++lvl2_i;
+      if (lvl2_i == lvl2Rec->srclen) {
+        --lvl2Rec->nChunks;
+        lvl2Rec->offset = context[lvl2Rec->offset+CONTEXT_CHK_NEXT_I];
+        lvl2_i = 0;
+      }
+      lvl2Rec->lvl2_i = lvl2_i;
     }
     // printf(": %10d\n", dst-dst0);
     // printf("%016I64x %d %d %d %d\n", range, p_p1_c2low->nRanges, plain2chunk_i, plain2_i, uu);
