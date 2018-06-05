@@ -366,9 +366,10 @@ static void prepare1(uint32_t* context, double* pInfo)
     Adapt(context, &hdrs->a[i]);
   uint32_t qhOffset = context[CONTEXT_HDR_QH_OFFSET_I];
   double entropy = 0;
+  uint8_t* qHistogram = reinterpret_cast<uint8_t*>(&context[qhOffset]);
   for (int i = 0; i < 9; ++i) {
-    entropy += Prepare1Plain(context, pInfo, &hdrs->a[i], reinterpret_cast<uint8_t*>(&context[qhOffset]));
-    qhOffset += hdrs->a[i].nChunks * (hdrs->a[i].nSymbols+1);
+    entropy += Prepare1Plain(context, pInfo, &hdrs->a[i], qHistogram);
+    qHistogram += hdrs->a[i].nChunks * (hdrs->a[i].nSymbols+1);
   }
   if (pInfo) {
     pInfo[0] = entropy;
@@ -389,7 +390,7 @@ static void range2low(uint16_t* c2low, const uint16_t* c2range, unsigned len)
 }
 
 // return entropy estimate after quantization
-static double Prepare2Plain(uint32_t* context, context_plain_hdr_t* hdr, uint8_t* qHistogram)
+static double Prepare2Plain(uint32_t* context, context_plain_hdr_t* hdr, const uint8_t* qHistogram)
 {
   double entropy = 0;
   // calculate c2low tables
@@ -431,11 +432,11 @@ static double Prepare2Plain(uint32_t* context, context_plain_hdr_t* hdr, uint8_t
 static double prepare2(uint32_t * context)
 {
   context_plain_hdrs_t* hdrs = reinterpret_cast<context_plain_hdrs_t*>(&context[CONTEXT_HDR_PLAIN_HDRS_I]);
-  uint32_t qhOffset = context[CONTEXT_HDR_QH_OFFSET_I];
   double entropy = 0;
+  const uint8_t* qHistogram = reinterpret_cast<const uint8_t*>(&context[context[CONTEXT_HDR_QH_OFFSET_I]]);
   for (int i = 0; i < 9; ++i) {
-    entropy += Prepare2Plain(context, &hdrs->a[i], reinterpret_cast<uint8_t*>(&context[qhOffset]));
-    qhOffset += hdrs->a[i].nChunks * (hdrs->a[i].nSymbols+1);
+    entropy += Prepare2Plain(context, &hdrs->a[i], qHistogram);
+    qHistogram += hdrs->a[i].nChunks * (hdrs->a[i].nSymbols+1);
   }
   return entropy;
 }
@@ -625,8 +626,9 @@ static int store_model(uint8_t* dst, uint32_t * context, double* pNbits, CArithm
   uint8_t* dst0 = dst;
   context_plain_hdrs_t* hdrs = reinterpret_cast<context_plain_hdrs_t*>(&context[CONTEXT_HDR_PLAIN_HDRS_I]);
 
-  for (int i = 0; i < 9; ++i)
-    dst = store_model_store_nChunks(dst, hdrs->a[i].nChunks, pEnc);
+  dst = store_model_store_nChunks(dst, hdrs->a[0].nChunks, pEnc);
+  for (int i = 1; i < 9; ++i)
+    dst = store_model_store_nChunks(dst, hdrs->a[i].nChunks+1, pEnc);
 
   uint8_t* qHistogram = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_QH_OFFSET_I]]);
   for (int i = 0; i < 9; ++i) {
@@ -634,16 +636,18 @@ static int store_model(uint8_t* dst, uint32_t * context, double* pNbits, CArithm
     uint32_t nChunks  = hdr->nChunks;
     uint32_t nSymbols = hdr->nSymbols;
     uint32_t maxHlen  = hdr->maxHLen;
-    if (maxHlen > 0) {
-      uint32_t* plainH = &context[hdr->headOffset];
-      for (uint32_t chunk_i = 0; chunk_i < nChunks; ++chunk_i, plainH = &context[plainH[CONTEXT_CHK_NEXT_I]]) {
-        uint32_t hlen = plainH[CONTEXT_CHK_HLEN_I];
-        if (hlen < maxHlen)
-          memset(&qHistogram[(nSymbols+1)*chunk_i+hlen+1], 0, maxHlen-hlen);
+    if (nChunks > 0) {
+      if (maxHlen > 0) {
+        uint32_t* plainH = &context[hdr->headOffset];
+        for (uint32_t chunk_i = 0; chunk_i < nChunks; ++chunk_i, plainH = &context[plainH[CONTEXT_CHK_NEXT_I]]) {
+          uint32_t hlen = plainH[CONTEXT_CHK_HLEN_I];
+          if (hlen < maxHlen)
+            memset(&qHistogram[(nSymbols+1)*chunk_i+hlen+1], 0, maxHlen-hlen);
+        }
       }
+      dst = store_model_store_data(dst, qHistogram, maxHlen+1, nSymbols+1, nChunks, pEnc);
+      qHistogram += (nSymbols+1)*nChunks;
     }
-    dst = store_model_store_data(dst, qHistogram, maxHlen+1, nSymbols+1, nChunks, pEnc);
-    qHistogram += (nSymbols+1)*nChunks;
   }
 
   int len = dst - dst0;

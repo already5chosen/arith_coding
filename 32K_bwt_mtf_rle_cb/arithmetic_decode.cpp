@@ -14,7 +14,8 @@ static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 
 static const uint8_t nSymbolsTab[9] = { 8, 2, 2, 5, 8, 16, 32, 64, 128 };
 static const uint8_t lvl2BaseTab[8] = { 0, 1, 3, 8, 16, 32, 64, 128 };
-static const int pageSzTab[8] = {
+static const int pageSzTab[9] = {
+  ARITH_CODER_L1_PAGE_SZ    ,
   ARITH_CODER_L2_0_PAGE_SZ  ,
   ARITH_CODER_L2_1_PAGE_SZ  ,
   ARITH_CODER_L2_3_PAGE_SZ  ,
@@ -112,7 +113,7 @@ int CArithmeticDecoder::extract_1bit(const unsigned range_tab[3], int32_t* pRes)
 
 // load_nChunks
 // return  value:
-//   on success nChunks >= 0
+//   on success nChunks > 0
 //   on parsing error negative error code
 static
 int load_nChunks(CArithmeticDecoder* pDec)
@@ -405,15 +406,12 @@ int decode(
   int                        dstlen,
   int32_t                    histogram[256],
   CArithmeticDecoder*        pDec,
-  const uint8_t*             qh,
   qh_descr_t                 qhda[9])
 {
   arithmetic_decode_model_t models[9];
   for (int i = 0; i < 9; ++i) {
     const int nSymbols = nSymbolsTab[i];
-    qhda[i].qh    = qh;
     qhda[i].sym_i = 0;
-    qh += (nSymbols + 1)*qhda[i].nChunks;
     models[i].init(nSymbols);
   }
 
@@ -445,7 +443,7 @@ int decode(
   int dst_i = 0;
   for (int lvl1chunk_i = 0; lvl1chunk_i < qhda[0].nChunks; ++lvl1chunk_i) {
     const uint8_t* lvl1Qh = qhda[0].qh;
-    qhda[0].qh = lvl1Qh + nSymbolsTab[0];
+    qhda[0].qh = lvl1Qh + nSymbolsTab[0] + 1;
     int nLvl1Ranges = models[0].dequantize_and_prepare(&lvl1Qh[1], qhda[0].maxHLen);
     const int32_t symbolsPerLvl1Chunk = ARITH_CODER_L1_PAGE_SZ*(int(lvl1Qh[0]) + 1);
     arithmetic_decode_model_t* pLvl1Model = &models[0];
@@ -457,7 +455,7 @@ int decode(
       pLvl1Model = 0;
     }
 
-    for (int plain1sym_i = 0; plain1sym_i < symbolsPerLvl1Chunk && dstlen != 0; ++plain1sym_i) {
+    for (int lvl1sym_i = 0; lvl1sym_i < symbolsPerLvl1Chunk && dstlen != 0; ++lvl1sym_i) {
       int c0, c1;
       int c = theOnlyLvl1C;
       arithmetic_decode_model_t* pModel = pLvl1Model;
@@ -566,13 +564,14 @@ int decode(
             const int nSymbols = nSymbolsTab[c0+1];
             const uint8_t* lvl2qh = qhd->qh;
             qhd->qh = lvl2qh + (nSymbols + 1);
-            lvl2sym_i = pageSzTab[c0]*int32_t(lvl2qh[0]+1);
+            lvl2sym_i = pageSzTab[c0+1]*int32_t(lvl2qh[0]+1);
             pModel = &models[c0+1];
             int nLvl2Ranges = pModel->dequantize_and_prepare(&lvl2qh[1], qhd->maxHLen);
             qhd->theOnlyC = c = pModel->m_c2low[0];
             if (nLvl2Ranges <= 1) {
-              if (__builtin_expect(nLvl2Ranges == 0, 0))
+              if (__builtin_expect(nLvl2Ranges == 0, 0)) {
                 return -25; // chunk has to contain something
+              }
               pModel = 0;
             }
             qhd->pModel = pModel;
@@ -638,52 +637,54 @@ int arithmetic_decode(
   CArithmeticDecoder dec;
   dec.init(src, srclen);
 
-  int plain1NChunks = load_nChunks(&dec);
-  if (plain1NChunks < 0)
-    return plain1NChunks;
-
-  if (plain1NChunks == 0)
-    return -31;
-  if (plain1NChunks > INT_MAX/ARITH_CODER_P1_PAGE_SZ/2)
-    return -32;
-  if ((plain1NChunks-1) * ARITH_CODER_P1_PAGE_SZ > dstlen)
-    return -33;
-  // printf("plain1NChunks=%d\n", plain1NChunks);
-
-  int plain2NChunks = load_nChunks(&dec);
-  if (plain2NChunks < 0)
-    return plain2NChunks;
-
-  if (plain2NChunks > INT_MAX/ARITH_CODER_P2_PAGE_SZ/2)
-    return -34;
-  if (plain2NChunks > 0 && (plain2NChunks-1) * ARITH_CODER_P2_PAGE_SZ > dstlen)
-    return -35;
-  // printf("plain2NChunks=%d\n", plain2NChunks);
-
-  int qh1Len = plain1NChunks*(ARITH_CODER_N_P1_SYMBOLS+1);
-  int qh2Len = plain2NChunks*(ARITH_CODER_N_P2_SYMBOLS+1);
-  std::vector<uint8_t> qhVec(qh1Len+qh2Len);
-  int plain1MaxHlen = load_quantized_histogram(&qhVec.at(0), (ARITH_CODER_N_P1_SYMBOLS+1), plain1NChunks, &dec);
-  if (plain1MaxHlen >= 0) {
-    int plain2MaxHlen = load_quantized_histogram(&qhVec.at(qh1Len), (ARITH_CODER_N_P2_SYMBOLS+1), plain2NChunks, &dec);
-    if (plain2MaxHlen >= 0) {
-      int modellen = srclen - dec.m_srclen;
-      if (pInfo) {
-        pInfo[0] = modellen*8;
-        pInfo[1] = dec.m_srclen;
-      }
-      memset(histogram, 0, sizeof(histogram[0])*256);
-      int textlen = decode(dst, dstlen, histogram, &dec, &qhVec.at(0), plain1NChunks, plain1MaxHlen-1, plain2NChunks, plain2MaxHlen-1);
-      #ifdef ENABLE_PERF_COUNT
-      if (pInfo) {
-        pInfo[2] = model.m_extLookupCount;
-        pInfo[3] = model.m_longLookupCount;
-        pInfo[4] = model.m_renormalizationCount;
-      }
-      #endif
-      return textlen;
+  qh_descr_t qhda[9];
+  int qhLen = 0;
+  for (int i = 0; i < 9; ++i) {
+    int nChunks = load_nChunks(&dec);
+    if (nChunks < 0)
+      return nChunks;
+    nChunks -= (i > 0);
+    if (nChunks > 1) {
+      if (nChunks > INT_MAX/ARITH_CODER_L2_128_PAGE_SZ/2)
+        return -31;
+      if ((nChunks-1) * pageSzTab[i] > dstlen)
+        return -32;
     }
-    return plain2MaxHlen;
+    qhda[i].nChunks = nChunks;
+    qhLen += nChunks* (nSymbolsTab[i]+1);
   }
-  return plain1MaxHlen;
+
+  if (qhda[0].nChunks == 0)
+    return -33;
+
+  std::vector<uint8_t> qhVec(qhLen);
+  uint8_t* qh = &qhVec.at(0);
+  for (int i = 0; i < 9; ++i) {
+    int maxHLen = 0;
+    int nChunks = qhda[i].nChunks;
+    qhda[i].qh = qh;
+    if (nChunks > 0) {
+      maxHLen = load_quantized_histogram(qh, nSymbolsTab[i]+1, nChunks, &dec);
+      if (maxHLen < 0)
+        return maxHLen;
+    }
+    qhda[i].maxHLen = maxHLen-1;
+    qh += nChunks* (nSymbolsTab[i]+1);
+  }
+
+  int modellen = srclen - dec.m_srclen;
+  if (pInfo) {
+    pInfo[0] = modellen*8;
+    pInfo[1] = dec.m_srclen;
+  }
+  memset(histogram, 0, sizeof(histogram[0])*256);
+  int textlen = decode(dst, dstlen, histogram, &dec, qhda);
+  #ifdef ENABLE_PERF_COUNT
+  if (pInfo) {
+    pInfo[2] = model.m_extLookupCount;
+    pInfo[3] = model.m_longLookupCount;
+    pInfo[4] = model.m_renormalizationCount;
+  }
+  #endif
+  return textlen;
 }
