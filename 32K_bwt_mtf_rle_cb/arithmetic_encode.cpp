@@ -512,13 +512,9 @@ static uint8_t* store_model_store_nChunks(uint8_t* dst, int val, CArithmeticEnco
   return dst;
 }
 
-static uint8_t* store_model_store_data(uint8_t* dst, const uint8_t* qh, int len, int nCol, int nChunks, CArithmeticEncoder* pEnc)
+template<class T>
+void store_model_store_data_loop(T* obj, const uint8_t* qh, int len, int nCol, int nChunks)
 {
-  if (len == 0)
-    return pEnc->put(8*10*10*10+1, 0, 1, dst); // store special code instead of hhw
-
-  // first pass - calculate histograms
-  unsigned hist[8] = {0};
   int runlen = (nCol-len)*nChunks-2;
   unsigned prev_val = 0;
   for (int i = 0; i < len; ++i) {
@@ -528,30 +524,48 @@ static uint8_t* store_model_store_data(uint8_t* dst, const uint8_t* qh, int len,
       ++runlen;
       if (val != prev_val) {
         if (runlen >= 0)
-          hist[0] += add_value_to_histogram(&hist[2], runlen);
+          obj->add_zero_run(runlen);
         runlen = -1;
         unsigned diff;
-        hist[1] += 1;
+        obj->add_nonzero();
         if (val > prev_val) {
-          hist[6] += (prev_val != 0); // '+'
+          obj->add_plus(prev_val != 0); // '+'
           diff = val - prev_val - 1;
         } else {
-          hist[7] += (prev_val != 255); // '-'
+          obj->add_minus(prev_val != 255); // '-'
           diff = prev_val - val - 1;
         }
         if (diff != 0)
-          hist[1] += add_value_to_histogram(&hist[4], diff-1);
+          obj->add_difference(diff-1);
         prev_val = val;
       }
     }
     prev_val = qh[len-1-i];
   }
-  hist[0] += add_value_to_histogram(&hist[2], runlen+1);
+  obj->add_zero_run(runlen+1);
+}
+
+static uint8_t* store_model_store_data(uint8_t* dst, const uint8_t* qh, int len, int nCol, int nChunks, CArithmeticEncoder* pEnc)
+{
+  if (len == 0)
+    return pEnc->put(8*10*10*10+1, 0, 1, dst); // store special code instead of hhw
+
+  // first pass - calculate histograms
+  struct histogram_pass_t {
+    unsigned hist[8];
+    void add_zero_run  (unsigned val) { hist[0] += add_value_to_histogram(&hist[2], val); }
+    void add_difference(unsigned val) { hist[1] += add_value_to_histogram(&hist[4], val); }
+    void add_nonzero()       { hist[1] += 1;   }
+    void add_plus (bool ena) { hist[6] += ena; }
+    void add_minus(bool ena) { hist[7] += ena; }
+  };
+  histogram_pass_t pass1 = {{0}};
+  store_model_store_data_loop(&pass1, qh, len, nCol, nChunks);
 
 #if 0
   double entr = 0;
   for (int i = 0; i < 4; ++i) {
-    double h0 = hist[i*2+0], h1 = hist[i*2+1];
+    double h0 = pass1.hist[i*2+0], h1 = pass1.hist[i*2+1];
     if (h0 != 0 && h1 != 0) {
       entr += (h0+h1)*log2(h0+h1);
       entr -= h0*log2(h0);
@@ -561,24 +575,41 @@ static uint8_t* store_model_store_data(uint8_t* dst, const uint8_t* qh, int len,
   printf("entr=%.2f\n", entr/8);
 #endif
 
-  unsigned hh01 = quantize_histogram_pair(hist[0], hist[1], 9); // range [1..8], because both sums > 0
-  unsigned hh23 = quantize_histogram_pair(hist[2], hist[3], 9); // range [0..9]
-  unsigned hh45 = quantize_histogram_pair(hist[4], hist[5], 9); // range [0..9]
-  unsigned hh67 = quantize_histogram_pair(hist[6], hist[7], 9); // range [0..9]
+  unsigned hh01 = quantize_histogram_pair(pass1.hist[0], pass1.hist[1], 9); // range [1..8], because both sums > 0
+  unsigned hh23 = quantize_histogram_pair(pass1.hist[2], pass1.hist[3], 9); // range [0..9]
+  unsigned hh45 = quantize_histogram_pair(pass1.hist[4], pass1.hist[5], 9); // range [0..9]
+  unsigned hh67 = quantize_histogram_pair(pass1.hist[6], pass1.hist[7], 9); // range [0..9]
 
-  unsigned range_tab[4][3];
-  range_tab[0][1] = quantized_histogram_pair_to_range_qh_scale9(hh01, VAL_RANGE);
-  range_tab[1][1] = quantized_histogram_pair_to_range_qh_scale9(hh23, VAL_RANGE);
-  range_tab[2][1] = quantized_histogram_pair_to_range_qh_scale9(hh45, VAL_RANGE);
-  range_tab[3][1] = quantized_histogram_pair_to_range_qh_scale9(hh67, VAL_RANGE);
+  // prepare second pass
+  struct encode_pass_t {
+    uint8_t*            dst;
+    CArithmeticEncoder* pEnc;
+    unsigned range_tab[4][3];
+    void add_zero_run  (unsigned val) { dst = encode_value(dst, val, &range_tab[0][0], range_tab[1], pEnc); }
+    void add_difference(unsigned val) { dst = encode_value(dst, val, &range_tab[0][1], range_tab[2], pEnc); }
+    void add_nonzero()       { dst = pEnc->put(VAL_RANGE, range_tab[0][1], VAL_RANGE-range_tab[0][1], dst); }
+    void add_plus (bool ena) {
+      if (ena && range_tab[3][1] != 0)
+        dst = pEnc->put(VAL_RANGE, 0, range_tab[3][1], dst); // '+'
+    }
+    void add_minus(bool ena) {
+      if (ena && range_tab[3][1] != VAL_RANGE)
+        dst = pEnc->put(VAL_RANGE, range_tab[3][1], VAL_RANGE-range_tab[3][1], dst); // '-'
+    }
+  };
+  encode_pass_t pass2;
+  pass2.range_tab[0][1] = quantized_histogram_pair_to_range_qh_scale9(hh01, VAL_RANGE);
+  pass2.range_tab[1][1] = quantized_histogram_pair_to_range_qh_scale9(hh23, VAL_RANGE);
+  pass2.range_tab[2][1] = quantized_histogram_pair_to_range_qh_scale9(hh45, VAL_RANGE);
+  pass2.range_tab[3][1] = quantized_histogram_pair_to_range_qh_scale9(hh67, VAL_RANGE);
   for (int k = 0; k < 4; ++k) {
-    range_tab[k][0] = 0;
-    range_tab[k][2] = VAL_RANGE;
-    // printf("range_tab[%d][1] = %5d\n", k, range_tab[k][1]);
+    pass2.range_tab[k][0] = 0;
+    pass2.range_tab[k][2] = VAL_RANGE;
+    // printf("pass2.range_tab[%d][1] = %5d\n", k, pass2.range_tab[k][1]);
   }
-  // printf("%.5f %.5f\n", double(hist[0]+hist[1])/(hist[0]+hist[1]+hist[2]+hist[3]), double(range_tab[0][1])/VAL_RANGE);
-  // printf("%.5f %.5f\n", double(hist[0])/(hist[0]+hist[1]), double(range_tab[1][1])/VAL_RANGE);
-  // printf("%.5f %.5f\n", double(hist[2])/(hist[2]+hist[3]), double(range_tab[2][1])/VAL_RANGE);
+  // printf("%.5f %.5f\n", double(pass1.hist[0]+pass1.hist[1])/(pass1.hist[0]+pass1.hist[1]+pass1.hist[2]+pass1.hist[3]), double(pass2.range_tab[0][1])/VAL_RANGE);
+  // printf("%.5f %.5f\n", double(pass1.hist[0])/(pass1.hist[0]+pass1.hist[1]), double(pass2.range_tab[1][1])/VAL_RANGE);
+  // printf("%.5f %.5f\n", double(pass1.hist[2])/(pass1.hist[2]+pass1.hist[3]), double(pass2.range_tab[2][1])/VAL_RANGE);
 
   unsigned hhw = (hh01-1)+8*(hh23+(10*(hh45+10*hh67))); // combine all hh in a single word
 
@@ -586,38 +617,11 @@ static uint8_t* store_model_store_data(uint8_t* dst, const uint8_t* qh, int len,
   dst = pEnc->put(8*10*10*10+1, hhw+1, 1, dst);
 
   // second pass - encode
-  runlen = (nCol-len)*nChunks-2;
-  prev_val = 0;
-  for (int i = 0; i < len; ++i) {
-    const uint8_t* col = &qh[len-1-i];
-    for (int chunk_i = 0; chunk_i < nChunks; ++chunk_i, col += nCol) {
-      unsigned val = *col;
-      ++runlen;
-      if (val != prev_val) {
-        if (runlen >= 0)
-          dst = encode_value(dst, runlen, &range_tab[0][0], range_tab[1], pEnc);
-        runlen = -1;
-        unsigned diff;
-        dst = pEnc->put(VAL_RANGE, range_tab[0][1], VAL_RANGE-range_tab[0][1], dst);
-        if (val > prev_val) {
-          if (prev_val != 0 && range_tab[3][1] != 0)
-            dst = pEnc->put(VAL_RANGE, 0, range_tab[3][1], dst); // '+'
-          diff = val - prev_val - 1;
-        } else {
-          if (prev_val != 255 && range_tab[3][1] != VAL_RANGE)
-            dst = pEnc->put(VAL_RANGE, range_tab[3][1], VAL_RANGE-range_tab[3][1], dst); // '-'
-          diff = prev_val - val - 1;
-        }
-        if (diff != 0)
-          dst = encode_value(dst, diff-1, &range_tab[0][1], range_tab[2], pEnc);
-        prev_val = val;
-      }
-    }
-    prev_val = qh[len-1-i];
-  }
-  dst = encode_value(dst, runlen+1, &range_tab[0][0], range_tab[1], pEnc);
+  pass2.dst  = dst;
+  pass2.pEnc = pEnc;
+  store_model_store_data_loop(&pass2, qh, len, nCol, nChunks);
 
-  return dst;
+  return pass2.dst;
 }
 
 // return the number of stored octets
