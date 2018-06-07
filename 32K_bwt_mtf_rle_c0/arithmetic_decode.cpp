@@ -182,6 +182,8 @@ int load_quantized_histogram(uint8_t* qh, unsigned nChunks, CArithmeticDecoder* 
             val = qh[256-xi];
             yi = 0;
             ++xi;
+            if (xi == 257)
+              return -21;
           }
           --rl;
         }

@@ -188,6 +188,8 @@ int load_quantized_histogram(uint8_t* qh, unsigned nCol, unsigned nChunks, CArit
             val = qh[nCol-1-xi];
             yi = 0;
             ++xi;
+            if (xi == nCol)
+              return -21;
           }
           --rl;
         }
