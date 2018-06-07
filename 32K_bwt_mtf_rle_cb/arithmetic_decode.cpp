@@ -139,12 +139,12 @@ int load_nChunks(CArithmeticDecoder* pDec)
   return -15;
 }
 
-// load_quantized_histogram
+// load_quantized_histogram_tables
 // return  value:
-//   on success hlen >= 0
+//   on success  0
 //   on parsing error negative error code
 static
-int load_quantized_histogram(uint8_t* qh, unsigned nCol, unsigned nChunks, CArithmeticDecoder* pDec)
+int load_quantized_histogram_range_tab(unsigned range_tab[4][3], CArithmeticDecoder* pDec)
 {
   // load hhw - combined hh word
   unsigned hhw = pDec->get(8*10*10*10);
@@ -158,7 +158,7 @@ int load_quantized_histogram(uint8_t* qh, unsigned nCol, unsigned nChunks, CArit
   unsigned hh23 = (hhw % 10) + 0; hhw /= 10;
   unsigned hh45 = hhw + 0;
 
-  unsigned range_tab[4][3];
+  ;
   range_tab[0][1] = quantized_histogram_pair_to_range_qh_scale9(hh02, VAL_RANGE);
   range_tab[1][1] = quantized_histogram_pair_to_range_qh_scale9(hh01, VAL_RANGE);
   range_tab[2][1] = quantized_histogram_pair_to_range_qh_scale9(hh23, VAL_RANGE);
@@ -167,7 +167,16 @@ int load_quantized_histogram(uint8_t* qh, unsigned nCol, unsigned nChunks, CArit
     range_tab[k][0] = 0;
     range_tab[k][2] = VAL_RANGE;
   }
+  return 0;
+}
 
+// load_quantized_histogram
+// return  value:
+//   on success hlen >= 0
+//   on parsing error negative error code
+static
+int load_quantized_histogram(uint8_t* qh, unsigned nCol, unsigned nChunks, CArithmeticDecoder* pDec, const unsigned range_tab[4][3])
+{
   int val = 0;
   int32_t  prev_msb = 0;
   uint32_t rlAcc = 0;
@@ -178,7 +187,7 @@ int load_quantized_histogram(uint8_t* qh, unsigned nCol, unsigned nChunks, CArit
   for (unsigned xi = 0, yi = 0; ; )
   {
     int32_t msb;
-    err = pDec->extract_1bit(range_tab[0], &msb);
+    int err = pDec->extract_1bit(range_tab[0], &msb);
     if (err)
       return err;
 
@@ -657,17 +666,27 @@ int arithmetic_decode(
 
   std::vector<uint8_t> qhVec(qhLen);
   uint8_t* qh = &qhVec.at(0);
+  uint32_t qhSegSz = ARITH_CODER_MODEL_MAX_SEGMENT_SZ;
+  unsigned qh_range_tab[4][3];
   for (int i = 0; i < 9; ++i) {
     int maxHLen = 0;
     int nChunks = qhda[i].nChunks;
     qhda[i].qh = qh;
     if (nChunks > 0) {
-      maxHLen = load_quantized_histogram(qh, nSymbolsTab[i]+1, nChunks, &dec);
+      uint32_t qhSz = nChunks* (nSymbolsTab[i]+1);
+      qhSegSz += qhSz;
+      if (qhSegSz > ARITH_CODER_MODEL_MAX_SEGMENT_SZ) {
+        qhSegSz = qhSz;
+        int ret = load_quantized_histogram_range_tab(qh_range_tab, &dec);
+        if (ret != 0)
+          return ret;
+      }
+      maxHLen = load_quantized_histogram(qh, nSymbolsTab[i]+1, nChunks, &dec, qh_range_tab);
       if (maxHLen < 0)
         return maxHLen;
+      qh += qhSz;
     }
     qhda[i].maxHLen = maxHLen-1;
-    qh += nChunks* (nSymbolsTab[i]+1);
   }
 
   int modellen = srclen - dec.m_srclen;

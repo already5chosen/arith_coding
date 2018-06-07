@@ -513,39 +513,59 @@ static uint8_t* store_model_store_nChunks(uint8_t* dst, int val, CArithmeticEnco
 }
 
 template<class T>
-void store_model_store_data_loop(T* obj, const uint8_t* qh, int len, int nCol, int nChunks)
+void store_model_store_data_loop(T* obj,
+  const uint8_t*             qh,
+  const context_plain_hdr_t* hdr0,
+  const context_plain_hdr_t* hdr1)
 {
-  int runlen = (nCol-len)*nChunks-2;
-  unsigned prev_val = 0;
-  for (int i = 0; i < len; ++i) {
-    const uint8_t* col = &qh[len-1-i];
-    for (int chunk_i = 0; chunk_i < nChunks; ++chunk_i, col += nCol) {
-      unsigned val = *col;
-      ++runlen;
-      if (val != prev_val) {
-        if (runlen >= 0)
-          obj->add_zero_run(runlen);
-        runlen = -1;
-        unsigned diff;
-        obj->add_nonzero();
-        if (val > prev_val) {
-          obj->add_plus(prev_val != 0); // '+'
-          diff = val - prev_val - 1;
-        } else {
-          obj->add_minus(prev_val != 255); // '-'
-          diff = prev_val - val - 1;
+  for (const context_plain_hdr_t* hdr = hdr0; hdr != hdr1; ++hdr) {
+    uint32_t nChunks  = hdr->nChunks;
+    if (nChunks > 0) {
+      const uint32_t nSymbols = hdr->nSymbols;
+      const uint32_t maxHlen  = hdr->maxHLen;
+
+      const int len  = maxHlen+1;
+      const int nCol = nSymbols+1;
+
+      int runlen = (nCol-len)*nChunks-2;
+      unsigned prev_val = 0;
+      for (int i = 0; i < len; ++i) {
+        const uint8_t* col = &qh[len-1-i];
+        for (uint32_t chunk_i = 0; chunk_i < nChunks; ++chunk_i, col += nCol) {
+          unsigned val = *col;
+          ++runlen;
+          if (val != prev_val) {
+            if (runlen >= 0)
+              obj->add_zero_run(runlen);
+            runlen = -1;
+            unsigned diff;
+            obj->add_nonzero();
+            if (val > prev_val) {
+              obj->add_plus(prev_val != 0); // '+'
+              diff = val - prev_val - 1;
+            } else {
+              obj->add_minus(prev_val != 255); // '-'
+              diff = prev_val - val - 1;
+            }
+            if (diff != 0)
+              obj->add_difference(diff-1);
+            prev_val = val;
+          }
         }
-        if (diff != 0)
-          obj->add_difference(diff-1);
-        prev_val = val;
+        prev_val = qh[len-1-i];
       }
+      obj->add_zero_run(runlen+1);
+      qh += (nSymbols+1)*nChunks;
     }
-    prev_val = qh[len-1-i];
   }
-  obj->add_zero_run(runlen+1);
 }
 
-static uint8_t* store_model_store_data(uint8_t* dst, const uint8_t* qh, int len, int nCol, int nChunks, CArithmeticEncoder* pEnc)
+static uint8_t* store_model_store_data(
+  uint8_t*                   dst,
+  const uint8_t*             qh,
+  const context_plain_hdr_t* hdr0,
+  const context_plain_hdr_t* hdr1,
+  CArithmeticEncoder*        pEnc)
 {
   // first pass - calculate histograms
   struct histogram_pass_t {
@@ -557,7 +577,7 @@ static uint8_t* store_model_store_data(uint8_t* dst, const uint8_t* qh, int len,
     void add_minus(bool ena) { hist[7] += ena; }
   };
   histogram_pass_t pass1 = {{0}};
-  store_model_store_data_loop(&pass1, qh, len, nCol, nChunks);
+  store_model_store_data_loop(&pass1, qh, hdr0, hdr1);
 
 #if 0
   double entr = 0;
@@ -616,7 +636,7 @@ static uint8_t* store_model_store_data(uint8_t* dst, const uint8_t* qh, int len,
   // second pass - encode
   pass2.dst  = dst;
   pass2.pEnc = pEnc;
-  store_model_store_data_loop(&pass2, qh, len, nCol, nChunks);
+  store_model_store_data_loop(&pass2, qh, hdr0, hdr1);
 
   return pass2.dst;
 }
@@ -631,11 +651,11 @@ static int store_model(uint8_t* dst, uint32_t * context, double* pNbits, CArithm
   for (int i = 1; i < 9; ++i)
     dst = store_model_store_nChunks(dst, hdrs->a[i].nChunks+1, pEnc);
 
-  uint8_t singleChunkQh[8+257];
-  int singleChunkQh_i = 0;
-  uint8_t* qHistogram = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_QH_OFFSET_I]]);
+  uint8_t* qHistogram0 = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_QH_OFFSET_I]]);
+  uint8_t* qHistogram = qHistogram0;
+  context_plain_hdr_t* hdr0 = hdrs->a;
+  context_plain_hdr_t* hdr  = hdr0;
   for (int i = 0; i < 9; ++i) {
-    context_plain_hdr_t* hdr = &hdrs->a[i];
     uint32_t nChunks  = hdr->nChunks;
     uint32_t nSymbols = hdr->nSymbols;
     uint32_t maxHlen  = hdr->maxHLen;
@@ -646,13 +666,19 @@ static int store_model(uint8_t* dst, uint32_t * context, double* pNbits, CArithm
         if (hlen < maxHlen)
           memset(&qHistogram[(nSymbols+1)*chunk_i+hlen+1], 0, maxHlen-hlen);
       }
-      dst = store_model_store_data(dst, qHistogram, maxHlen+1, nSymbols+1, nChunks, pEnc);
-      qHistogram += (nSymbols+1)*nChunks;
+    }
+    qHistogram += (nSymbols+1)*nChunks;
+    hdr        += 1;
+    int nOctets = qHistogram - qHistogram0;
+    if (nOctets > 0) {
+      if (i == 8 || nOctets+(hdr->nSymbols+1)*hdr->nChunks > ARITH_CODER_MODEL_MAX_SEGMENT_SZ) {
+        // dst = store_model_store_data(dst, qHistogram, maxHlen+1, nSymbols+1, nChunks, pEnc);
+        dst = store_model_store_data(dst, qHistogram0, hdr0, hdr, pEnc);
+        qHistogram0 = qHistogram;
+        hdr0        = hdr;
+      }
     }
   }
-
-  if (singleChunkQh_i > 0)
-    dst = store_model_store_data(dst, singleChunkQh, singleChunkQh_i, singleChunkQh_i, 1, pEnc);
 
   int len = dst - dst0;
   *pNbits = len*8.0 + 63 - log2(pEnc->m_range);
