@@ -547,9 +547,6 @@ void store_model_store_data_loop(T* obj, const uint8_t* qh, int len, int nCol, i
 
 static uint8_t* store_model_store_data(uint8_t* dst, const uint8_t* qh, int len, int nCol, int nChunks, CArithmeticEncoder* pEnc)
 {
-  if (len == 0)
-    return pEnc->put(8*10*10*10+1, 0, 1, dst); // store special code instead of hhw
-
   // first pass - calculate histograms
   struct histogram_pass_t {
     unsigned hist[8];
@@ -614,7 +611,7 @@ static uint8_t* store_model_store_data(uint8_t* dst, const uint8_t* qh, int len,
   unsigned hhw = (hh01-1)+8*(hh23+(10*(hh45+10*hh67))); // combine all hh in a single word
 
   // store hhw
-  dst = pEnc->put(8*10*10*10+1, hhw+1, 1, dst);
+  dst = pEnc->put(8*10*10*10, hhw, 1, dst);
 
   // second pass - encode
   pass2.dst  = dst;
@@ -634,6 +631,8 @@ static int store_model(uint8_t* dst, uint32_t * context, double* pNbits, CArithm
   for (int i = 1; i < 9; ++i)
     dst = store_model_store_nChunks(dst, hdrs->a[i].nChunks+1, pEnc);
 
+  uint8_t singleChunkQh[8+257];
+  int singleChunkQh_i = 0;
   uint8_t* qHistogram = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_QH_OFFSET_I]]);
   for (int i = 0; i < 9; ++i) {
     context_plain_hdr_t* hdr = &hdrs->a[i];
@@ -641,18 +640,19 @@ static int store_model(uint8_t* dst, uint32_t * context, double* pNbits, CArithm
     uint32_t nSymbols = hdr->nSymbols;
     uint32_t maxHlen  = hdr->maxHLen;
     if (nChunks > 0) {
-      if (maxHlen > 0) {
-        uint32_t* plainH = &context[hdr->headOffset];
-        for (uint32_t chunk_i = 0; chunk_i < nChunks; ++chunk_i, plainH = &context[plainH[CONTEXT_CHK_NEXT_I]]) {
-          uint32_t hlen = plainH[CONTEXT_CHK_HLEN_I];
-          if (hlen < maxHlen)
-            memset(&qHistogram[(nSymbols+1)*chunk_i+hlen+1], 0, maxHlen-hlen);
-        }
+      uint32_t* plainH = &context[hdr->headOffset];
+      for (uint32_t chunk_i = 0; chunk_i < nChunks; ++chunk_i, plainH = &context[plainH[CONTEXT_CHK_NEXT_I]]) {
+        uint32_t hlen = plainH[CONTEXT_CHK_HLEN_I];
+        if (hlen < maxHlen)
+          memset(&qHistogram[(nSymbols+1)*chunk_i+hlen+1], 0, maxHlen-hlen);
       }
       dst = store_model_store_data(dst, qHistogram, maxHlen+1, nSymbols+1, nChunks, pEnc);
       qHistogram += (nSymbols+1)*nChunks;
     }
   }
+
+  if (singleChunkQh_i > 0)
+    dst = store_model_store_data(dst, singleChunkQh, singleChunkQh_i, singleChunkQh_i, 1, pEnc);
 
   int len = dst - dst0;
   *pNbits = len*8.0 + 63 - log2(pEnc->m_range);

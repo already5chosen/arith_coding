@@ -147,16 +147,12 @@ static
 int load_quantized_histogram(uint8_t* qh, unsigned nCol, unsigned nChunks, CArithmeticDecoder* pDec)
 {
   // load hhw - combined hh word
-  unsigned hhw = pDec->get(8*10*10*10+1);
+  unsigned hhw = pDec->get(8*10*10*10);
   int err = pDec->put(hhw, 1);
   if (err)
     return err;
 
-  if (hhw == 0)
-    return 0; // zero code indicates that histogram is empty
-
   // split hhw into individual hh words
-  hhw -= 1;
   unsigned hh02 = (hhw %  8) + 1; hhw /= 8;
   unsigned hh01 = (hhw % 10) + 0; hhw /= 10;
   unsigned hh23 = (hhw % 10) + 0; hhw /= 10;
