@@ -192,6 +192,24 @@ static void quantize_histogram(uint8_t* __restrict qh, const uint32_t *h, int le
   }
 }
 
+// return quantized code of h0/(h0+h1) in range [0..scale]
+static unsigned quantize_histogram_pair(unsigned h0, unsigned h1, unsigned scale)
+{
+  if (h0 == 0)
+    return 0;
+  if (h1 == 0)
+    return scale;
+  unsigned hTot = h0 + h1;
+  // printf("%u+%u => %.2f\n", h0, h1, (log2(hTot)*hTot-log2(h0)*h0-log2(h1)*h1)/8);
+  double M_PI = 3.1415926535897932384626433832795;
+  unsigned val = round((asin(h0*2.0/hTot - 1.0)/M_PI + 0.5)*scale);
+  if (val < 1)
+    val = 1;
+  else if (val >= scale)
+    val = scale-1;
+  return val;
+}
+
 static void AdaptAdd(uint32_t* dst, const uint32_t* prev, unsigned len)
 {
   for (unsigned c = 0; c < len; ++c)
@@ -324,6 +342,7 @@ static double Prepare1Plain(uint32_t* context, double* pInfo, context_plain_hdr_
   int maxMaxC = -1;
   const uint32_t nChunks = hdr->nChunks;
   const int      nSymbols = hdr->nSymbols;
+  const int      qHistogramNCol = nSymbols==2 ? 2 : nSymbols + 1;
   uint32_t* chunk = &context[hdr->headOffset];
   for (unsigned chunk_i = 0; chunk_i < nChunks; ++chunk_i, chunk = &context[chunk[CONTEXT_CHK_NEXT_I]]) {
     qHistogram[0] = chunk[CONTEXT_CHK_PG_PER_CHUNK_I]-1;
@@ -350,9 +369,13 @@ static double Prepare1Plain(uint32_t* context, double* pInfo, context_plain_hdr_
             entropy -= log2(double(cnt))*cnt;
         }
       }
-      quantize_histogram(qHistogram+1, histogram, maxC+1, tot);
+      if (nSymbols > 2) {
+        quantize_histogram(qHistogram+1, histogram, maxC+1, tot);
+      } else {
+        qHistogram[1] = quantize_histogram_pair(histogram[0], histogram[1], 255);
+      }
     }
-    qHistogram += nSymbols+1;
+    qHistogram += qHistogramNCol;
   }
   hdr->maxHLen = maxMaxC+1;
 
@@ -396,6 +419,7 @@ static double Prepare2Plain(uint32_t* context, context_plain_hdr_t* hdr, const u
   // calculate c2low tables
   const uint32_t nChunks   = hdr->nChunks;
   const uint32_t nSymbols  = hdr->nSymbols;
+  const int      qHistogramNCol = nSymbols==2 ? 2 : nSymbols + 1;
   uint32_t* buf = &context[hdr->headOffset];
   for (uint32_t chunk_i = 0; chunk_i < nChunks; ++chunk_i) {
     int hlen       = buf[CONTEXT_CHK_HLEN_I];
@@ -404,7 +428,18 @@ static double Prepare2Plain(uint32_t* context, context_plain_hdr_t* hdr, const u
     // context_plain1_c2low_t* dstChunk = reinterpret_cast<context_plain1_c2low_t*>(dst);
     if (hlen > 0) {
       uint16_t ranges[258];
-      nRanges = quantized_histogram_to_range(ranges, hlen, qHistogram+1, VAL_RANGE);
+      if (nSymbols > 2) {
+        nRanges = quantized_histogram_to_range(ranges, hlen, qHistogram+1, VAL_RANGE);
+      } else {
+        nRanges = 1;
+        unsigned qhVal = qHistogram[1];
+        if (qhVal!=0 && qhVal!=255) {
+          unsigned ra0 = quantized_histogram_pair_to_range_qh_scale255(qhVal, VAL_RANGE);
+          ranges[0] = ra0;
+          ranges[1] = VAL_RANGE-ra0;
+          nRanges = 2;
+        }
+      }
       if (nRanges > 1) {
         // calculate entropy after quantization
         int32_t tot = 0;
@@ -423,7 +458,7 @@ static double Prepare2Plain(uint32_t* context, context_plain_hdr_t* hdr, const u
     buf[CONTEXT_CHK_SYMBOLS_PER_CHUNK_I] = pgPerChunk*hdr->pageSz;
 
     buf = &context[buf[CONTEXT_CHK_NEXT_I]];
-    qHistogram += nSymbols+1;
+    qHistogram += qHistogramNCol;
   }
   return entropy;
 }
@@ -451,24 +486,6 @@ public:
   uint64_t m_lo;    // scaled by 2**64
   uint64_t m_range; // scaled by 2**63
 };
-
-// return quantized code of h0/(h0+h1) in range [0..scale]
-static unsigned quantize_histogram_pair(unsigned h0, unsigned h1, unsigned scale)
-{
-  if (h0 == 0)
-    return 0;
-  if (h1 == 0)
-    return scale;
-  unsigned hTot = h0 + h1;
-  // printf("%u+%u => %.2f\n", h0, h1, (log2(hTot)*hTot-log2(h0)*h0-log2(h1)*h1)/8);
-  double M_PI = 3.1415926535897932384626433832795;
-  unsigned val = round((asin(h0*2.0/hTot - 1.0)/M_PI + 0.5)*scale);
-  if (val < 1)
-    val = 1;
-  else if (val >= scale)
-    val = scale-1;
-  return val;
-}
 
 static unsigned add_value_to_histogram(unsigned* h, unsigned val)
 {
@@ -524,8 +541,8 @@ void store_model_store_data_loop(T* obj,
       const uint32_t nSymbols = hdr->nSymbols;
       const uint32_t maxHlen  = hdr->maxHLen;
 
-      const int len  = maxHlen+1;
-      const int nCol = nSymbols+1;
+      const int len  = nSymbols==2 ? 2 : maxHlen+1;
+      const int nCol = nSymbols==2 ? 2 : nSymbols+1;
 
       int runlen = (nCol-len)*nChunks-2;
       unsigned prev_val = 0;
@@ -659,7 +676,7 @@ static int store_model(uint8_t* dst, uint32_t * context, double* pNbits, CArithm
     uint32_t nChunks  = hdr->nChunks;
     uint32_t nSymbols = hdr->nSymbols;
     uint32_t maxHlen  = hdr->maxHLen;
-    if (nChunks > 0) {
+    if (nChunks > 0 && nSymbols>2) {
       uint32_t* plainH = &context[hdr->headOffset];
       for (uint32_t chunk_i = 0; chunk_i < nChunks; ++chunk_i, plainH = &context[plainH[CONTEXT_CHK_NEXT_I]]) {
         uint32_t hlen = plainH[CONTEXT_CHK_HLEN_I];
@@ -672,7 +689,6 @@ static int store_model(uint8_t* dst, uint32_t * context, double* pNbits, CArithm
     int nOctets = qHistogram - qHistogram0;
     if (nOctets > 0) {
       if (i == 8 || nOctets+(hdr->nSymbols+1)*hdr->nChunks > ARITH_CODER_MODEL_MAX_SEGMENT_SZ) {
-        // dst = store_model_store_data(dst, qHistogram, maxHlen+1, nSymbols+1, nChunks, pEnc);
         dst = store_model_store_data(dst, qHistogram0, hdr0, hdr, pEnc);
         qHistogram0 = qHistogram;
         hdr0        = hdr;

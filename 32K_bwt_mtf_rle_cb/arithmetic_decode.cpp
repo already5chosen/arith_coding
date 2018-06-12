@@ -322,6 +322,7 @@ struct arithmetic_decode_model_t {
   }
 
   int dequantize_and_prepare(const uint8_t* qh, unsigned hlen);
+  int dequantize_and_prepare_pair(unsigned qh0);
   int val2c_estimate(uint64_t value, uint64_t invRange) {
     uint64_t loEst33b = umulh(value,invRange);
     unsigned ri = loEst33b>>(33-RANGE2C_NBITS);
@@ -369,6 +370,24 @@ int arithmetic_decode_model_t::dequantize_and_prepare(const uint8_t* qh, unsigne
     return nRanges;
   }
   return 0;
+}
+
+int arithmetic_decode_model_t::dequantize_and_prepare_pair(unsigned qh0)
+{
+  if (qh0 != 0) {
+    if (qh0 != 255) {
+      unsigned ra0 = quantized_histogram_pair_to_range_qh_scale255(qh0, VAL_RANGE);
+      m_c2low[0] = ra0;
+      m_c2low[1] = VAL_RANGE-ra0;
+      prepare();
+      return 2;
+    } else {
+      m_c2low[0] = 0;
+    }
+  } else {
+    m_c2low[0] = 1;
+  }
+  return 1;
 }
 
 void arithmetic_decode_model_t::prepare()
@@ -570,10 +589,13 @@ int decode(
             qhd->nChunks = lvl2nChunks - 1;
             const int nSymbols = nSymbolsTab[c0+1];
             const uint8_t* lvl2qh = qhd->qh;
-            qhd->qh = lvl2qh + (nSymbols + 1);
+            unsigned nCol = nSymbols==2 ? 2 : nSymbols+1;
+            qhd->qh = lvl2qh + nCol;
             lvl2sym_i = pageSzTab[c0+1]*int32_t(lvl2qh[0]+1);
             pModel = &models[c0+1];
-            int nLvl2Ranges = pModel->dequantize_and_prepare(&lvl2qh[1], qhd->maxHLen);
+            int nLvl2Ranges = (nSymbols != 2) ?
+              pModel->dequantize_and_prepare(&lvl2qh[1], qhd->maxHLen):
+              pModel->dequantize_and_prepare_pair(lvl2qh[1]);
             qhd->theOnlyC = c = pModel->m_c2low[0];
             if (nLvl2Ranges <= 1) {
               if (__builtin_expect(nLvl2Ranges == 0, 0)) {
@@ -681,7 +703,8 @@ int arithmetic_decode(
         if (ret != 0)
           return ret;
       }
-      maxHLen = load_quantized_histogram(qh, nSymbolsTab[i]+1, nChunks, &dec, qh_range_tab);
+      unsigned nCol = nSymbolsTab[i]==2 ? 2 : nSymbolsTab[i]+1;
+      maxHLen = load_quantized_histogram(qh, nCol, nChunks, &dec, qh_range_tab);
       if (maxHLen < 0)
         return maxHLen;
       qh += qhSz;
