@@ -15,13 +15,14 @@ int main(int argz, char** argv)
   if (argz < 3) {
     printf(
       "Usage:\n"
-      "bwt_mtf_rle_e input-file output-file [-v]\n"
+      "bwt_mtf_rle_e input-file output-file [-v[x]]\n"
       );
     return 1;
   }
   char* inpfilename = argv[1];
   char* outfilename = argv[2];
-  bool vFlag = (argz > 3) && (strcmp("-v", argv[3])==0);
+  bool vFlag = (argz > 3) && (strncmp("-v", argv[3], 2)==0);
+  bool xFlag = vFlag ? argv[3][2]=='x' : false;
 
   int ret = 1;
   FILE* fpinp = fopen(inpfilename, "rb");
@@ -77,13 +78,13 @@ int main(int argz, char** argv)
             uint64_t t2 = __rdtsc();
 
             uint8_t* ariEncDst = reinterpret_cast<uint8_t*>(bwtIdx);
-            double info[8];
+            double info[64];
             ressz = arithmetic_encode(encContext, ariEncDst, tilelen, vFlag ? info : 0);
             uint64_t t3 = __rdtsc();
-            if (vFlag)
+            if (vFlag) {
               printf(
                "%4s:%d "
-               "%7u->%7u. Model %9.3f. Coded %9.0f. Entropy %11.3f (%11.3f). %10.0f clks. %6.1f+%5.1f+%4.1f=%6.1f clk/char (%.0f+%.0f)\n"
+               "%7u->%7u. Model %9.3f. Coded %9.0f. Entropy %11.3f (%11.3f). %10.0f clks. %6.1f+%5.1f+%5.1f=%6.1f clk/char"
                ,nametag
                ,tile_i
                ,unsigned(tilelen)
@@ -97,9 +98,25 @@ int main(int argz, char** argv)
                ,double(t2-t1)/tilelen
                ,double(t3-t2)/tilelen
                ,double(t3-t0)/tilelen
-               ,info[4]
-               ,info[5]
              );
+             if (xFlag) {
+                printf("\n");
+                for (int i = 0; i < 9; ++i) {
+                  printf(" %4.0f %6.0f %5.0f %4.2f;%s"
+                    ,info[4+9*0+i]
+                    ,info[4+9*1+i]
+                    ,info[4+9*2+i]/8
+                    ,info[4+9*1+i] != 0 ? info[4+9*2+i]/info[4+9*1+i] : 0.0
+                    ,i==3 ? "\n" : ""
+                    );
+                }
+                printf("\n");
+             } else {
+              printf(" (%.0f)\n"
+               ,info[4]
+               );
+             }
+            }
             if (ressz > 0) {
               // normal compression
               storeAs3octets(&hdr[3], ressz);

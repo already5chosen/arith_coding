@@ -390,15 +390,19 @@ static void prepare1(uint32_t* context, double* pInfo)
   uint32_t qhOffset = context[CONTEXT_HDR_QH_OFFSET_I];
   double entropy = 0;
   uint8_t* qHistogram = reinterpret_cast<uint8_t*>(&context[qhOffset]);
+  double entrArr[9];
   for (int i = 0; i < 9; ++i) {
-    entropy += Prepare1Plain(context, pInfo, &hdrs->a[i], qHistogram);
+    entropy += entrArr[i] = Prepare1Plain(context, pInfo, &hdrs->a[i], qHistogram);
     qHistogram += hdrs->a[i].nChunks * (hdrs->a[i].nSymbols+1);
   }
   if (pInfo) {
     pInfo[0] = entropy;
     pInfo[3] = 0;
-    pInfo[4] = hdrs->a[0].nChunks;
-    pInfo[5] = hdrs->a[1].nChunks;
+    for (int i = 0; i < 9; ++i) {
+      pInfo[4+9*0+i] = hdrs->a[i].nChunks;
+      pInfo[4+9*1+i] = hdrs->a[i].len;
+      pInfo[4+9*2+i] = entrArr[i];
+    }
   }
 }
 
@@ -866,14 +870,23 @@ int arithmetic_encode(uint32_t* context, uint8_t* dst, int origlen, double* pInf
 
   int dstlen = encode(&dst[modellen], context, &enc);
 
-  if (pInfo)
-    pInfo[2] = dstlen*8.0;
-
   int reslen = modellen + dstlen;
   // printf("%d+%d=%d(%d) <> %d\n", modellen, dstlen, reslen, lenEst, origlen);
+
+  if (pInfo)
+    pInfo[2] = reslen*8.0 - modelLenBits;
 
   if (reslen >= origlen)
     return 0; // not compressible
 
   return reslen;
 }
+
+/*
+    pInfo[0] = entropy;
+    pInfo[1] = modelLenBits;
+    pInfo[2] = reslen*8.0 - modelLenBits;;
+    pInfo[3] = quantizedEntropy;
+    pInfo[4] = hdrs->a[0].nChunks;
+    pInfo[5] = hdrs->a[1].nChunks;
+*/
