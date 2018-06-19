@@ -440,6 +440,10 @@ int decode(
     qhda[i].sym_i = 0;
     models[i].init(nSymbols);
   }
+  arithmetic_decode_model_t modelHalf;
+  modelHalf.init(2);
+  static const uint8_t qh_half[2] = {128,128};
+  modelHalf.dequantize_and_prepare(qh_half, 2);
 
   // initialize move-to-front decoder table
   uint8_t mtf_t[256];
@@ -467,6 +471,7 @@ int decode(
 
   uint8_t* dst = dst0;
   int dst_i = 0;
+  int prevC0 = 1;
   for (int lvl1chunk_i = 0; lvl1chunk_i < qhda[0].nChunks; ++lvl1chunk_i) {
     const uint8_t* lvl1Qh = qhda[0].qh;
     qhda[0].qh = lvl1Qh + nSymbolsTab[0] + 1;
@@ -578,34 +583,38 @@ int decode(
         c1 = c;
         if (lvl == 0) {
           c0 = c;
-          qh_descr_t* qhd = &qhda[c+1];
-          pModel = qhd->pModel;
-          c      = qhd->theOnlyC;
-          int lvl2sym_i = qhd->sym_i;
-          if (lvl2sym_i == 0) {
-            int32_t lvl2nChunks = qhd->nChunks;
-            if (__builtin_expect(lvl2nChunks == 0, 0))
-              return -24; // chunk has to exist
-            qhd->nChunks = lvl2nChunks - 1;
-            const int nSymbols = nSymbolsTab[c0+1];
-            const uint8_t* lvl2qh = qhd->qh;
-            unsigned nCol = nSymbols==2 ? 2 : nSymbols+1;
-            qhd->qh = lvl2qh + nCol;
-            lvl2sym_i = pageSzTab[c0+1]*int32_t(lvl2qh[0]+1);
-            pModel = &models[c0+1];
-            int nLvl2Ranges = (nSymbols != 2) ?
-              pModel->dequantize_and_prepare(&lvl2qh[1], qhd->maxHLen):
-              pModel->dequantize_and_prepare_pair(lvl2qh[1]);
-            qhd->theOnlyC = c = pModel->m_c2low[0];
-            if (nLvl2Ranges <= 1) {
-              if (__builtin_expect(nLvl2Ranges == 0, 0)) {
-                return -25; // chunk has to contain something
+          pModel = &modelHalf;
+          if ((c0 | prevC0) != 0) {
+            qh_descr_t* qhd = &qhda[c+1];
+            pModel = qhd->pModel;
+            c      = qhd->theOnlyC;
+            int lvl2sym_i = qhd->sym_i;
+            if (lvl2sym_i == 0) {
+              int32_t lvl2nChunks = qhd->nChunks;
+              if (__builtin_expect(lvl2nChunks == 0, 0))
+                return -24; // chunk has to exist
+              qhd->nChunks = lvl2nChunks - 1;
+              const int nSymbols = nSymbolsTab[c0+1];
+              const uint8_t* lvl2qh = qhd->qh;
+              unsigned nCol = nSymbols==2 ? 2 : nSymbols+1;
+              qhd->qh = lvl2qh + nCol;
+              lvl2sym_i = pageSzTab[c0+1]*int32_t(lvl2qh[0]+1);
+              pModel = &models[c0+1];
+              int nLvl2Ranges = (nSymbols != 2) ?
+                pModel->dequantize_and_prepare(&lvl2qh[1], qhd->maxHLen):
+                pModel->dequantize_and_prepare_pair(lvl2qh[1]);
+              qhd->theOnlyC = c = pModel->m_c2low[0];
+              if (nLvl2Ranges <= 1) {
+                if (__builtin_expect(nLvl2Ranges == 0, 0)) {
+                  return -25; // chunk has to contain something
+                }
+                pModel = 0;
               }
-              pModel = 0;
+              qhd->pModel = pModel;
             }
-            qhd->pModel = pModel;
+            qhd->sym_i = lvl2sym_i - 1;
           }
-          qhd->sym_i = lvl2sym_i - 1;
+          prevC0 = c0;
         }
       }
 

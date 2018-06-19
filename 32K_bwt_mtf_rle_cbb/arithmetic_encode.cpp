@@ -31,6 +31,8 @@ enum {
   // context header
   CONTEXT_HDR_SRC_OFFSET_I=0,
   CONTEXT_HDR_QH_OFFSET_I,
+  CONTEXT_HDR_PREV_C0_I,
+  CONTEXT_HDR_CH0_CNT_I,
   CONTEXT_HDR_PLAIN_HDRS_I,
   CONTEXT_PLAINS_HDRS_SZ = (sizeof(context_plain_hdrs_t)-1)/sizeof(uint32_t) + 1,
   CONTEXT_HDR_LEN = CONTEXT_HDR_PLAIN_HDRS_I + CONTEXT_PLAINS_HDRS_SZ,
@@ -51,6 +53,8 @@ void arithmetic_encode_init_context(uint32_t* context, int tilelen)
   uint32_t srcOffset = CONTEXT_HDR_LEN;
   context[CONTEXT_HDR_SRC_OFFSET_I] = srcOffset;
   context[CONTEXT_HDR_QH_OFFSET_I]  = srcOffset + (tilelen*2-1)/sizeof(uint32_t) + 1;
+  context[CONTEXT_HDR_PREV_C0_I]    = 1;
+  context[CONTEXT_HDR_CH0_CNT_I]    = 0;
   context_plain_hdrs_t* hdrs = reinterpret_cast<context_plain_hdrs_t*>(&context[CONTEXT_HDR_PLAIN_HDRS_I]);
 
   hdrs->a[0].nSymbols  = 8;
@@ -120,6 +124,8 @@ void arithmetic_encode_chunk_callback(void* context_ptr, const uint8_t* src, int
 
   uint32_t lvl1_sym_i = lvl1Len % ARITH_CODER_L1_PAGE_SZ;
   uint32_t* lvl1H = &context[hdrs->a[0].tailOffset+CONTEXT_CHK_HISTOGRAM_I];
+  int  prevC0 = context[CONTEXT_HDR_PREV_C0_I];
+  uint32_t ch0Cnt = 0;
 
   // split source in two two levels and update histograms
   for (int i = 0; i < srclen; ++i) {
@@ -159,19 +165,26 @@ void arithmetic_encode_chunk_callback(void* context_ptr, const uint8_t* src, int
     if (lvl1_sym_i == ARITH_CODER_L1_PAGE_SZ)
       lvl1_sym_i = 0;
 
-    context_plain_hdr_t* hdr = &hdrs->a[c0+1];
-    unsigned lvl2_sym_i = lvl2_sym_i_arr[c0];
-    uint32_t* lvl2H = &context[hdr->tailOffset];
-    if (lvl2_sym_i == 0)
-      lvl2H = allocate_chunk(context, c0+1);
-    ++lvl2H[CONTEXT_CHK_HISTOGRAM_I+c1];
-    ++hdr->len;
-    ++lvl2_sym_i;
-    if (lvl2_sym_i == hdr->pageSz)
-      lvl2_sym_i = 0;
-    lvl2_sym_i_arr[c0] = lvl2_sym_i;
+    if ((c0 | prevC0) != 0) {
+      context_plain_hdr_t* hdr = &hdrs->a[c0+1];
+      unsigned lvl2_sym_i = lvl2_sym_i_arr[c0];
+      uint32_t* lvl2H = &context[hdr->tailOffset];
+      if (lvl2_sym_i == 0)
+        lvl2H = allocate_chunk(context, c0+1);
+      ++lvl2H[CONTEXT_CHK_HISTOGRAM_I+c1];
+      ++hdr->len;
+      ++lvl2_sym_i;
+      if (lvl2_sym_i == hdr->pageSz)
+        lvl2_sym_i = 0;
+      lvl2_sym_i_arr[c0] = lvl2_sym_i;
+      prevC0 = c0;
+    } else {
+      ++ch0Cnt;
+    }
   }
   hdrs->a[0].len = lvl1Len;
+  context[CONTEXT_HDR_PREV_C0_I] = prevC0;
+  context[CONTEXT_HDR_CH0_CNT_I] += ch0Cnt;
 }
 
 static void quantize_histogram(uint8_t* __restrict qh, const uint32_t *h, int len, uint32_t hTot)
@@ -396,7 +409,7 @@ static void prepare1(uint32_t* context, double* pInfo)
     qHistogram += hdrs->a[i].nChunks * (hdrs->a[i].nSymbols+1);
   }
   if (pInfo) {
-    pInfo[0] = entropy;
+    pInfo[0] = entropy+context[CONTEXT_HDR_CH0_CNT_I];
     pInfo[3] = 0;
     for (int i = 0; i < 9; ++i) {
       pInfo[4+9*0+i] = hdrs->a[i].nChunks;
@@ -471,7 +484,7 @@ static double Prepare2Plain(uint32_t* context, context_plain_hdr_t* hdr, const u
 static double prepare2(uint32_t * context)
 {
   context_plain_hdrs_t* hdrs = reinterpret_cast<context_plain_hdrs_t*>(&context[CONTEXT_HDR_PLAIN_HDRS_I]);
-  double entropy = 0;
+  double entropy = context[CONTEXT_HDR_CH0_CNT_I];
   const uint8_t* qHistogram = reinterpret_cast<const uint8_t*>(&context[context[CONTEXT_HDR_QH_OFFSET_I]]);
   for (int i = 0; i < 9; ++i) {
     entropy += Prepare2Plain(context, &hdrs->a[i], qHistogram);
@@ -715,6 +728,7 @@ static void inc_dst(uint8_t* dst) {
 
 static int encode(uint8_t* dst, const uint32_t* context, CArithmeticEncoder* pEnc)
 {
+  static const uint16_t c2low_half[3] = {0, VAL_RANGE/2, VAL_RANGE};
   const uint8_t*  src = reinterpret_cast<const uint8_t*>(&context[context[CONTEXT_HDR_SRC_OFFSET_I]]);
   const context_plain_hdrs_t* hdrs = reinterpret_cast<const context_plain_hdrs_t*>(&context[CONTEXT_HDR_PLAIN_HDRS_I]);
   struct lvl2Rec_t {
@@ -742,6 +756,7 @@ static int encode(uint8_t* dst, const uint32_t* context, CArithmeticEncoder* pEn
   uint64_t prevLo = lo;
 
   const uint32_t* p_p1_c2low = &context[hdrs->a[0].headOffset];
+  int prevC0 = 1;
   for (uint32_t lvl1chunk_i = 0; lvl1chunk_i < lvl1nChunks; ++lvl1chunk_i, p_p1_c2low = &context[p_p1_c2low[CONTEXT_CHK_NEXT_I]]) {
     const uint16_t* lvl1_c2low = p_p1_c2low[CONTEXT_CHK_N_RANGES_I] > 1 ?
       reinterpret_cast<const uint16_t*>(&p_p1_c2low[CONTEXT_CHK_C2LOW_I]) : 0;
@@ -749,7 +764,7 @@ static int encode(uint8_t* dst, const uint32_t* context, CArithmeticEncoder* pEn
     lvl1Len -= srclen1;
     for (unsigned i = 0; i < srclen1; ++i) {
       const uint16_t* c2low = lvl1_c2low;
-      lvl2Rec_t* lvl2Rec;
+      lvl2Rec_t* lvl2Rec = 0;
       uint32_t lvl2_i;
       for (int lvl = 0; lvl < 2; ++lvl) {
         int c = src[lvl];
@@ -777,26 +792,32 @@ static int encode(uint8_t* dst, const uint32_t* context, CArithmeticEncoder* pEn
         }
 
         if (lvl==0) {
-          lvl2Rec = &lvl2Records[c];
-          c2low   = lvl2Rec->c2low;
-          lvl2_i  = lvl2Rec->lvl2_i;
-          if (lvl2_i == 0) {
-            const uint32_t* c2lowRec = &context[lvl2Rec->offset];
-            lvl2Rec->c2low =
-            c2low = c2lowRec[CONTEXT_CHK_N_RANGES_I] > 1 ?
-              reinterpret_cast<const uint16_t*>(&c2lowRec[CONTEXT_CHK_C2LOW_I]) : 0;
-            lvl2Rec->srclen = (lvl2Rec->nChunks==1) ? UINT_MAX: c2lowRec[CONTEXT_CHK_SYMBOLS_PER_CHUNK_I];
+          c2low   = c2low_half;
+          if ((c | prevC0) != 0) {
+            lvl2Rec = &lvl2Records[c];
+            c2low   = lvl2Rec->c2low;
+            lvl2_i  = lvl2Rec->lvl2_i;
+            if (lvl2_i == 0) {
+              const uint32_t* c2lowRec = &context[lvl2Rec->offset];
+              lvl2Rec->c2low =
+              c2low = c2lowRec[CONTEXT_CHK_N_RANGES_I] > 1 ?
+                reinterpret_cast<const uint16_t*>(&c2lowRec[CONTEXT_CHK_C2LOW_I]) : 0;
+              lvl2Rec->srclen = (lvl2Rec->nChunks==1) ? UINT_MAX: c2lowRec[CONTEXT_CHK_SYMBOLS_PER_CHUNK_I];
+            }
           }
+          prevC0 = c;
         }
       }
       src += 2;
-      ++lvl2_i;
-      if (lvl2_i == lvl2Rec->srclen) {
-        --lvl2Rec->nChunks;
-        lvl2Rec->offset = context[lvl2Rec->offset+CONTEXT_CHK_NEXT_I];
-        lvl2_i = 0;
+      if (lvl2Rec) {
+        ++lvl2_i;
+        if (lvl2_i == lvl2Rec->srclen) {
+          --lvl2Rec->nChunks;
+          lvl2Rec->offset = context[lvl2Rec->offset+CONTEXT_CHK_NEXT_I];
+          lvl2_i = 0;
+        }
+        lvl2Rec->lvl2_i = lvl2_i;
       }
-      lvl2Rec->lvl2_i = lvl2_i;
     }
     // printf(": %10d\n", dst-dst0);
     // printf("%016I64x %d %d %d %d\n", range, p_p1_c2low->nRanges, plain2chunk_i, plain2_i, uu);
