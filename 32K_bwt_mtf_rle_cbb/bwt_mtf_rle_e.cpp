@@ -11,6 +11,17 @@ static int insertZeroRun(uint8_t* dst, unsigned zRunLen)
     *dst++ = c;
     zRunLen /= 2;
   } while (zRunLen > 1);
+
+  // reverse order
+  uint8_t* p0 = dst0;
+  uint8_t* p1 = dst - 1;
+  while (p0 < p1) {
+    uint8_t v0 = *p0;
+    uint8_t v1 = *p1;
+    *p0++ = v1;
+    *p1-- = v0;
+  }
+
   return dst-dst0;
 }
 

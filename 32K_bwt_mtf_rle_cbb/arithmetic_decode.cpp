@@ -446,7 +446,7 @@ int decode(
   for (int i = 0; i < 256; ++i)
     mtf_t[i] = i;
   // initialize RLE decoder
-  uint32_t rlMsb = 1;
+  uint32_t rlInc = 1;
 
   const uint64_t MIN_RANGE = uint64_t(1) << (33-RANGE_BITS);
   const double INV_RANGE_SCALE = double(int64_t(1) << (54-RANGE_BITS)) * (int64_t(1) << 43); // 2**(97-rb)
@@ -612,8 +612,8 @@ int decode(
       // RLE decode
       if (c0 == 0) {
         // zero run
-        uint32_t delta_rl = (c+1) * rlMsb;
-        rlMsb += rlMsb;
+        uint32_t delta_rl = c+rlInc;
+        rlInc += delta_rl;
 
         if (delta_rl > uint32_t(dstlen))
           return -26; // zero run too long (A)
@@ -625,7 +625,7 @@ int decode(
         dst    += delta_rl;
         dstlen -= delta_rl;
       } else {
-        rlMsb = 1;
+        rlInc = 1;
         // MTF decode
         int mtfC = lvl2BaseTab[c0] + c1;
         int dstC = mtf_t[mtfC];
