@@ -104,7 +104,7 @@ void arithmetic_encode_chunk_callback(void* context_ptr, const uint8_t* src, int
   int  prevC = context[CONTEXT_HDR_PREV_C0_I];
   uint32_t ch0Cnt = 0;
 
-  // split source in two two levels and update histograms
+  // update histograms
   for (int i = 0; i < srclen; ++i) {
     int cx = src[i];
     if (cx == 255) {
@@ -252,7 +252,7 @@ static int prepare(uint32_t* context, uint32_t qhOffsets[256], double* pInfo)
     pInfo[3] = quantizedEntropy;
   }
 
-  return ceil(quantizedEntropy+modelLen);
+  return ceil((quantizedEntropy+modelLen)/8);
 }
 
 static void inc_dst(uint8_t* dst) {
@@ -404,8 +404,8 @@ static int encode(uint8_t* dst, const uint32_t* context, uint32_t qhOffsets[256]
     for (uint16_t* rdBits = bitsBuf; rdBits != wrBits; rdBits += 2) {
       unsigned b    = rdBits[0];
       unsigned hVal = rdBits[1];
-      uint64_t cLo = b == 0 ? 0    : hVal;
-      uint64_t cRa = b == 0 ? hVal : VAL_RANGE - hVal;
+      uint64_t cLo = b == 0 ? 0                : VAL_RANGE - hVal;
+      uint64_t cRa = b == 0 ? VAL_RANGE - hVal : hVal;
       lo   += range * cLo;
       range = range * cRa;
 
@@ -444,6 +444,7 @@ static int encode(uint8_t* dst, const uint32_t* context, uint32_t qhOffsets[256]
   } else {
     inc_dst(dst); //dst = inc_dst(dst0, dst);
   }
+
   return dst - dst0;
 }
 
@@ -471,37 +472,6 @@ int arithmetic_encode(uint32_t* context, uint8_t* dst, int origlen, double* pInf
     return 0; // not compressible
 
   return reslen;
-#if 0
-  prepare1(context, pInfo);
-
-  CArithmeticEncoder enc;
-  enc.init();
-  double modelLenBits;
-  unsigned modellen = store_model(dst, context, &modelLenBits, &enc);
-  if (pInfo)
-    pInfo[1] = modelLenBits;
-
-  double quantizedEntropy = prepare2(context);
-
-  int lenEst = (modelLenBits+quantizedEntropy+7)/8;
-  if (pInfo)
-    pInfo[3] = quantizedEntropy;
-  if (lenEst >= origlen)
-    return 0; // not compressible
-
-  int dstlen = encode(&dst[modellen], context, &enc);
-
-  int reslen = modellen + dstlen;
-  // printf("%d+%d=%d(%d) <> %d\n", modellen, dstlen, reslen, lenEst, origlen);
-
-  if (pInfo)
-    pInfo[2] = reslen*8.0 - modelLenBits;
-
-  if (reslen >= origlen)
-    return 0; // not compressible
-
-  return reslen;
-#endif
 }
 
 /*
