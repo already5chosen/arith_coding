@@ -87,7 +87,7 @@ void arithmetic_encode_init_context(uint32_t* context, int tilelen)
   context[CONTEXT_HDR_SRC_LEN_I]    = 0;
   context[CONTEXT_HDR_H_OFFSET_I]   = srcOffset + (tilelen*2-1)/sizeof(uint32_t) + 1;
   context[CONTEXT_HDR_H_LEN_I]      = 0;
-  context[CONTEXT_HDR_PREV_C0_I]    = 1;
+  context[CONTEXT_HDR_PREV_C0_I]    = 0;
   context[CONTEXT_HDR_CH0_CNT_I]    = 0;
   memset(&context[CONTEXT_HDR_NC_I], 0, sizeof(uint32_t)*256);
   memset(&context[CONTEXT_HDR_CNTRS_I], 0, sizeof(uint32_t)*CONTEXT_CNTRS_SZ);
@@ -101,51 +101,40 @@ void arithmetic_encode_chunk_callback(void* context_ptr, const uint8_t* src, int
   uint8_t*  hbeg = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_H_OFFSET_I]]);
   uint8_t*  h = &hbeg[hlen*2];
 
-  int  prevC = context[CONTEXT_HDR_PREV_C0_I];
+  int  prevC0 = context[CONTEXT_HDR_PREV_C0_I];
   uint32_t ch0Cnt = 0;
 
   // update histograms
   for (int i = 0; i < srclen; ++i) {
-    int cx = src[i];
-    if (cx == 255) {
+    int c = src[i];
+    if (c == 255) {
       // escape sequence for symbols 255 and 256
-      cx = int(src[i+1]) + 1;
+      c = int(src[i+1]) + 1;
       ++i;
     }
-    unsigned c = cx == 0 ? 0 : cx - 1;
-    if (c == 0) {
-      if (prevC != 0) {
-        cntrs[0*2+0] += 1;
-        cntrs[0*2+1] += cx;
-        if (cntrs[0*2+0] == ARITH_CODER_CNT_MAX) {
-          h[0] = 0;
-          h[1] = cntrs[0*2+1];
+    unsigned tLo = 0, tHi = 256;
+    do {
+      unsigned tMid = (tLo + tHi)/2;
+      unsigned b = c > tMid;
+      tLo = (b == 0) ? tLo  : tMid + 1;
+      tHi = (b == 0) ? tMid : tHi;
+      int rleNonMsb = (tMid == 0) & prevC0; // Not a MS bit of RUNA/RUNB, assume equal probability of RUNA/RUNB
+      ch0Cnt += rleNonMsb;
+      if (!rleNonMsb) {
+        cntrs[tMid*2+0] += 1;
+        cntrs[tMid*2+1] += b;
+        if (cntrs[tMid*2+0] == ARITH_CODER_CNT_MAX) {
+          h[0] = tMid;
+          h[1] = cntrs[tMid*2+1];
           h += 2;
-          cntrs[0*2+0] = cntrs[0*2+1] = 0;
-          ++context[CONTEXT_HDR_NC_I+0];
+          cntrs[tMid*2+0] = cntrs[tMid*2+1] = 0;
+          ++context[CONTEXT_HDR_NC_I+tMid];
         }
-      } else {
-        ++ch0Cnt;
       }
-    }
-    prevC = c;
-    for (unsigned bit = 256; bit != 1; ) {
-      unsigned pos = c & (0-bit);
-      bit /= 2;
-      pos += bit;
-      unsigned b = (c & bit) != 0;
-      cntrs[pos*2+0] += 1;
-      cntrs[pos*2+1] += b;
-      if (cntrs[pos*2+0] == ARITH_CODER_CNT_MAX) {
-        h[0] = pos;
-        h[1] = cntrs[pos*2+1];
-        h += 2;
-        cntrs[pos*2+0] = cntrs[pos*2+1] = 0;
-        ++context[CONTEXT_HDR_NC_I+pos];
-      }
-    }
+    } while (tLo != tHi);
+    prevC0 = (c < 2);
   }
-  context[CONTEXT_HDR_PREV_C0_I] = prevC;
+  context[CONTEXT_HDR_PREV_C0_I] = prevC0;
   context[CONTEXT_HDR_CH0_CNT_I] += ch0Cnt;
 
   hbeg = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_H_OFFSET_I]]);
@@ -328,78 +317,49 @@ static int encode(uint8_t* dst, const uint32_t* context, uint32_t qhOffsets[256]
   const uint8_t* qh  = reinterpret_cast<const uint8_t*>(&context[context[CONTEXT_HDR_H_OFFSET_I]]) + context[CONTEXT_HDR_H_LEN_I]*2;
   const uint8_t* src = reinterpret_cast<const uint8_t*>(&context[context[CONTEXT_HDR_SRC_OFFSET_I]]);
   const int srclen = context[CONTEXT_HDR_SRC_LEN_I];
-  unsigned prevC = 1;
+  unsigned prevC0 = 0;
   for (int src_i = 0; src_i < srclen; ++src_i) {
     uint16_t bitsBuf[9*9*2];
     uint16_t* wrBits = bitsBuf;
 
-    int cx = src[src_i];
-    if (cx == 255) {
+    int c = src[src_i];
+    if (c == 255) {
       // escape sequence for symbols 255 and 256
-      cx = int(src[src_i+1]) + 1;
+      c = int(src[src_i+1]) + 1;
       ++src_i;
     }
-    unsigned c = cx == 0 ? 0 : cx - 1;
-    for (unsigned bit = 256; bit != 1; ) {
-      unsigned pos = c & (0-bit);
-      bit /= 2;
-      pos += bit;
-
-      int cntr = cntrs[pos];
-      if (cntr == 0) {
-        uint32_t qhOffset = qhOffsets[pos];
-        unsigned qhVal = qh[qhOffset];
-        unsigned prevQhVal = prevQh[pos];
-        qhOffsets[pos] = qhOffset + 1;
-        prevQh[pos] = qhVal;
-        wrBits = encodeQh(wrBits, qhVal, prevQhVal);
-        currH[pos] = qhVal != ARITH_CODER_QH_SCALE ? qh2h_tab[qhVal] : 0;
-      }
-      ++cntr;
-      if (cntr == ARITH_CODER_CNT_MAX)
-        cntr = 0;
-      cntrs[pos] = cntr;
-
-      unsigned b = (c & bit) != 0;
-      int hVal = currH[pos];
-      wrBits[0] = b;
-      wrBits[1] = hVal;
-      if (hVal != 0)
-        wrBits += 2;
-    }
-    if (c == 0) {
-      // RUNA/RUNB
-      if (prevC != 0) {
-        // MS bit - variable encoding
-        int cntr = cntrs[0];
+    unsigned tLo = 0, tHi = 256;
+    do {
+      unsigned tMid = (tLo + tHi)/2;
+      int rleNonMsb = (tMid == 0) & prevC0; // Not a MS bit of RUNA/RUNB, assume equal probability of RUNA/RUNB
+      int hVal = VAL_RANGE/2;
+      if (!rleNonMsb) {
+        int cntr = cntrs[tMid];
         if (cntr == 0) {
-          uint32_t qhOffset = qhOffsets[0];
+          uint32_t qhOffset = qhOffsets[tMid];
           unsigned qhVal = qh[qhOffset];
-          unsigned prevQhVal = prevQh[0];
-          qhOffsets[0] = qhOffset + 1;
-          prevQh[0] = qhVal;
+          unsigned prevQhVal = prevQh[tMid];
+          qhOffsets[tMid] = qhOffset + 1;
+          prevQh[tMid] = qhVal;
           wrBits = encodeQh(wrBits, qhVal, prevQhVal);
-          currH[0] = qhVal != ARITH_CODER_QH_SCALE ? qh2h_tab[qhVal] : 0;
+          currH[tMid] = qhVal != ARITH_CODER_QH_SCALE ? qh2h_tab[qhVal] : 0;
         }
         ++cntr;
         if (cntr == ARITH_CODER_CNT_MAX)
           cntr = 0;
-        // printf("%3d %5d %.2f\n", uu, currH[0], double(uu*VAL_RANGE)/ARITH_CODER_CNT_MAX);
-        cntrs[0] = cntr;
-
-        int hVal = currH[0];
-        wrBits[0] = cx;
-        wrBits[1] = hVal;
-        if (hVal != 0)
-          wrBits += 2;
-      } else {
-        // non-MS bit - fixed 50:50 encoding
-        wrBits[0] = cx;
-        wrBits[1] = VAL_RANGE/2;
-        wrBits += 2;
+        cntrs[tMid] = cntr;
+        hVal = currH[tMid];
       }
-    }
-    prevC = c;
+
+      unsigned b = c > tMid;
+      wrBits[0] = b;
+      wrBits[1] = hVal;
+      if (hVal != 0)
+        wrBits += 2;
+      tLo = (b == 0) ? tLo  : tMid + 1;
+      tHi = (b == 0) ? tMid : tHi;
+    } while (tLo != tHi);
+    prevC0 = (c < 2);
 
     for (uint16_t* rdBits = bitsBuf; rdBits != wrBits; rdBits += 2) {
       unsigned b    = rdBits[0];
