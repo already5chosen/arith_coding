@@ -524,7 +524,7 @@ static void bwt_flat_mergesort_core(
 
 static void bwt_flat_straigh_insertion_sort(
   uint64_t* x,
-  unsigned  len)
+  int  len)
 {
   // sort by straight insertion
   uint64_t val0 = x[0];
@@ -720,7 +720,7 @@ static void bwt_flatten_and_sort(
   int            srclen,
   int            dist,
   uint64_t*      wrk,
-  int            wrklen) // wrklen >= (len*3+1)/2
+  unsigned       wrklen) // wrklen >= (len*3+1)/2
 {
   if (len <= 512) {
     bwt_sort_flatten(wrk, src, len, ord, srclen, dist);
