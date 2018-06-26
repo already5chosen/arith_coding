@@ -5,9 +5,7 @@
 #include <algorithm>
 
 #include "arithmetic_encode.h"
-#include "arithmetic_coder_ut.h"
 #include "arithmetic_coder_cfg.h"
-#include "fast_log2.h"
 
 // static const int      QH_SCALE  = 1 << QH_BITS;
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
@@ -106,10 +104,10 @@ void arithmetic_encode_chunk_callback(void* context_ptr, const uint8_t* src, int
 
   // update histograms
   for (int i = 0; i < srclen; ++i) {
-    int c = src[i];
+    unsigned c = src[i];
     if (c == 255) {
       // escape sequence for symbols 255 and 256
-      c = int(src[i+1]) + 1;
+      c = unsigned(src[i+1]) + 1;
       ++i;
     }
     unsigned tLo = 0, tHi = 256;
@@ -322,10 +320,10 @@ static int encode(uint8_t* dst, const uint32_t* context, uint32_t qhOffsets[256]
     uint16_t bitsBuf[9*9*2];
     uint16_t* wrBits = bitsBuf;
 
-    int c = src[src_i];
+    unsigned c = src[src_i];
     if (c == 255) {
       // escape sequence for symbols 255 and 256
-      c = int(src[src_i+1]) + 1;
+      c = unsigned(src[src_i+1]) + 1;
       ++src_i;
     }
     unsigned tLo = 0, tHi = 256;
