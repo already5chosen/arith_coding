@@ -216,7 +216,7 @@ static int prepare(uint32_t* context, uint32_t qhOffsets[256], double* pInfo)
           modelLen += 1; // is +/-1
           if (diff > 1) {
             ra   -= 1;
-            diff -= 1;
+            diff -= 2;
             while (ra > 1) {
               modelLen += 1;
               unsigned mid = ra / 2;
@@ -278,7 +278,7 @@ static uint16_t* encodeQh(uint16_t* wrBits, unsigned val, unsigned prev)
       wrBits += 2;
       if (gtThanOne) {
         ra   -= 1;
-        diff -= 1;
+        diff -= 2;
         while (ra > 1) {
           unsigned mid = ra / 2;
           int ge = diff >= mid;
