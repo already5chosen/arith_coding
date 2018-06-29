@@ -112,7 +112,7 @@ void arithmetic_encode_chunk_callback(void* context_ptr, const uint8_t* src, int
     }
     unsigned tLo = 0, tHi = 256;
     do {
-      unsigned tMid = (tLo + tHi)/2;
+      unsigned tMid = (tLo*3 + tHi)/4;
       unsigned b = c > tMid;
       tLo = (b == 0) ? tLo  : tMid + 1;
       tHi = (b == 0) ? tMid : tHi;
@@ -328,7 +328,7 @@ static int encode(uint8_t* dst, const uint32_t* context, uint32_t qhOffsets[256]
     }
     unsigned tLo = 0, tHi = 256;
     do {
-      unsigned tMid = (tLo + tHi)/2;
+      unsigned tMid = (tLo*3 + tHi)/4;
       int rleNonMsb = (tMid == 0) & prevC0; // Not a MS bit of RUNA/RUNB, assume equal probability of RUNA/RUNB
       int hVal = VAL_RANGE/2;
       if (!rleNonMsb) {

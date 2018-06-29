@@ -56,7 +56,7 @@ static int decode(
   while (dstlen > 0) {
     unsigned tLo = 0, tHi = 256;
     do {
-      unsigned tMid = (tLo + tHi)/2;
+      unsigned tMid = (tLo*3 + tHi)/4;
       int rleNonMsb = (tMid == 0) & prevC0; // Not a MS bit of RUNA/RUNB, assume equal probability of RUNA/RUNB
       int hVal = VAL_RANGE/2;
       enum { QH_DECODE_NONE, QH_DECODE_ZERO, QH_DECODE_SIGN, QH_DECODE_DIFF_1, QH_DECODE_DIFF_N };
