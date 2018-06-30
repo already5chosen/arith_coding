@@ -25,9 +25,9 @@ static int decode(
   const uint8_t* src,
   int            srclen)
 {
-  uint8_t  cntrs[256] = {0};
-  uint8_t  prevQh[256] = {0};
-  uint16_t currH[256];
+  uint8_t  cntrs[258] = {0};
+  uint8_t  prevQh[258] = {0};
+  uint16_t currH[258];
 
   // initialize move-to-front decoder table
   uint8_t mtf_t[256];
@@ -57,22 +57,20 @@ static int decode(
     unsigned tLo = 0, tHi = 256;
     do {
       unsigned tMid = (tLo*3 + tHi)/4;
-      int rleNonMsb = (tMid == 0) & prevC0; // Not a MS bit of RUNA/RUNB, assume equal probability of RUNA/RUNB
+      unsigned idx = (tMid < 2)  & prevC0 ? tMid : tMid + 2; // separate statistics for non-MS characters of zero run
       int hVal = VAL_RANGE/2;
       enum { QH_DECODE_NONE, QH_DECODE_ZERO, QH_DECODE_SIGN, QH_DECODE_DIFF_1, QH_DECODE_DIFF_N };
       int qhDecodeState = QH_DECODE_NONE;
       unsigned qhDecodeDiff, qhDecodeRa, qhDecodeUp;
-      if (!rleNonMsb) {
-        int cntr = cntrs[tMid];
-        if (cntr != 0) {
-          ++cntr;
-          if (cntr == ARITH_CODER_CNT_MAX)
-            cntr = 0;
-          cntrs[tMid] = cntr;
-          hVal = currH[tMid];
-        } else {
-          qhDecodeState = QH_DECODE_ZERO;
-        }
+      int cntr = cntrs[idx];
+      if (cntr != 0) {
+        ++cntr;
+        if (cntr == ARITH_CODER_CNT_MAX)
+          cntr = 0;
+        cntrs[idx] = cntr;
+        hVal = currH[idx];
+      } else {
+        qhDecodeState = QH_DECODE_ZERO;
       }
 
       unsigned b;
@@ -121,7 +119,7 @@ static int decode(
         if (qhDecodeState == QH_DECODE_NONE)
           break;
 
-        unsigned prevQhVal = prevQh[tMid];
+        unsigned prevQhVal = prevQh[idx];
         unsigned qhVal = prevQhVal;
         switch (qhDecodeState) {
           case QH_DECODE_ZERO:
@@ -185,10 +183,10 @@ static int decode(
         }
 
         if (qhDecodeState == QH_DECODE_NONE) {
-          // printf("%3d %2d qh\n", tMid, qhVal);
-          prevQh[tMid] = qhVal;
-          currH[tMid] = hVal = qh2h_tab[qhVal];
-          cntrs[tMid] = 1;
+          // printf("%3d %2d qh\n", idx, qhVal);
+          prevQh[idx] = qhVal;
+          currH[idx] = hVal = qh2h_tab[qhVal];
+          cntrs[idx] = 1;
         }
       }
       tLo = (b == 0) ? tLo  : tMid + 1;
