@@ -200,7 +200,7 @@ static int prepare(uint32_t* context, uint32_t qhOffsets[258], double* pInfo)
   for (int i = 0; i < 258; ++i) {
     const uint32_t nc = context[CONTEXT_HDR_NC_I+i] + (cntrs[2*i+0] != 0);
     const uint8_t* src = &qh[qhOffsets[i]];
-    unsigned prev = 0;
+    unsigned prev = ARITH_CODER_QH_SCALE/2;
     for (uint32_t c = 0; c < nc; ++c) {
       unsigned val = src[c];
       modelLen += 1; // isEqual ?
@@ -303,8 +303,9 @@ static uint16_t* encodeQh(uint16_t* wrBits, unsigned val, unsigned prev)
 static int encode(uint8_t* dst, const uint32_t* context, uint32_t qhOffsets[258])
 {
   uint8_t cntrs[258] = {0};
-  uint8_t prevQh[258] = {0};
+  uint8_t prevQh[258];
   uint16_t currH[258];
+  memset(prevQh, ARITH_CODER_QH_SCALE/2, sizeof(prevQh));
 
   const uint64_t MSB_MSK   = uint64_t(255) << 56;
   const uint64_t MIN_RANGE = uint64_t(1) << (33-RANGE_BITS);

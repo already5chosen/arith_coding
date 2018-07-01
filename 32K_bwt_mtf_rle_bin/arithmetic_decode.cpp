@@ -26,8 +26,9 @@ static int decode(
   int            srclen)
 {
   uint8_t  cntrs[258] = {0};
-  uint8_t  prevQh[258] = {0};
+  uint8_t  prevQh[258];
   uint16_t currH[258];
+  memset(prevQh, ARITH_CODER_QH_SCALE/2, sizeof(prevQh));
 
   // initialize move-to-front decoder table
   uint8_t mtf_t[256];
