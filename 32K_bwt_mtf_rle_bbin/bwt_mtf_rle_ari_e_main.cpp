@@ -67,21 +67,19 @@ int main(int argz, char** argv)
             uint64_t t1 = __rdtsc();
 
             int32_t* bwtIdx = reinterpret_cast<int32_t*>(&tmpDst.at(0));
-            uint32_t* encContext = reinterpret_cast<uint32_t*>(&bwtIdx[tilelen+256]);
-            arithmetic_encode_init_context(encContext, tilelen);
-            int bwtPrimaryIndex;
-            bwt_reorder_mtf_rle(
+            bwt_mtf_rle_meta_t meta;
+            int rlesz = bwt_reorder_mtf_rle(
               bwtIdx,
               inptile,
               tilelen,
-              &bwtPrimaryIndex,
-              arithmetic_encode_chunk_callback,
-              encContext);
+              &meta);
             uint64_t t2 = __rdtsc();
 
-            uint8_t* ariEncDst = reinterpret_cast<uint8_t*>(bwtIdx);
+            uint8_t* ariEncSrc = reinterpret_cast<uint8_t*>(bwtIdx);
+            uint8_t* ariEncDst = &ariEncSrc[rlesz];
+            uint8_t* ariEncTmp = &ariEncDst[tilelen+256];
             double info[64];
-            ressz = arithmetic_encode(encContext, ariEncDst, tilelen, vFlag ? info : 0);
+            ressz = arithmetic_encode(ariEncDst, ariEncSrc, rlesz, meta.histogram, tilelen, ariEncTmp, vFlag ? info : 0);
             uint64_t t3 = __rdtsc();
             if (vFlag) {
               printf(
@@ -122,7 +120,7 @@ int main(int argz, char** argv)
             if (ressz > 0) {
               // normal compression
               storeAs3octets(&hdr[3], ressz);
-              storeAs3octets(&hdr[6], bwtPrimaryIndex);
+              storeAs3octets(&hdr[6], meta.bwtPrimaryIndex);
               hdrlen = 9;
               pRes = ariEncDst;
             } else {

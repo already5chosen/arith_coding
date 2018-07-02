@@ -1,10 +1,8 @@
 #include <stdint.h>
 
 void arithmetic_encode_init_tables();
-void arithmetic_encode_init_context(uint32_t* context, int tilelen);
-void arithmetic_encode_chunk_callback(void* context, const uint8_t* chunk, int chunklen);
 
 // return value:
 //  0 - not compressible, because all input characters have approximately equal probability or because input is too short
 // >0 - the length of compressed buffer
-int arithmetic_encode(uint32_t* context, uint8_t* dst, int origlen, double* pInfo=0);
+int arithmetic_encode(uint8_t* dst, const uint8_t* src, int srclen, uint32_t srcHistogram[259], int origlen, uint8_t* tmp, double* pInfo=0);
