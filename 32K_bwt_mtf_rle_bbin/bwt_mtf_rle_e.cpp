@@ -23,8 +23,9 @@ static int insertZeroRun(uint8_t* dst, unsigned zRunLen, uint32_t* histogram)
   }
   dst0[0] += 2;
 
-  for (uint8_t* p = dst0; p != dst; ++p)
-    histogram[*p] += 1;
+  histogram[2+*dst0] += 1; // first RUNA/RUNB of zero run
+  for (uint8_t* p = dst0+1; p != dst; ++p)
+    histogram[*p] += 1;    // non-first RUNA/RUNB of zero run
 
   return dst-dst0;
 }
@@ -60,8 +61,10 @@ int bwt_reorder_mtf_rle(
     int v1 = t[0];
     if (c != v1) {
       // c is not at front
-      if (zRunLen != 0)
-        dst += insertZeroRun(dst, zRunLen, pMeta->histogram);
+      if (zRunLen != 0) {
+        pMeta->histogram[0] += 1; // count non-zero characters that come after zero run
+        dst += insertZeroRun(dst, zRunLen, &pMeta->histogram[256]);
+      }
 
       t[0] = c;
       int v0 = v1, k;
@@ -71,10 +74,10 @@ int bwt_reorder_mtf_rle(
       }
       t[k] = v0;
       int mtfC = k;
-      int outC = mtfC + 3;
-      pMeta->histogram[outC] += 1;
-      *dst = outC;      // range [1..251] encoded as x+3
-      if (mtfC >= 252) { // range [252..255] encode as a pair {255,x}
+      pMeta->histogram[mtfC-1] += 1;
+      int outC = mtfC + 1;
+      *dst = outC;       // range [1..253] encoded as x+1
+      if (mtfC >= 254) { // range [254..255] encoded as a pair {255,x}
         *dst++ = 255;
         *dst = mtfC;
       }
@@ -85,7 +88,7 @@ int bwt_reorder_mtf_rle(
   }
 
   if (zRunLen != 0)
-    dst += insertZeroRun(dst, zRunLen, pMeta->histogram);
+    dst += insertZeroRun(dst, zRunLen, &pMeta->histogram[256]);
 
   return dst - reinterpret_cast<uint8_t*>(idx_dst);
 }

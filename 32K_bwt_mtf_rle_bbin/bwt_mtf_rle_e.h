@@ -2,7 +2,13 @@
 
 typedef struct {
  int32_t  bwtPrimaryIndex;
- uint32_t histogram[259];
+ uint32_t histogram[260]; 
+ // histogram[0]      - non-zero characters that come after zero run
+ // histogram[1..255] - non-zero characters
+ // histogram[256]    - non-first RUNA of zero run
+ // histogram[257]    - non-first RUNB of zero run
+ // histogram[258]    - first RUNA of zero run
+ // histogram[259]    - first RUNB of zero run
 } bwt_mtf_rle_meta_t;
 
 // return the length of destination array in octets

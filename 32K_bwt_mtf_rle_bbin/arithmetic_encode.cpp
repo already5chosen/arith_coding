@@ -151,13 +151,13 @@ static unsigned SelectBestMidFactor(const uint32_t* srcHistogram, unsigned lo, u
 {
   uint32_t min_nBits = uint32_t(-1);
   uint32_t min_midFactor = 0;
-  for (unsigned midFactor = 16; midFactor < 32; ++midFactor) {
+  for (unsigned midFactor = 1; midFactor <= 16; ++midFactor) {
     uint32_t nBits = 0;
     for (unsigned val = lo; val <= hi; ++val) {
       unsigned tLo = lo, tHi = hi;
       unsigned nb = 0;
       while (tLo != tHi) {
-        unsigned tMid = (tLo*midFactor + tHi)/32;
+        unsigned tMid = tLo + ((tHi-tLo)*midFactor)/32;
         if (tMid == 0 && tHi > 1)
           tMid = 1;  // split RUNA from RUNB only as a last step
         if (val > tMid)
@@ -177,33 +177,27 @@ static unsigned SelectBestMidFactor(const uint32_t* srcHistogram, unsigned lo, u
 }
 
 // return estimate of result length
-static int prepare(uint8_t* qh, encode_prm_t* prm, const uint8_t* src, int srclen, uint32_t srcHistogram[259], double* pInfo)
+static int prepare(uint8_t* qh, encode_prm_t* prm, const uint8_t* src, int srclen, uint32_t srcHistogram[260], double* pInfo)
 {
-  for (unsigned i = 0; i < 2; ++i)
-    srcHistogram[i+2] += srcHistogram[i];
-
-  // Find a midpoint of the histogram
-  uint32_t srcNSymbols = 0;
-  for (unsigned i = 0; i < 257; ++i)
-    srcNSymbols += srcHistogram[i+2];
-  uint32_t midNSymbols = 0;
+  // calculate total # of non-zero mtf characters
+  uint32_t srcNzSymbols = 0;
+  for (unsigned i = 1; i < 256; ++i)
+    srcNzSymbols += srcHistogram[i];
+  // Find a midpoint of the non-zero histogram
+  uint32_t midNzSymbols = 0;
   unsigned mid0 = 0;
-  for (unsigned i = 0; ; ++i) {
-    midNSymbols += srcHistogram[i+2];
-    if (midNSymbols*2 >= srcNSymbols) {
+  for (unsigned i = 1; ; ++i) {
+    midNzSymbols += srcHistogram[i];
+    if (midNzSymbols*2 >= srcNzSymbols) {
       mid0 = i;
       break;
     }
   }
-  if (mid0 < 1)   mid0 = 1;
-  if (mid0 > 255) mid0 = 255;
+  if (mid0 == 255) mid0 = 254;
 
   prm->mid0 = mid0;
-  prm->midFactors[0] = SelectBestMidFactor(&srcHistogram[2], 0, mid0);
-  prm->midFactors[1] = SelectBestMidFactor(&srcHistogram[2], mid0+1, 256);
-
-  for (unsigned i = 0; i < 2; ++i)
-    srcHistogram[i+2] -= srcHistogram[i];
+  prm->midFactors[0] = SelectBestMidFactor(&srcHistogram[0], 1, mid0);
+  prm->midFactors[1] = SelectBestMidFactor(&srcHistogram[0], mid0+1, 255);
 
   return 0;
 }
@@ -503,7 +497,7 @@ int arithmetic_encode(uint32_t* context, uint8_t* dst, int origlen, double* pInf
 // return value:
 //  0 - not compressible, because all input characters have approximately equal probability or because input is too short
 // >0 - the length of compressed buffer
-int arithmetic_encode(uint8_t* dst, const uint8_t* src, int srclen, uint32_t srcHistogram[259], int origlen, uint8_t* tmp, double* pInfo)
+int arithmetic_encode(uint8_t* dst, const uint8_t* src, int srclen, uint32_t srcHistogram[260], int origlen, uint8_t* tmp, double* pInfo)
 {
   encode_prm_t prm;
   int estlen = prepare(tmp, &prm, src, srclen, srcHistogram, pInfo);
