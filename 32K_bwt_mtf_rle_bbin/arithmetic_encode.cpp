@@ -76,90 +76,26 @@ enum {
   CONTEXT_HDR_LEN  = CONTEXT_HDR_CNTRS_I + CONTEXT_CNTRS_SZ,
 };
 
-void arithmetic_encode_init_context(uint32_t* context, int tilelen)
-{
-  uint32_t srcOffset = CONTEXT_HDR_LEN;
-  context[CONTEXT_HDR_SRC_OFFSET_I] = srcOffset;
-  context[CONTEXT_HDR_SRC_LEN_I]    = 0;
-  context[CONTEXT_HDR_H_OFFSET_I]   = srcOffset + (tilelen*2-1)/sizeof(uint32_t) + 1;
-  context[CONTEXT_HDR_H_LEN_I]      = 0;
-  context[CONTEXT_HDR_PREV_C0_I]    = 0;
-  memset(&context[CONTEXT_HDR_NC_I], 0, sizeof(uint32_t)*258);
-  memset(&context[CONTEXT_HDR_CNTRS_I], 0, sizeof(uint32_t)*CONTEXT_CNTRS_SZ);
-}
-
-void arithmetic_encode_chunk_callback(void* context_ptr, const uint8_t* src, int srclen)
-{
-  uint32_t* context = static_cast<uint32_t*>(context_ptr);
-  uint8_t*  cntrs = reinterpret_cast<uint8_t*>(&context[CONTEXT_HDR_CNTRS_I]);
-  uint32_t  hlen = context[CONTEXT_HDR_H_LEN_I];
-  uint8_t*  hbeg = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_H_OFFSET_I]]);
-  uint8_t*  h = &hbeg[hlen];
-
-  int  prevC0 = context[CONTEXT_HDR_PREV_C0_I];
-
-  // update histograms
-  for (int i = 0; i < srclen; ++i) {
-    unsigned c = src[i];
-    if (c == 255) {
-      // escape sequence for symbols 255 and 256
-      c = unsigned(src[i+1]) + 1;
-      ++i;
-    }
-    unsigned tLo = 0, tHi = 256;
-    do {
-      unsigned tMid = (tLo*3 + tHi)/4;
-      unsigned b = c > tMid;
-      tLo = (b == 0) ? tLo  : tMid + 1;
-      tHi = (b == 0) ? tMid : tHi;
-      unsigned idx = (tMid < 2)  & prevC0 ? tMid : tMid + 2; // separate statistics for non-MS characters of zero run
-      cntrs[idx*2+0] += 1;
-      cntrs[idx*2+1] += b;
-      if (cntrs[idx*2+0] == ARITH_CODER_CNT_MAX) {
-        unsigned bSum = cntrs[idx*2+1];
-        cntrs[idx*2+0] = cntrs[idx*2+1] = 0;
-        ++context[CONTEXT_HDR_NC_I+idx];
-        if (idx >= 255) {
-          *h++ = 255;
-          idx -= 255;
-        }
-        h[0] = idx;
-        h[1] = bSum;
-        h += 2;
-      }
-    } while (tLo != tHi);
-    prevC0 = (c < 2);
-  }
-  context[CONTEXT_HDR_PREV_C0_I] = prevC0;
-
-  hbeg = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_H_OFFSET_I]]);
-  context[CONTEXT_HDR_H_LEN_I] = (h-hbeg);
-
-  uint8_t* dst = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_SRC_OFFSET_I]]);
-  uint32_t dstlen = context[CONTEXT_HDR_SRC_LEN_I];
-  context[CONTEXT_HDR_SRC_LEN_I] = dstlen + srclen;
-  memcpy(&dst[dstlen], src, srclen);
-}
-
 struct encode_prm_t {
   unsigned mid0;
   unsigned midFactors[2];
+  int16_t  bisectionTab[258][2];
   uint32_t qhOffsets[258];
 };
 
+// Select MidFactor that generates the smallest number of bits
+// The purpose is not the densest encoding, but the fastest decoding
 static unsigned SelectBestMidFactor(const uint32_t* srcHistogram, unsigned lo, unsigned hi)
 {
   uint32_t min_nBits = uint32_t(-1);
   uint32_t min_midFactor = 0;
-  for (unsigned midFactor = 1; midFactor <= 16; ++midFactor) {
+  for (unsigned midFactor = 16; midFactor < 32; ++midFactor) {
     uint32_t nBits = 0;
     for (unsigned val = lo; val <= hi; ++val) {
       unsigned tLo = lo, tHi = hi;
       unsigned nb = 0;
       while (tLo != tHi) {
-        unsigned tMid = tLo + ((tHi-tLo)*midFactor)/32;
-        if (tMid == 0 && tHi > 1)
-          tMid = 1;  // split RUNA from RUNB only as a last step
+        unsigned tMid = (tLo*midFactor + tHi*(32-midFactor))/32;
         if (val > tMid)
           tLo = tMid + 1;
         else
@@ -174,6 +110,17 @@ static unsigned SelectBestMidFactor(const uint32_t* srcHistogram, unsigned lo, u
     }
   }
   return min_midFactor;
+}
+
+static int BuildBisectionTab(encode_prm_t* prm, unsigned lo, unsigned hi, unsigned midFactor)
+{
+  if (lo != hi) {
+    unsigned mid = (lo*midFactor + hi*(32-midFactor))/32;
+    prm->bisectionTab[mid][0] = BuildBisectionTab(prm, lo, mid, midFactor);
+    prm->bisectionTab[mid][1] = BuildBisectionTab(prm, mid+1, hi, midFactor);
+    return mid;
+  }
+  return -1;
 }
 
 // return estimate of result length
@@ -199,48 +146,76 @@ static int prepare(uint8_t* qh, encode_prm_t* prm, const uint8_t* src, int srcle
   prm->midFactors[0] = SelectBestMidFactor(&srcHistogram[0], 1, mid0);
   prm->midFactors[1] = SelectBestMidFactor(&srcHistogram[0], mid0+1, 255);
 
-  return 0;
-}
+  prm->bisectionTab[mid0+1][0] = BuildBisectionTab(prm, 2,   mid0+1, prm->midFactors[0]);
+  prm->bisectionTab[mid0+1][1] = BuildBisectionTab(prm, mid0+2, 256, prm->midFactors[1]);
+  prm->bisectionTab[1][0] = 0;
+  prm->bisectionTab[1][1] = mid0+1;
+  prm->bisectionTab[0][0] = -1;
+  prm->bisectionTab[0][1] = -1;
+  prm->bisectionTab[256+1][0] = 256;
+  prm->bisectionTab[256+1][1] = mid0+1;
+  prm->bisectionTab[256+0][0] = -1;
+  prm->bisectionTab[256+0][1] = -1;
 
-// return estimate of result length
-static int prepare(uint32_t* context, uint32_t qhOffsets[258], double* pInfo)
-{
-  uint8_t*  cntrs = reinterpret_cast<uint8_t*>(&context[CONTEXT_HDR_CNTRS_I]);
-  uint32_t offset = 0;
-  for (int i = 0; i < 258; ++i) {
-    qhOffsets[i] = offset;
-    offset += context[CONTEXT_HDR_NC_I+i] + (cntrs[2*i+0] != 0);
+  uint32_t biHistogram[258] = {0};
+  for (int c = 1; c < 256; ++c) {
+    uint32_t srcHVal = srcHistogram[c];
+    int cx  = c + 1;
+    int idx = mid0+1;
+    do {
+      biHistogram[idx] += srcHVal;
+      idx = prm->bisectionTab[idx][cx > idx];
+    } while (idx >= 0);
   }
-  uint32_t qho[258];
-  memcpy(qho, qhOffsets, sizeof(qho));
+  biHistogram[0] = srcHistogram[256]+srcHistogram[257];                 // zeros (=RUNA/RUNB) after zero
+  biHistogram[1] = biHistogram[0]+srcHistogram[0];                      // total characters after zero
+  biHistogram[256+0] = srcHistogram[258]+srcHistogram[259];             // zeros (=RUNA/RUNB) after non-zero
+  biHistogram[256+1] = biHistogram[256+0]+srcNzSymbols-srcHistogram[0]; // total characters after non-zero
 
-  const uint32_t hlen = context[CONTEXT_HDR_H_LEN_I];
-  const uint8_t* h = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_H_OFFSET_I]]);
-  uint8_t* qh = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_H_OFFSET_I]]) + hlen;
+  uint32_t qhOffset = 0;
+  for (int i = 0; i < 258; ++i) {
+    prm->qhOffsets[i] = qhOffset;
+    qhOffset += (biHistogram[i]+ARITH_CODER_CNT_MAX-1)/ARITH_CODER_CNT_MAX;
+  }
+
+  uint32_t qho[258];
+  memcpy(qho, prm->qhOffsets, sizeof(qho));
+
+  uint8_t cntrs[258][2] = {{0}};
+  int nextIdx0 = 257;
   double entropy = 0;
   double quantizedEntropy = entropy;
-
-  // process full sections
-  for (uint32_t src_i = 0; src_i < hlen; src_i += 2) {
-    int pos = h[src_i+0];
-    int val = h[src_i+1];
-    if (pos == 255) {
-      pos += val;
-      val = h[src_i+2];
+  for (int src_i = 0; src_i < srclen; ++src_i) {
+    unsigned c = src[src_i];
+    if (c == 255) {
+      // escape sequence for symbols 255 and 256
+      c = unsigned(src[src_i+1]) + 1;
       ++src_i;
     }
-    uint32_t offs = qho[pos];
-    qh[offs] = h2qh_tab[val];
-    qho[pos] = offs + 1;
-    entropy += entropy_tab[val];
-    quantizedEntropy += quantized_entropy_tab[val];
+    int idx = nextIdx0;
+    nextIdx0 = c < 2 ? 1 : 257;
+    do {
+      unsigned b = c > (idx & 255);
+      cntrs[idx][0] += 1;
+      cntrs[idx][1] += b;
+      if (cntrs[idx][0] == ARITH_CODER_CNT_MAX) {
+        unsigned hVal = cntrs[idx][1];
+        entropy += entropy_tab[hVal];
+        quantizedEntropy += quantized_entropy_tab[hVal];
+        uint32_t qhIdx = qho[idx];
+        qh[qhIdx] = h2qh_tab[hVal]; // quantized '1'-to-total ratio
+        qho[idx]  = qhIdx + 1;
+        cntrs[idx][0] = cntrs[idx][1] = 0;
+      }
+      idx = prm->bisectionTab[idx][b];
+    } while (idx >= 0);
   }
 
   // process partial sections
   for (int i = 0; i < 258; ++i) {
-    unsigned tot = cntrs[2*i+0];
+    unsigned tot = cntrs[i][0];
     if (tot != 0) {
-      unsigned h0 = cntrs[2*i+1];
+      unsigned h0 = cntrs[i][1];
       unsigned qhVal = quantize_histogram_pair(h0, tot-h0, ARITH_CODER_QH_SCALE);
       qh[qho[i]] = qhVal;
       entropy +=
@@ -257,10 +232,11 @@ static int prepare(uint32_t* context, uint32_t qhOffsets[258], double* pInfo)
     }
   }
 
+  // estimate model length
   int32_t modelLen = 0;
   for (int i = 0; i < 258; ++i) {
-    const uint32_t nc = context[CONTEXT_HDR_NC_I+i] + (cntrs[2*i+0] != 0);
-    const uint8_t* src = &qh[qhOffsets[i]];
+    const uint32_t nc = (biHistogram[i]+ARITH_CODER_CNT_MAX-1)/ARITH_CODER_CNT_MAX;
+    const uint8_t* src = &qh[prm->qhOffsets[i]];
     unsigned prev = ARITH_CODER_QH_SCALE/2;
     for (uint32_t c = 0; c < nc; ++c) {
       unsigned val = src[c];
@@ -303,6 +279,8 @@ static int prepare(uint32_t* context, uint32_t qhOffsets[258], double* pInfo)
   }
 
   return ceil((quantizedEntropy+modelLen)/8);
+
+  return 0;
 }
 
 static void inc_dst(uint8_t* dst) {
@@ -468,7 +446,7 @@ static int encode(uint8_t* dst, const uint32_t* context, uint32_t qhOffsets[258]
   return dst - dst0;
 }
 
-
+#if 0
 // return value:
 //  0 - not compressible, because all input characters have approximately equal probability or because input is too short
 // >0 - the length of compressed buffer
@@ -493,6 +471,7 @@ int arithmetic_encode(uint32_t* context, uint8_t* dst, int origlen, double* pInf
 
   return reslen;
 }
+#endif
 
 // return value:
 //  0 - not compressible, because all input characters have approximately equal probability or because input is too short
@@ -501,6 +480,9 @@ int arithmetic_encode(uint8_t* dst, const uint8_t* src, int srclen, uint32_t src
 {
   encode_prm_t prm;
   int estlen = prepare(tmp, &prm, src, srclen, srcHistogram, pInfo);
+  if (estlen >= origlen)
+    return 0; // not compressible
+
   return estlen;
 }
 
