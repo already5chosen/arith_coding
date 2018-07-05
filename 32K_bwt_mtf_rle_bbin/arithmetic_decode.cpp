@@ -23,7 +23,8 @@ static int decode(
   int            dstlen,
   int32_t        histogram[256],
   const uint8_t* src,
-  int            srclen)
+  int            srclen,
+  const uint8_t  bisectionTab[256][2])
 {
   uint8_t  cntrs[258] = {0};
   uint8_t  prevQh[258];
@@ -52,13 +53,14 @@ static int decode(
   }
   uint64_t range = uint64_t(1) << (64-RANGE_BITS);   // scaled by 2**(64-rb).  Maintained in [2**(33-rb)+1..2*(64-rb)]
 
-  unsigned prevC0 = 0;
+  int nextTabOffset = 256;
   uint8_t* dst = dst0;
   while (dstlen > 0) {
-    unsigned tLo = 0, tHi = 256;
+    int tabOffset = nextTabOffset;
+    int tMid = 1;
+    unsigned c;
     do {
-      unsigned tMid = (tLo*3 + tHi)/4;
-      unsigned idx = (tMid < 2)  & prevC0 ? tMid : tMid + 2; // separate statistics for non-MS characters of zero run
+      unsigned idx = tabOffset + tMid;
       int hVal = VAL_RANGE/2;
       enum { QH_DECODE_NONE, QH_DECODE_ZERO, QH_DECODE_SIGN, QH_DECODE_DIFF_1, QH_DECODE_DIFF_N };
       int qhDecodeState = QH_DECODE_NONE;
@@ -190,12 +192,12 @@ static int decode(
           cntrs[idx] = 1;
         }
       }
-      tLo = (b == 0) ? tLo  : tMid + 1;
-      tHi = (b == 0) ? tMid : tHi;
-    } while (tLo != tHi);
-    unsigned c = tLo;
+      tabOffset = b ? 0 : tabOffset;
+      c = tMid + b;
+      tMid = bisectionTab[tMid][b];
+    } while (tMid != 1);
     // arithmetic decode of one character done
-    prevC0 = (c < 2);
+    nextTabOffset = c < 2 ? 0 : 256;
 
     // RLE decode
     if (c < 2) {
@@ -229,6 +231,17 @@ static int decode(
   return dst - dst0;
 }
 
+static int BuildBisectionTab(uint8_t tab[][2], unsigned lo, unsigned hi, unsigned midFactor)
+{
+  if (lo != hi) {
+    unsigned mid = (lo*midFactor + hi*(32-midFactor))/32;
+    tab[mid][0] = BuildBisectionTab(tab, lo, mid, midFactor);
+    tab[mid][1] = BuildBisectionTab(tab, mid+1, hi, midFactor);
+    return mid;
+  }
+  return 1;
+}
+
 // Arithmetic decode followed by RLE and MTF decode
 int arithmetic_decode(
   uint8_t*       dst,
@@ -245,10 +258,25 @@ int arithmetic_decode(
     pInfo[3] = 0;
     pInfo[4] = 0;
   }
-  if (srclen < 1)
+  if (srclen < 3)
     return -1;
 
+  unsigned mid0 = src[0];
+  if (mid0 < 1 || mid0 > 254)
+    return -2; // mid0 out of range
+  unsigned midFactors = src[1];
+  unsigned midFactor0 = midFactors/16 + 16;
+  unsigned midFactor1 = midFactors%16 + 16;
+
+  uint8_t bisectionTab[256][2];
+  bisectionTab[0][0] = 1;
+  bisectionTab[0][1] = 1;
+  bisectionTab[1][0] = 0;
+  bisectionTab[1][1] = mid0+1;
+  bisectionTab[mid0+1][0] = BuildBisectionTab(bisectionTab, 2,   mid0+1, midFactor0);
+  bisectionTab[mid0+1][1] = BuildBisectionTab(bisectionTab, mid0+2, 256, midFactor1);
+
   memset(histogram, 0, sizeof(histogram[0])*256);
-  int textlen = decode(dst, dstlen, histogram, src, srclen);
+  int textlen = decode(dst, dstlen, histogram, &src[2], srclen-2, bisectionTab);
   return textlen;
 }

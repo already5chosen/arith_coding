@@ -2,7 +2,8 @@
 
 #include "bwt_mtf_rle_e.h"
 
-static int insertZeroRun(uint8_t* dst, unsigned zRunLen, uint32_t* histogram)
+// return the length of destination array in octets
+static int insertZeroRun(uint8_t* dst, unsigned zRunLen)
 { // encode length of zero run by method similar to bzip2' RUNA/RUNB
   uint8_t* dst0 = dst;
   zRunLen += 1;
@@ -21,11 +22,6 @@ static int insertZeroRun(uint8_t* dst, unsigned zRunLen, uint32_t* histogram)
     *p0++ = v1;
     *p1-- = v0;
   }
-  dst0[0] += 2;
-
-  histogram[2+*dst0] += 1; // first RUNA/RUNB of zero run
-  for (uint8_t* p = dst0+1; p != dst; ++p)
-    histogram[*p] += 1;    // non-first RUNA/RUNB of zero run
 
   return dst-dst0;
 }
@@ -62,8 +58,10 @@ int bwt_reorder_mtf_rle(
     if (c != v1) {
       // c is not at front
       if (zRunLen != 0) {
-        pMeta->histogram[0] += 1; // count non-zero characters that come after zero run
-        dst += insertZeroRun(dst, zRunLen, &pMeta->histogram[256]);
+        int nz = insertZeroRun(dst, zRunLen);
+        pMeta->histogram[257] += 1;  // count # of zero runs
+        pMeta->histogram[0]   += nz; // count # zero characters
+        dst += nz;
       }
 
       t[0] = c;
@@ -74,7 +72,7 @@ int bwt_reorder_mtf_rle(
       }
       t[k] = v0;
       int mtfC = k;
-      pMeta->histogram[mtfC-1] += 1;
+      pMeta->histogram[mtfC] += 1;
       int outC = mtfC + 1;
       *dst = outC;       // range [1..253] encoded as x+1
       if (mtfC >= 254) { // range [254..255] encoded as a pair {255,x}
@@ -87,8 +85,15 @@ int bwt_reorder_mtf_rle(
     ++zRunLen;
   }
 
-  if (zRunLen != 0)
-    dst += insertZeroRun(dst, zRunLen, &pMeta->histogram[256]);
+  if (zRunLen != 0) {
+    int nz = insertZeroRun(dst, zRunLen);
+    pMeta->histogram[257] += 1;  // count # of zero runs
+    pMeta->histogram[0]   += nz; // count # zero characters
+    dst += nz;
+  }
+  pMeta->histogram[256] = (zRunLen != 0) ? // # of characters preceded by zero characters
+    pMeta->histogram[0] - 1:
+    pMeta->histogram[0];
 
   return dst - reinterpret_cast<uint8_t*>(idx_dst);
 }

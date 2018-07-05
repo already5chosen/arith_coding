@@ -112,8 +112,10 @@ int main(int argz, char** argv)
                 }
                 printf("\n");
              } else {
-              printf(" (%.0f)\n"
+              printf(" (%3.0f %.0f %.0f)\n"
                ,info[4]
+               ,info[5]
+               ,info[6]
                );
              }
             }
