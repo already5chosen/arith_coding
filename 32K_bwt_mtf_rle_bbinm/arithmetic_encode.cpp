@@ -32,6 +32,10 @@ static uint16_t qh2h_tab[ARITH_CODER_QH_SCALE+1];
 static double   log2_tab[ARITH_CODER_CNT_MAX+1];
 static double   entropy_tab[ARITH_CODER_CNT_MAX+1];
 static double   quantized_entropy_tab[ARITH_CODER_CNT_MAX+1];
+static uint16_t qh_c2lo_tab[ARITH_CODER_QH_SCALE+2];
+static double   qh_entropy_tab[ARITH_CODER_QH_SCALE+1];
+static uint8_t  qhMtf0[ARITH_CODER_QH_SCALE+1];
+
 
 void arithmetic_encode_init_tables()
 {
@@ -61,6 +65,34 @@ void arithmetic_encode_init_tables()
       - log2(VAL_RANGE-ra)*(ARITH_CODER_CNT_MAX-i);
     // printf("%3d %2d %5d %.3f\n", i, h2qh_tab[i], ra, quantized_entropy_tab[i]);
   }
+
+  uint16_t qh_ra_tab[ARITH_CODER_QH_SCALE+1];
+  qh_ra_tab[0] = VAL_RANGE/2;
+  qh_ra_tab[1] = VAL_RANGE/4;
+  uint32_t ra_sum = 0;
+  uint32_t ra = uint32_t(1) << 15;
+  for (int i = 2; i <= ARITH_CODER_QH_SCALE; ++i) {
+    qh_ra_tab[i] = ra;
+    ra_sum += ra;
+    ra -= ra / ARITH_CODER_QH_DECEY;
+  }
+  ra_sum *= 4;
+  for (int i = 2; i < ARITH_CODER_QH_SCALE; ++i)
+    qh_ra_tab[i] = (uint32_t(VAL_RANGE)*qh_ra_tab[i])/ra_sum;
+  uint32_t lo = 0;
+  for (int i = 0; i <= ARITH_CODER_QH_SCALE; ++i) {
+    qh_c2lo_tab[i] = lo;
+    lo += qh_ra_tab[i];
+  }
+  qh_c2lo_tab[ARITH_CODER_QH_SCALE+1] = VAL_RANGE;
+
+  for (int i = 0; i <= ARITH_CODER_QH_SCALE; ++i)
+    qh_entropy_tab[i] = RANGE_BITS - log2(qh_c2lo_tab[i+1]-qh_c2lo_tab[i]);
+
+  for (int i = 0; i <= ARITH_CODER_QH_SCALE/2; ++i)
+    qhMtf0[i] = ARITH_CODER_QH_SCALE/2 - i;
+  for (int i = ARITH_CODER_QH_SCALE/2+1; i <= ARITH_CODER_QH_SCALE; ++i)
+    qhMtf0[i] = i;
 }
 
 struct encode_prm_t {
@@ -68,6 +100,7 @@ struct encode_prm_t {
   unsigned mid0;
   unsigned midFactors[2];
   uint8_t  bisectionTab[256][2];
+  // uint16_t modelEncodeTab[ARITH_CODER_QH_SCALE+1][ARITH_CODER_QH_SCALE+2];
 };
 
 // Select MidFactor that generates the smallest number of bits
@@ -109,7 +142,7 @@ static int BuildBisectionTab(encode_prm_t* prm, unsigned lo, unsigned hi, unsign
   }
   return 1;
 }
-
+#if 0
 static int calculate_model_length(unsigned prev, unsigned val)
 {
   int modelLen = 1; // isEqual ?
@@ -144,6 +177,72 @@ static int calculate_model_length(unsigned prev, unsigned val)
   return modelLen;
 }
 
+static void build_model_encode_row(uint16_t dst[ARITH_CODER_QH_SCALE+2], unsigned prev)
+{
+  uint16_t ranges[ARITH_CODER_QH_SCALE+1];
+  unsigned r = VAL_RANGE/2;
+  ranges[prev] = r;
+  if (prev == 0) {
+    r /= 2; // encode diff==1
+    ranges[1] = r;
+    unsigned rd = r / (ARITH_CODER_QH_SCALE-1);
+    ranges[2] = r - rd * (ARITH_CODER_QH_SCALE-1);
+    for (int i = 3; i <= ARITH_CODER_QH_SCALE; ++i)
+      ranges[i] = rd;
+  } else if (prev == ARITH_CODER_QH_SCALE) {
+    r /= 2; // encode diff==1
+    ranges[ARITH_CODER_QH_SCALE-1] = r;
+    unsigned rd = r / (ARITH_CODER_QH_SCALE-1);
+    ranges[ARITH_CODER_QH_SCALE-2] = r - rd * (ARITH_CODER_QH_SCALE-1);
+    for (int i = 3; i <= ARITH_CODER_QH_SCALE; ++i)
+      ranges[ARITH_CODER_QH_SCALE-i] = rd;
+  } else {
+    r /= 2; // encode direction
+    // process 0 to prev-1
+    if (prev == 1) {
+      ranges[0] = r;
+    } else {
+      ranges[prev-1] = r/2;
+      unsigned rd = (r/2) / (prev-1);
+      ranges[prev-2] = r/2 - rd*(prev-2);
+      for (int i = 0; i < prev-2; ++i)
+        ranges[i] = rd;
+    }
+    // process prev+1 to ARITH_CODER_QH_SCALE
+    if (prev == ARITH_CODER_QH_SCALE-1) {
+      ranges[ARITH_CODER_QH_SCALE] = r;
+    } else {
+      ranges[prev+1] = r/2;
+      unsigned rd = (r/2) / (ARITH_CODER_QH_SCALE-1-prev);
+      ranges[prev+2] = r/2 - rd*(ARITH_CODER_QH_SCALE-2-prev);
+      for (int i = prev+3; i <= ARITH_CODER_QH_SCALE; ++i)
+        ranges[i] = rd;
+    }
+  }
+
+  uint16_t dst_i[ARITH_CODER_QH_SCALE+1];
+  dst_i[0] = prev;
+  for (
+}
+#endif
+
+static int qh_mtf_encode(uint8_t t[], int c)
+{ // move-to-front encoder
+  int v1 = t[0];
+  int k = 0;
+  if (c != v1) {
+    // c is not at front
+    t[0] = c;
+    int v0 = v1;
+    for (k = 1; c != (v1=t[k]); ++k) {
+      t[k] = v0;
+      v0 = v1;
+    }
+    t[k] = v0;
+  }
+  return k;
+}
+
 // return estimate of result length
 static int prepare(encode_prm_t* prm, const uint8_t* src, int srclen, uint32_t srcHistogram[258], double* pInfo)
 {
@@ -175,13 +274,14 @@ static int prepare(encode_prm_t* prm, const uint8_t* src, int srclen, uint32_t s
   prm->bisectionTab[mid0+1][1] = BuildBisectionTab(prm, mid0+2, 256, prm->midFactors[1]);
 
   uint8_t cntrs[258][2] = {{0}};
-  uint8_t prevQh[258];
-  memset(prevQh, ARITH_CODER_QH_SCALE/2, sizeof(prevQh));
   int nextTabOffset = 256;
   double entropy = 0;
   double quantizedEntropy = entropy;
   uint32_t qhOffsets[258], qhOffset = 0;
-  int32_t modelLen = 2*8;
+  double modelLen = 2*8;
+  uint8_t qhMtfTab[258][ARITH_CODER_QH_SCALE+1];
+  for (int i = 0; i < 258; ++i)
+    memcpy(qhMtfTab[i], qhMtf0, sizeof(qhMtf0));
   for (int src_i = 0; src_i < srclen; ++src_i) {
     unsigned c = src[src_i];
     if (c == 255) {
@@ -213,8 +313,8 @@ static int prepare(encode_prm_t* prm, const uint8_t* src, int srclen, uint32_t s
         cntrs[idx][0] = cntrs[idx][1] = 0;
 
         // estimate model length
-        modelLen += calculate_model_length(prevQh[idx], qhVal);
-        prevQh[idx] = qhVal;
+        int mtf_k = qh_mtf_encode(qhMtfTab[idx], qhVal);  // mtf encoder
+        modelLen += qh_entropy_tab[mtf_k];
       }
       tMid = prm->bisectionTab[tMid][b];
     } while (tMid != 1);
@@ -240,7 +340,8 @@ static int prepare(encode_prm_t* prm, const uint8_t* src, int srclen, uint32_t s
       }
 
       // estimate model length
-      modelLen += calculate_model_length(prevQh[idx], qhVal);
+      int mtf_k = qh_mtf_encode(qhMtfTab[idx], qhVal);  // mtf encoder
+      modelLen += qh_entropy_tab[mtf_k];
     }
   }
 
@@ -260,7 +361,7 @@ static void inc_dst(uint8_t* dst) {
     *dst = (val = *dst + 1);
   } while (val==0);
 }
-
+#if 0
 static uint16_t* encodeQh(uint16_t* wrBits, unsigned val, unsigned prev)
 {
   int isNotEqual = (val != prev);
@@ -308,13 +409,15 @@ static uint16_t* encodeQh(uint16_t* wrBits, unsigned val, unsigned prev)
   }
   return wrBits;
 }
+#endif
 
 static int encode(uint8_t* dst, encode_prm_t* prm, const uint8_t* src, int srclen)
 {
   uint8_t cntrs[258] = {0};
-  uint8_t prevQh[258];
   uint16_t currH[258];
-  memset(prevQh, ARITH_CODER_QH_SCALE/2, sizeof(prevQh));
+  uint8_t qhMtfTab[258][ARITH_CODER_QH_SCALE+1];
+  for (int i = 0; i < 258; ++i)
+    memcpy(qhMtfTab[i], qhMtf0, sizeof(qhMtf0));
 
   const uint64_t MSB_MSK   = uint64_t(255) << 56;
   const uint64_t MIN_RANGE = uint64_t(1) << (33-RANGE_BITS);
@@ -341,20 +444,19 @@ static int encode(uint8_t* dst, encode_prm_t* prm, const uint8_t* src, int srcle
     int tMid = 1;
     do {
       unsigned idx = tabOffset + tMid;
-      int hVal = VAL_RANGE/2;
       int cntr = cntrs[idx];
       if (cntr == 0) {
         unsigned qhVal = *qh++;
-        unsigned prevQhVal = prevQh[idx];
-        prevQh[idx] = qhVal;
-        wrBits = encodeQh(wrBits, qhVal, prevQhVal);
+        int mtf_k = qh_mtf_encode(qhMtfTab[idx], qhVal);  // mtf encoder
+        wrBits[0] = mtf_k + 2;
+        wrBits += 2;
         currH[idx] = qhVal != ARITH_CODER_QH_SCALE ? qh2h_tab[qhVal] : 0;
       }
       ++cntr;
       if (cntr == ARITH_CODER_CNT_MAX)
         cntr = 0;
       cntrs[idx] = cntr;
-      hVal = currH[idx];
+      int hVal = currH[idx];
 
       unsigned b = c > tMid;
       tabOffset = b ? 0 : tabOffset;
@@ -366,10 +468,17 @@ static int encode(uint8_t* dst, encode_prm_t* prm, const uint8_t* src, int srcle
     } while (tMid != 1);
 
     for (uint16_t* rdBits = bitsBuf; rdBits != wrBits; rdBits += 2) {
-      unsigned b    = rdBits[0];
-      unsigned hVal = rdBits[1];
-      uint64_t cLo = b == 0 ? 0                : VAL_RANGE - hVal;
-      uint64_t cRa = b == 0 ? VAL_RANGE - hVal : hVal;
+      unsigned b = rdBits[0];
+      uint64_t cLo, cRa;
+      if (b < 2) {
+        unsigned hVal = rdBits[1];
+        cLo = b == 0 ? 0                : VAL_RANGE - hVal;
+        cRa = b == 0 ? VAL_RANGE - hVal : hVal;
+      } else {
+        cLo = qh_c2lo_tab[b-2];
+        cRa = qh_c2lo_tab[b-1] - cLo;
+      }
+
       lo   += range * cLo;
       range = range * cRa;
 

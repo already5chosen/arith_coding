@@ -9,6 +9,8 @@
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 
 static uint16_t qh2h_tab[ARITH_CODER_QH_SCALE+1];
+static uint16_t qh_c2lo_tab[ARITH_CODER_QH_SCALE+2];
+static uint8_t  qhMtf0[ARITH_CODER_QH_SCALE+1];
 
 void arithmetic_decode_init_tables()
 {
@@ -16,6 +18,42 @@ void arithmetic_decode_init_tables()
   double M_PI = 3.1415926535897932384626433832795;
   for (int i = 1; i < ARITH_CODER_QH_SCALE; ++i)
     qh2h_tab[i] = int(round((sin((i*2-ARITH_CODER_QH_SCALE)*(M_PI/2/ARITH_CODER_QH_SCALE))+1.0)*(VAL_RANGE/2)));
+
+  uint16_t qh_ra_tab[ARITH_CODER_QH_SCALE+1];
+  qh_ra_tab[0] = VAL_RANGE/2;
+  qh_ra_tab[1] = VAL_RANGE/4;
+  uint32_t ra_sum = 0;
+  uint32_t ra = uint32_t(1) << 15;
+  for (int i = 2; i <= ARITH_CODER_QH_SCALE; ++i) {
+    qh_ra_tab[i] = ra;
+    ra_sum += ra;
+    ra -= ra / ARITH_CODER_QH_DECEY;
+  }
+  ra_sum *= 4;
+  for (int i = 2; i < ARITH_CODER_QH_SCALE; ++i)
+    qh_ra_tab[i] = (uint32_t(VAL_RANGE)*qh_ra_tab[i])/ra_sum;
+  uint32_t lo = 0;
+  for (int i = 0; i <= ARITH_CODER_QH_SCALE; ++i) {
+    qh_c2lo_tab[i] = lo;
+    lo += qh_ra_tab[i];
+  }
+  qh_c2lo_tab[ARITH_CODER_QH_SCALE+1] = VAL_RANGE;
+
+  for (int i = 0; i <= ARITH_CODER_QH_SCALE/2; ++i)
+    qhMtf0[i] = ARITH_CODER_QH_SCALE/2 - i;
+  for (int i = ARITH_CODER_QH_SCALE/2+1; i <= ARITH_CODER_QH_SCALE; ++i)
+    qhMtf0[i] = i;
+}
+
+static int qh_mtf_decode(uint8_t mtf_t[], int mtfC)
+{ // move-to-front decoder
+  int dstC = mtf_t[mtfC];
+  if (mtfC != 0) {
+    // update move-to-front decoder table
+    memmove(&mtf_t[1], &mtf_t[0], mtfC);
+    mtf_t[0] = dstC;
+  }
+  return dstC;
 }
 
 static int decode(
@@ -27,9 +65,10 @@ static int decode(
   const uint8_t  bisectionTab[256][2])
 {
   uint8_t  cntrs[258] = {0};
-  uint8_t  prevQh[258];
   uint16_t currH[258];
-  memset(prevQh, ARITH_CODER_QH_SCALE/2, sizeof(prevQh));
+  uint8_t qhMtfTab[258][ARITH_CODER_QH_SCALE+1];
+  for (int i = 0; i < 258; ++i)
+    memcpy(qhMtfTab[i], qhMtf0, sizeof(qhMtf0));
 
   // initialize move-to-front decoder table
   uint8_t mtf_t[256];
@@ -61,10 +100,7 @@ static int decode(
     unsigned c;
     do {
       unsigned idx = tabOffset + tMid;
-      int hVal = VAL_RANGE/2;
-      enum { QH_DECODE_NONE, QH_DECODE_ZERO, QH_DECODE_SIGN, QH_DECODE_DIFF_1, QH_DECODE_DIFF_N };
-      int qhDecodeState = QH_DECODE_NONE;
-      unsigned qhDecodeDiff, qhDecodeRa, qhDecodeUp;
+      int hVal = -1;
       int cntr = cntrs[idx];
       if (cntr != 0) {
         ++cntr;
@@ -72,8 +108,6 @@ static int decode(
           cntr = 0;
         cntrs[idx] = cntr;
         hVal = currH[idx];
-      } else {
-        qhDecodeState = QH_DECODE_ZERO;
       }
 
       unsigned b;
@@ -82,10 +116,21 @@ static int decode(
         if (hVal != 0) {
           b = 1;
           if (hVal != VAL_RANGE) {
-            b = (value >= range*(VAL_RANGE-hVal));
-            // keep decoder in sync with encoder
-            uint64_t cLo = b == 0 ? 0                : VAL_RANGE - hVal;
-            uint64_t cHi = b == 0 ? VAL_RANGE - hVal : VAL_RANGE;
+            uint64_t cLo, cHi;
+            if (hVal > 0) {
+              b = (value >= range*(VAL_RANGE-hVal));
+              // keep decoder in sync with encoder
+              cLo = b == 0 ? 0                : VAL_RANGE - hVal;
+              cHi = b == 0 ? VAL_RANGE - hVal : VAL_RANGE;
+            } else {
+              uint64_t pr;
+              while ((pr=qh_c2lo_tab[b]*range-1) < value-1)
+                ++b;
+              if (pr > value-1)
+                b -= 1;
+              cLo = qh_c2lo_tab[b];
+              cHi = qh_c2lo_tab[b+1];
+            }
             value -= range * cLo;
             range *= (cHi-cLo);  // at this point range is scaled by 2**64 - the same scale as value
             uint64_t nxtRange = range >> RANGE_BITS;
@@ -119,78 +164,12 @@ static int decode(
             range = nxtRange;
           }
         }
-        if (qhDecodeState == QH_DECODE_NONE)
+        if (hVal >= 0)
           break;
 
-        unsigned prevQhVal = prevQh[idx];
-        unsigned qhVal = prevQhVal;
-        switch (qhDecodeState) {
-          case QH_DECODE_ZERO:
-          {
-            if (b == 0) {
-              qhDecodeState = QH_DECODE_NONE;
-            } else {
-              qhDecodeState = QH_DECODE_SIGN;
-              if (prevQhVal == 0) {
-                qhDecodeUp = 1;
-                qhDecodeState = QH_DECODE_DIFF_1;
-              } else if (prevQhVal == ARITH_CODER_QH_SCALE) {
-                qhDecodeUp = 0;
-                qhDecodeState = QH_DECODE_DIFF_1;
-              }
-            }
-          } break;
-
-          case QH_DECODE_SIGN:
-          {
-            qhDecodeUp = b;
-            unsigned ra = qhDecodeUp ? ARITH_CODER_QH_SCALE - prevQhVal : prevQhVal;
-            qhDecodeState = QH_DECODE_DIFF_1;
-            if (ra == 1) {
-              qhVal = qhDecodeUp ? prevQhVal+1 : prevQhVal-1;
-              qhDecodeState = QH_DECODE_NONE;
-            }
-          } break;
-
-          case QH_DECODE_DIFF_1:
-          {
-            qhDecodeDiff = 2;
-            qhDecodeState = QH_DECODE_DIFF_N;
-            if (b == 0) {
-              qhVal = qhDecodeUp ? prevQhVal+1 : prevQhVal-1;
-              qhDecodeState = QH_DECODE_NONE;
-            } else {
-              unsigned ra = qhDecodeUp ? ARITH_CODER_QH_SCALE - prevQhVal : prevQhVal;
-              qhDecodeRa = ra - 1;
-              if (qhDecodeRa == 1) {
-                qhVal = qhDecodeUp ? prevQhVal+2 : prevQhVal-2;
-                qhDecodeState = QH_DECODE_NONE;
-              }
-            }
-          } break;
-
-          default:
-          {
-            unsigned halfRa = qhDecodeRa / 2;
-            if (b == 0) {
-              qhDecodeRa = halfRa;
-            } else {
-              qhDecodeDiff += halfRa;
-              qhDecodeRa -= halfRa;
-            }
-            if (qhDecodeRa==1) {
-              qhVal = qhDecodeUp ? prevQhVal+qhDecodeDiff : prevQhVal-qhDecodeDiff;
-              qhDecodeState = QH_DECODE_NONE;
-            }
-          } break;
-        }
-
-        if (qhDecodeState == QH_DECODE_NONE) {
-          // printf("%3d %2d qh\n", idx, qhVal);
-          prevQh[idx] = qhVal;
-          currH[idx] = hVal = qh2h_tab[qhVal];
-          cntrs[idx] = 1;
-        }
+        unsigned qhVal = qh_mtf_decode(qhMtfTab[idx], b); // QH mtf decode
+        currH[idx] = hVal = qh2h_tab[qhVal];
+        cntrs[idx] = 1;
       }
       tabOffset = b ? 0 : tabOffset;
       c = tMid + b;
