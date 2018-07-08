@@ -123,11 +123,18 @@ static int decode(
               cLo = b == 0 ? 0                : VAL_RANGE - hVal;
               cHi = b == 0 ? VAL_RANGE - hVal : VAL_RANGE;
             } else {
-              uint64_t pr;
-              while ((pr=qh_c2lo_tab[b]*range-1) < value-1)
-                ++b;
-              if (pr > value-1)
-                b -= 1;
+              b = 0;
+              if (value > 0) {
+                uint64_t pr;
+                b = 1;
+                while ((pr=qh_c2lo_tab[b]*range-1) < value-1)
+                  ++b;
+                if (pr > value-1)
+                  b -= 1;
+                if (b > ARITH_CODER_QH_SCALE) {
+                  return -104; // should not happen
+                }
+              }
               cLo = qh_c2lo_tab[b];
               cHi = qh_c2lo_tab[b+1];
             }
