@@ -100,14 +100,16 @@ static int decode(
     unsigned c;
     do {
       unsigned idx = tabOffset + tMid;
-      int hVal = -1;
+      int hVal = VAL_RANGE-qh_c2lo_tab[1];
       int cntr = cntrs[idx];
+      unsigned loadQh = 1;
       if (cntr != 0) {
         ++cntr;
         if (cntr == ARITH_CODER_CNT_MAX)
           cntr = 0;
         cntrs[idx] = cntr;
         hVal = currH[idx];
+        loadQh = 0;
       }
 
       unsigned b;
@@ -116,24 +118,19 @@ static int decode(
         if (hVal != 0) {
           b = 1;
           if (hVal != VAL_RANGE) {
-            uint64_t cLo, cHi;
-            if (hVal > 0) {
-              b = (value >= range*(VAL_RANGE-hVal));
-              // keep decoder in sync with encoder
-              cLo = b == 0 ? 0                : VAL_RANGE - hVal;
-              cHi = b == 0 ? VAL_RANGE - hVal : VAL_RANGE;
-            } else {
-              b = 0;
-              if (value > 0) {
-                uint64_t pr;
-                b = 1;
-                while ((pr=qh_c2lo_tab[b]*range-1) < value-1)
-                  ++b;
-                if (pr > value-1)
-                  b -= 1;
-                if (b > ARITH_CODER_QH_SCALE) {
-                  return -104; // should not happen
-                }
+            b = (value >= range*(VAL_RANGE-hVal));
+            // keep decoder in sync with encoder
+            uint64_t cLo = b == 0 ? 0                : VAL_RANGE - hVal;
+            uint64_t cHi = b == 0 ? VAL_RANGE - hVal : VAL_RANGE;
+            if ((loadQh & b) != 0) {
+              uint64_t pr;
+              do {
+                ++b;
+              } while ((pr=qh_c2lo_tab[b]*range-1) < value-1);
+              if (pr > value-1)
+                b -= 1;
+              if (b > ARITH_CODER_QH_SCALE) {
+                return -104; // should not happen
               }
               cLo = qh_c2lo_tab[b];
               cHi = qh_c2lo_tab[b+1];
@@ -171,12 +168,13 @@ static int decode(
             range = nxtRange;
           }
         }
-        if (hVal >= 0)
+        if (loadQh == 0)
           break;
 
         unsigned qhVal = qh_mtf_decode(qhMtfTab[idx], b); // QH mtf decode
         currH[idx] = hVal = qh2h_tab[qhVal];
         cntrs[idx] = 1;
+        loadQh = 0;
       }
       tabOffset = b ? 0 : tabOffset;
       c = tMid + b;
