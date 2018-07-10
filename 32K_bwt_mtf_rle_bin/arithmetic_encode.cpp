@@ -67,13 +67,18 @@ enum {
   // context header
   CONTEXT_HDR_SRC_OFFSET_I=0,
   CONTEXT_HDR_SRC_LEN_I,
-  CONTEXT_HDR_H_OFFSET_I,
-  CONTEXT_HDR_H_LEN_I,
+  CONTEXT_HDR_QH_OFFSET_I,
+  CONTEXT_HDR_QH_LEN_I,
   CONTEXT_HDR_PREV_C0_I,
-  CONTEXT_HDR_NC_I,
-  CONTEXT_HDR_CNTRS_I = CONTEXT_HDR_NC_I + 258,
-  CONTEXT_CNTRS_SZ = (258*2*sizeof(uint8_t))/sizeof(uint32_t),
-  CONTEXT_HDR_LEN  = CONTEXT_HDR_CNTRS_I + CONTEXT_CNTRS_SZ,
+  CONTEXT_HDR_MODEL_LEN_I,
+  CONTEXT_HDR_S_ENTROPY_I,
+  CONTEXT_HDR_Q_ENTROPY_I  = CONTEXT_HDR_S_ENTROPY_I + sizeof(double)/sizeof(uint32_t),
+  CONTEXT_HDR_QH_OFFSETS_I = CONTEXT_HDR_Q_ENTROPY_I + sizeof(double)/sizeof(uint32_t),
+  CONTEXT_HDR_CNTRS_I   = CONTEXT_HDR_QH_OFFSETS_I + 258,
+  CONTEXT_CNTRS_SZ      = (258*2*sizeof(uint8_t)-1)/sizeof(uint32_t) + 1,
+  CONTEXT_HDR_PREV_QH_I = CONTEXT_HDR_CNTRS_I + CONTEXT_CNTRS_SZ,
+  CONTEXT_PREV_QH_SZ    = (258*sizeof(uint8_t)-1)/sizeof(uint32_t) + 1,
+  CONTEXT_HDR_LEN  = CONTEXT_HDR_PREV_QH_I + CONTEXT_PREV_QH_SZ,
 };
 
 void arithmetic_encode_init_context(uint32_t* context, int tilelen)
@@ -81,24 +86,71 @@ void arithmetic_encode_init_context(uint32_t* context, int tilelen)
   uint32_t srcOffset = CONTEXT_HDR_LEN;
   context[CONTEXT_HDR_SRC_OFFSET_I] = srcOffset;
   context[CONTEXT_HDR_SRC_LEN_I]    = 0;
-  context[CONTEXT_HDR_H_OFFSET_I]   = srcOffset + (tilelen*2-1)/sizeof(uint32_t) + 1;
-  context[CONTEXT_HDR_H_LEN_I]      = 0;
+  context[CONTEXT_HDR_QH_OFFSET_I]  = srcOffset + (tilelen*2-1)/sizeof(uint32_t) + 1;
+  context[CONTEXT_HDR_QH_LEN_I]     = 0;
   context[CONTEXT_HDR_PREV_C0_I]    = 0;
-  memset(&context[CONTEXT_HDR_NC_I], 0, sizeof(uint32_t)*258);
+  context[CONTEXT_HDR_MODEL_LEN_I]  = 0;
+  memset(&context[CONTEXT_HDR_S_ENTROPY_I], 0, sizeof(double));
+  memset(&context[CONTEXT_HDR_Q_ENTROPY_I], 0, sizeof(double));
+  memset(&context[CONTEXT_HDR_QH_OFFSETS_I], 0, sizeof(uint32_t)*258);
   memset(&context[CONTEXT_HDR_CNTRS_I], 0, sizeof(uint32_t)*CONTEXT_CNTRS_SZ);
+  memset(&context[CONTEXT_HDR_PREV_QH_I], ARITH_CODER_QH_SCALE/2, sizeof(uint32_t)*CONTEXT_PREV_QH_SZ);
+}
+
+static int calculate_model_length(unsigned prev, unsigned val)
+{
+  int modelLen = 1; // isEqual ?
+  if (prev != val) {
+    unsigned ra = prev, diff = val - prev;
+    if (val > prev) {
+      modelLen += (prev != 0); // sign
+      ra   = ARITH_CODER_QH_SCALE - prev;
+    } else {
+      modelLen += (prev != ARITH_CODER_QH_SCALE); // sign
+      diff = prev - val;
+    }
+    prev = val;
+    if (ra > 1) {
+      modelLen += 1; // is +/-1
+      if (diff > 1) {
+        ra   -= 1;
+        diff -= 2;
+        while (ra > 1) {
+          modelLen += 1;
+          unsigned mid = ra / 2;
+          if (diff < mid) {
+            ra = mid;
+          } else {
+            ra   -= mid;
+            diff -= mid;
+          }
+        }
+      }
+    }
+  }
+  return modelLen;
+}
+
+static void add_double(uint32_t* dst, double val) {
+  double x;
+  memcpy(&x, dst, sizeof(double));
+  x += val;
+  memcpy(dst, &x, sizeof(double));
 }
 
 void arithmetic_encode_chunk_callback(void* context_ptr, const uint8_t* src, int srclen)
 {
   uint32_t* context = static_cast<uint32_t*>(context_ptr);
-  uint8_t*  cntrs = reinterpret_cast<uint8_t*>(&context[CONTEXT_HDR_CNTRS_I]);
-  uint32_t  hlen = context[CONTEXT_HDR_H_LEN_I];
-  uint8_t*  hbeg = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_H_OFFSET_I]]);
-  uint8_t*  h = &hbeg[hlen];
+  uint8_t*  cntrs   = reinterpret_cast<uint8_t*>(&context[CONTEXT_HDR_CNTRS_I]);
+  uint8_t*  prevQh  = reinterpret_cast<uint8_t*>(&context[CONTEXT_HDR_PREV_QH_I]);
+  uint8_t*  qh      = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_QH_OFFSET_I]]);
+  uint32_t  qhlen   = context[CONTEXT_HDR_QH_LEN_I];
 
   int  prevC0 = context[CONTEXT_HDR_PREV_C0_I];
 
   // update histograms
+  double entropy = 0;
+  double quantizedEntropy = 0;
   for (int i = 0; i < srclen; ++i) {
     unsigned c = src[i];
     if (c == 255) {
@@ -113,27 +165,34 @@ void arithmetic_encode_chunk_callback(void* context_ptr, const uint8_t* src, int
       tLo = (b == 0) ? tLo  : tMid + 1;
       tHi = (b == 0) ? tMid : tHi;
       unsigned idx = (tMid < 2)  & prevC0 ? tMid : tMid + 2; // separate statistics for non-MS characters of zero run
-      cntrs[idx*2+0] += 1;
+      unsigned cntr0 = cntrs[idx*2+0];
+      if (cntr0 == 0) {
+        context[CONTEXT_HDR_QH_OFFSETS_I+idx] = qhlen;
+        ++qhlen;
+      }
+      cntr0 += 1;
+      cntrs[idx*2+0] = cntr0;
       cntrs[idx*2+1] += b;
-      if (cntrs[idx*2+0] == ARITH_CODER_CNT_MAX) {
-        unsigned bSum = cntrs[idx*2+1];
+      if (cntr0 == ARITH_CODER_CNT_MAX) {
+        unsigned hVal  = cntrs[idx*2+1];
         cntrs[idx*2+0] = cntrs[idx*2+1] = 0;
-        ++context[CONTEXT_HDR_NC_I+idx];
-        if (idx >= 255) {
-          *h++ = 255;
-          idx -= 255;
-        }
-        h[0] = idx;
-        h[1] = bSum;
-        h += 2;
+
+        entropy          += entropy_tab[hVal];
+        quantizedEntropy += quantized_entropy_tab[hVal];
+        unsigned qhVal = h2qh_tab[hVal]; // quantized '1'-to-total ratio
+        qh[context[CONTEXT_HDR_QH_OFFSETS_I+idx]] = qhVal;
+
+        // estimate model length
+        context[CONTEXT_HDR_MODEL_LEN_I] += calculate_model_length(prevQh[idx], qhVal);
+        prevQh[idx] = qhVal;
       }
     } while (tLo != tHi);
     prevC0 = (c < 2);
   }
   context[CONTEXT_HDR_PREV_C0_I] = prevC0;
-
-  hbeg = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_H_OFFSET_I]]);
-  context[CONTEXT_HDR_H_LEN_I] = (h-hbeg);
+  context[CONTEXT_HDR_QH_LEN_I]  = qhlen;
+  add_double(&context[CONTEXT_HDR_S_ENTROPY_I], entropy);
+  add_double(&context[CONTEXT_HDR_Q_ENTROPY_I], quantizedEntropy);
 
   uint8_t* dst = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_SRC_OFFSET_I]]);
   uint32_t dstlen = context[CONTEXT_HDR_SRC_LEN_I];
@@ -142,46 +201,24 @@ void arithmetic_encode_chunk_callback(void* context_ptr, const uint8_t* src, int
 }
 
 // return estimate of result length
-static int prepare(uint32_t* context, uint32_t qhOffsets[258], double* pInfo)
+static int prepare(uint32_t* context, double* pInfo)
 {
-  uint8_t*  cntrs = reinterpret_cast<uint8_t*>(&context[CONTEXT_HDR_CNTRS_I]);
-  uint32_t offset = 0;
-  for (int i = 0; i < 258; ++i) {
-    qhOffsets[i] = offset;
-    offset += context[CONTEXT_HDR_NC_I+i] + (cntrs[2*i+0] != 0);
-  }
-  uint32_t qho[258];
-  memcpy(qho, qhOffsets, sizeof(qho));
+  uint8_t*  cntrs  = reinterpret_cast<uint8_t*>(&context[CONTEXT_HDR_CNTRS_I]);
+  uint8_t*  prevQh = reinterpret_cast<uint8_t*>(&context[CONTEXT_HDR_PREV_QH_I]);
+  uint8_t*  qh     = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_QH_OFFSET_I]]);
 
-  const uint32_t hlen = context[CONTEXT_HDR_H_LEN_I];
-  const uint8_t* h = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_H_OFFSET_I]]);
-  uint8_t* qh = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_H_OFFSET_I]]) + hlen;
-  double entropy = 0;
-  double quantizedEntropy = entropy;
-
-  // process full sections
-  for (uint32_t src_i = 0; src_i < hlen; src_i += 2) {
-    int pos = h[src_i+0];
-    int val = h[src_i+1];
-    if (pos == 255) {
-      pos += val;
-      val = h[src_i+2];
-      ++src_i;
-    }
-    uint32_t offs = qho[pos];
-    qh[offs] = h2qh_tab[val];
-    qho[pos] = offs + 1;
-    entropy += entropy_tab[val];
-    quantizedEntropy += quantized_entropy_tab[val];
-  }
+  double entropy, quantizedEntropy;
+  memcpy(&entropy, &context[CONTEXT_HDR_S_ENTROPY_I], sizeof(double));
+  memcpy(&quantizedEntropy, &context[CONTEXT_HDR_Q_ENTROPY_I], sizeof(double));
+  int32_t modelLen = context[CONTEXT_HDR_MODEL_LEN_I];
 
   // process partial sections
-  for (int i = 0; i < 258; ++i) {
-    unsigned tot = cntrs[2*i+0];
+  for (int idx = 0; idx < 258; ++idx) {
+    unsigned tot = cntrs[idx*2+0];
     if (tot != 0) {
-      unsigned h0 = cntrs[2*i+1];
+      unsigned h0 = cntrs[idx*2+1];
       unsigned qhVal = quantize_histogram_pair(h0, tot-h0, ARITH_CODER_QH_SCALE);
-      qh[qho[i]] = qhVal;
+      qh[context[CONTEXT_HDR_QH_OFFSETS_I+idx]] = qhVal;
       entropy +=
           log2_tab[tot]*tot
         - log2_tab[h0]*h0
@@ -193,45 +230,9 @@ static int prepare(uint32_t* context, uint32_t qhOffsets[258], double* pInfo)
           - log2(ra0)*h0
           - log2(VAL_RANGE-ra0)*(tot-h0);
       }
-    }
-  }
 
-  int32_t modelLen = 0;
-  for (int i = 0; i < 258; ++i) {
-    const uint32_t nc = context[CONTEXT_HDR_NC_I+i] + (cntrs[2*i+0] != 0);
-    const uint8_t* src = &qh[qhOffsets[i]];
-    unsigned prev = ARITH_CODER_QH_SCALE/2;
-    for (uint32_t c = 0; c < nc; ++c) {
-      unsigned val = src[c];
-      modelLen += 1; // isEqual ?
-      if (val != prev) {
-        unsigned ra = prev, diff = val - prev;
-        if (val > prev) {
-          modelLen += (prev != 0); // sign
-          ra   = ARITH_CODER_QH_SCALE - prev;
-        } else {
-          modelLen += (prev != ARITH_CODER_QH_SCALE); // sign
-          diff = prev - val;
-        }
-        prev = val;
-        if (ra > 1) {
-          modelLen += 1; // is +/-1
-          if (diff > 1) {
-            ra   -= 1;
-            diff -= 2;
-            while (ra > 1) {
-              modelLen += 1;
-              unsigned mid = ra / 2;
-              if (diff < mid) {
-                ra = mid;
-              } else {
-                ra   -= mid;
-                diff -= mid;
-              }
-            }
-          }
-        }
-      }
+      // estimate model length
+      modelLen += calculate_model_length(prevQh[idx], qhVal);
     }
   }
 
@@ -300,7 +301,7 @@ static uint16_t* encodeQh(uint16_t* wrBits, unsigned val, unsigned prev)
   return wrBits;
 }
 
-static int encode(uint8_t* dst, const uint32_t* context, uint32_t qhOffsets[258])
+static int encode(uint8_t* dst, const uint32_t* context)
 {
   uint8_t cntrs[258] = {0};
   uint8_t prevQh[258];
@@ -314,8 +315,7 @@ static int encode(uint8_t* dst, const uint32_t* context, uint32_t qhOffsets[258]
   uint8_t* dst0   = dst;
   uint64_t prevLo = lo;
 
-
-  const uint8_t* qh  = reinterpret_cast<const uint8_t*>(&context[context[CONTEXT_HDR_H_OFFSET_I]]) + context[CONTEXT_HDR_H_LEN_I];
+  const uint8_t* qh  = reinterpret_cast<const uint8_t*>(&context[context[CONTEXT_HDR_QH_OFFSET_I]]);
   const uint8_t* src = reinterpret_cast<const uint8_t*>(&context[context[CONTEXT_HDR_SRC_OFFSET_I]]);
   const int srclen = context[CONTEXT_HDR_SRC_LEN_I];
   unsigned prevC0 = 0;
@@ -336,10 +336,8 @@ static int encode(uint8_t* dst, const uint32_t* context, uint32_t qhOffsets[258]
       int hVal = VAL_RANGE/2;
       int cntr = cntrs[idx];
       if (cntr == 0) {
-        uint32_t qhOffset = qhOffsets[idx];
-        unsigned qhVal = qh[qhOffset];
+        unsigned qhVal = *qh++;
         unsigned prevQhVal = prevQh[idx];
-        qhOffsets[idx] = qhOffset + 1;
         prevQh[idx] = qhVal;
         wrBits = encodeQh(wrBits, qhVal, prevQhVal);
         currH[idx] = qhVal != ARITH_CODER_QH_SCALE ? qh2h_tab[qhVal] : 0;
@@ -413,12 +411,11 @@ static int encode(uint8_t* dst, const uint32_t* context, uint32_t qhOffsets[258]
 // >0 - the length of compressed buffer
 int arithmetic_encode(uint32_t* context, uint8_t* dst, int origlen, double* pInfo)
 {
-  uint32_t qhOffsets[258];
-  int estlen = prepare(context, qhOffsets, pInfo);
+  int estlen = prepare(context, pInfo);
   if (estlen >= origlen)
     return 0; // not compressible
 
-  int reslen = encode(dst, context, qhOffsets);
+  int reslen = encode(dst, context);
 
   if (pInfo) {
     double modelLenBits = pInfo[1];
