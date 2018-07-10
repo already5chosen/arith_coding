@@ -297,7 +297,7 @@ static int encode(uint8_t* dst, encode_prm_t* prm, const uint8_t* src, int srcle
   int nextTabOffset = 256;
   const uint8_t* qh = prm->qh;
   for (int src_i = 0; src_i < srclen; ++src_i) {
-    uint16_t bitsBuf[(258*9)*2];
+    uint16_t bitsBuf[256*2];
     uint16_t* wrBits = bitsBuf;
 
     unsigned c = src[src_i];
@@ -316,7 +316,10 @@ static int encode(uint8_t* dst, encode_prm_t* prm, const uint8_t* src, int srcle
       if (cntr == 0) {
         unsigned qhVal = *qh++;
         int mtf_k = qh_mtf_encode(qhMtfTab[idx], qhVal);  // mtf encoder
-        wrBits[0] = mtf_k + 2;
+        unsigned cLo = qh_c2lo_tab[mtf_k+0];
+        unsigned cHi = qh_c2lo_tab[mtf_k+1];
+        wrBits[0] = cLo;
+        wrBits[1] = cHi - cLo;
         wrBits += 2;
         currH[idx] = qhVal != ARITH_CODER_QH_SCALE ? qh2h_tab[qhVal] : 0;
       }
@@ -324,29 +327,21 @@ static int encode(uint8_t* dst, encode_prm_t* prm, const uint8_t* src, int srcle
       if (cntr == ARITH_CODER_CNT_MAX)
         cntr = 0;
       cntrs[idx] = cntr;
-      int hVal = currH[idx];
 
+      unsigned cRa1 = currH[idx];
+      unsigned cRa0 = VAL_RANGE - cRa1;
       unsigned b = c > tMid;
-      tabOffset = b ? 0 : tabOffset;
-      wrBits[0] = b;
-      wrBits[1] = hVal;
-      if (hVal != 0)
+      tabOffset = b == 0 ? tabOffset : 0;
+      wrBits[0] = b == 0 ? 0         : cRa0;
+      wrBits[1] = b == 0 ? cRa0      : cRa1;
+      if (cRa1 != 0)
         wrBits += 2;
       tMid = prm->bisectionTab[tMid][b];
     } while (tMid != 1);
 
     for (uint16_t* rdBits = bitsBuf; rdBits != wrBits; rdBits += 2) {
-      unsigned b = rdBits[0];
-      uint64_t cLo, cRa;
-      if (b < 2) {
-        unsigned hVal = rdBits[1];
-        cLo = b == 0 ? 0                : VAL_RANGE - hVal;
-        cRa = b == 0 ? VAL_RANGE - hVal : hVal;
-      } else {
-        cLo = qh_c2lo_tab[b-2];
-        cRa = qh_c2lo_tab[b-1] - cLo;
-      }
-
+      uint64_t cLo = rdBits[0];
+      uint64_t cRa = rdBits[1];
       lo   += range * cLo;
       range = range * cRa;
 
