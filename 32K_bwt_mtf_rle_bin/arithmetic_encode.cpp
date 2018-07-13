@@ -28,10 +28,12 @@ static unsigned quantize_histogram_pair(unsigned h0, unsigned h1, unsigned scale
 }
 
 static uint8_t  h2qh_tab[ARITH_CODER_CNT_MAX+1];
-static uint16_t qh2h_tab[ARITH_CODER_QH_SCALE+1];
+static uint16_t h2r_tab[ARITH_CODER_CNT_MAX+1];
+static uint16_t qh2r_tab[ARITH_CODER_QH_SCALE+1];
 static double   log2_tab[ARITH_CODER_CNT_MAX+1];
 static double   entropy_tab[ARITH_CODER_CNT_MAX+1];
 static double   quantized_entropy_tab[ARITH_CODER_CNT_MAX+1];
+static double   h2nbits_tab[ARITH_CODER_CNT_MAX+1];
 
 void arithmetic_encode_init_tables()
 {
@@ -48,18 +50,27 @@ void arithmetic_encode_init_tables()
   for (int i = 1; i < ARITH_CODER_CNT_MAX; ++i)
     h2qh_tab[i] = quantize_histogram_pair(i, ARITH_CODER_CNT_MAX-i, ARITH_CODER_QH_SCALE);
 
-  qh2h_tab[ARITH_CODER_QH_SCALE] = VAL_RANGE;
+  qh2r_tab[ARITH_CODER_QH_SCALE] = VAL_RANGE;
   double M_PI = 3.1415926535897932384626433832795;
   for (int i = 1; i < ARITH_CODER_QH_SCALE; ++i)
-    qh2h_tab[i] = int(round((sin((i*2-ARITH_CODER_QH_SCALE)*(M_PI/2/ARITH_CODER_QH_SCALE))+1.0)*(VAL_RANGE/2)));
+    qh2r_tab[i] = int(round((sin((i*2-ARITH_CODER_QH_SCALE)*(M_PI/2/ARITH_CODER_QH_SCALE))+1.0)*(VAL_RANGE/2)));
 
   for (int i = 1; i < ARITH_CODER_CNT_MAX; ++i) {
-    int32_t ra = qh2h_tab[h2qh_tab[i]];
+    int32_t ra = qh2r_tab[h2qh_tab[i]];
     quantized_entropy_tab[i] =
       RANGE_BITS*ARITH_CODER_CNT_MAX
       - log2(ra)*i
       - log2(VAL_RANGE-ra)*(ARITH_CODER_CNT_MAX-i);
     // printf("%3d %2d %5d %.3f\n", i, h2qh_tab[i], ra, quantized_entropy_tab[i]);
+  }
+
+  for (int i = 1; i <= ARITH_CODER_CNT_MAX/2; ++i) {
+    int32_t ra0 = (int32_t(VAL_RANGE)*2*i + ARITH_CODER_CNT_MAX)/(ARITH_CODER_CNT_MAX*2);
+    int32_t ra1 = VAL_RANGE - ra0;
+    h2r_tab[i]                     = ra0;
+    h2r_tab[ARITH_CODER_CNT_MAX-i] = ra1;
+    h2nbits_tab[i]                     = RANGE_BITS-log2(ra0);
+    h2nbits_tab[ARITH_CODER_CNT_MAX-i] = RANGE_BITS-log2(ra1);
   }
 }
 
@@ -76,9 +87,9 @@ enum {
   CONTEXT_HDR_QH_OFFSETS_I = CONTEXT_HDR_Q_ENTROPY_I + sizeof(double)/sizeof(uint32_t),
   CONTEXT_HDR_CNTRS_I   = CONTEXT_HDR_QH_OFFSETS_I + 258,
   CONTEXT_CNTRS_SZ      = (258*2*sizeof(uint8_t)-1)/sizeof(uint32_t) + 1,
-  CONTEXT_HDR_PREV_QH_I = CONTEXT_HDR_CNTRS_I + CONTEXT_CNTRS_SZ,
-  CONTEXT_PREV_QH_SZ    = (258*sizeof(uint8_t)-1)/sizeof(uint32_t) + 1,
-  CONTEXT_HDR_LEN  = CONTEXT_HDR_PREV_QH_I + CONTEXT_PREV_QH_SZ,
+  CONTEXT_HDR_PREV_H_I  = CONTEXT_HDR_CNTRS_I + CONTEXT_CNTRS_SZ,
+  CONTEXT_PREV_H_SZ     = (258*sizeof(uint8_t)-1)/sizeof(uint32_t) + 1,
+  CONTEXT_HDR_LEN  = CONTEXT_HDR_PREV_H_I + CONTEXT_PREV_H_SZ,
 };
 
 void arithmetic_encode_init_context(uint32_t* context, int tilelen)
@@ -94,7 +105,7 @@ void arithmetic_encode_init_context(uint32_t* context, int tilelen)
   memset(&context[CONTEXT_HDR_Q_ENTROPY_I], 0, sizeof(double));
   memset(&context[CONTEXT_HDR_QH_OFFSETS_I], 0, sizeof(uint32_t)*258);
   memset(&context[CONTEXT_HDR_CNTRS_I], 0, sizeof(uint32_t)*CONTEXT_CNTRS_SZ);
-  memset(&context[CONTEXT_HDR_PREV_QH_I], ARITH_CODER_QH_SCALE/2, sizeof(uint32_t)*CONTEXT_PREV_QH_SZ);
+  memset(&context[CONTEXT_HDR_PREV_H_I], ARITH_CODER_CNT_MAX/2, sizeof(uint32_t)*CONTEXT_PREV_H_SZ);
 }
 
 static int calculate_model_length(unsigned prev, unsigned val)
@@ -142,7 +153,7 @@ void arithmetic_encode_chunk_callback(void* context_ptr, const uint8_t* src, int
 {
   uint32_t* context = static_cast<uint32_t*>(context_ptr);
   uint8_t*  cntrs   = reinterpret_cast<uint8_t*>(&context[CONTEXT_HDR_CNTRS_I]);
-  uint8_t*  prevQh  = reinterpret_cast<uint8_t*>(&context[CONTEXT_HDR_PREV_QH_I]);
+  uint8_t*  prevH   = reinterpret_cast<uint8_t*>(&context[CONTEXT_HDR_PREV_H_I]);
   uint8_t*  qh      = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_QH_OFFSET_I]]);
   uint32_t  qhlen   = context[CONTEXT_HDR_QH_LEN_I];
 
@@ -175,16 +186,32 @@ void arithmetic_encode_chunk_callback(void* context_ptr, const uint8_t* src, int
       cntrs[idx*2+1] += b;
       if (cntr0 == ARITH_CODER_CNT_MAX) {
         unsigned hVal  = cntrs[idx*2+1];
+        unsigned prevHVal = prevH[idx];
         cntrs[idx*2+0] = cntrs[idx*2+1] = 0;
+        prevH[idx] = hVal;
 
         entropy          += entropy_tab[hVal];
-        quantizedEntropy += quantized_entropy_tab[hVal];
-        unsigned qhVal = h2qh_tab[hVal]; // quantized '1'-to-total ratio
+
+        unsigned newQhVal = h2qh_tab[hVal]; // quantized '1'-to-total ratio
+        unsigned oldQhVal = h2qh_tab[prevHVal];
+        double nbits = // estimate # of bits in case we don't change qhVal
+          h2nbits_tab[prevHVal]*hVal +
+          h2nbits_tab[ARITH_CODER_CNT_MAX-prevHVal]*(ARITH_CODER_CNT_MAX-hVal);
+        unsigned qhVal = oldQhVal;
+        if (newQhVal != oldQhVal) {
+          // examine possibility of different qhVal
+          double newNbits = quantized_entropy_tab[hVal];
+          if (nbits == 0 || newNbits+1.0 < nbits) {
+            // a new qh is better
+            qhVal = newQhVal;
+            nbits = newNbits;
+          }
+        }
+        quantizedEntropy += nbits;
         qh[context[CONTEXT_HDR_QH_OFFSETS_I+idx]] = qhVal;
 
         // estimate model length
-        context[CONTEXT_HDR_MODEL_LEN_I] += calculate_model_length(prevQh[idx], qhVal);
-        prevQh[idx] = qhVal;
+        context[CONTEXT_HDR_MODEL_LEN_I] += calculate_model_length(oldQhVal, qhVal);
       }
     } while (tLo != tHi);
     prevC0 = (c < 2);
@@ -204,7 +231,7 @@ void arithmetic_encode_chunk_callback(void* context_ptr, const uint8_t* src, int
 static int prepare(uint32_t* context, double* pInfo)
 {
   uint8_t*  cntrs  = reinterpret_cast<uint8_t*>(&context[CONTEXT_HDR_CNTRS_I]);
-  uint8_t*  prevQh = reinterpret_cast<uint8_t*>(&context[CONTEXT_HDR_PREV_QH_I]);
+  uint8_t*  prevH  = reinterpret_cast<uint8_t*>(&context[CONTEXT_HDR_PREV_H_I]);
   uint8_t*  qh     = reinterpret_cast<uint8_t*>(&context[context[CONTEXT_HDR_QH_OFFSET_I]]);
 
   double entropy, quantizedEntropy;
@@ -216,23 +243,43 @@ static int prepare(uint32_t* context, double* pInfo)
   for (int idx = 0; idx < 258; ++idx) {
     unsigned tot = cntrs[idx*2+0];
     if (tot != 0) {
-      unsigned h0 = cntrs[idx*2+1];
-      unsigned qhVal = quantize_histogram_pair(h0, tot-h0, ARITH_CODER_QH_SCALE);
-      qh[context[CONTEXT_HDR_QH_OFFSETS_I+idx]] = qhVal;
+      unsigned hVal = cntrs[idx*2+1];
       entropy +=
           log2_tab[tot]*tot
-        - log2_tab[h0]*h0
-        - log2_tab[tot-h0]*(tot-h0);
-      if (h0 != 0 && h0 != tot) {
-        int32_t ra0 = qh2h_tab[qhVal];
-        quantizedEntropy +=
-            RANGE_BITS*tot
-          - log2(ra0)*h0
-          - log2(VAL_RANGE-ra0)*(tot-h0);
+        - log2_tab[hVal]*hVal
+        - log2_tab[tot-hVal]*(tot-hVal);
+
+      unsigned prevHVal = prevH[idx];
+      unsigned oldQhVal = h2qh_tab[prevHVal];
+      unsigned qhVal = 0;
+      if (hVal != 0) {
+        qhVal = ARITH_CODER_QH_SCALE;
+        if (hVal != tot) {
+          qhVal = oldQhVal;
+          double nbits = // estimate # of bits in case we don't change qhVal
+            h2nbits_tab[prevHVal]*hVal +
+            h2nbits_tab[ARITH_CODER_CNT_MAX-prevHVal]*(tot-hVal);
+          unsigned newQhVal = quantize_histogram_pair(hVal, tot-hVal, ARITH_CODER_QH_SCALE);
+          if (newQhVal != oldQhVal) {
+            // examine possibility of different qhVal
+            int32_t ra0 = qh2r_tab[newQhVal];
+            double newNbits =
+                RANGE_BITS*tot
+              - log2(ra0)*hVal
+              - log2(VAL_RANGE-ra0)*(tot-hVal);
+            if (nbits == 0 || newNbits < nbits) {
+              // a new qh is better
+              qhVal = newQhVal;
+              nbits = newNbits;
+            }
+          }
+          quantizedEntropy += nbits;
+        }
       }
+      qh[context[CONTEXT_HDR_QH_OFFSETS_I+idx]] = qhVal;
 
       // estimate model length
-      modelLen += calculate_model_length(prevQh[idx], qhVal);
+      modelLen += calculate_model_length(oldQhVal, qhVal);
     }
   }
 
@@ -304,9 +351,9 @@ static uint16_t* encodeQh(uint16_t* wrBits, unsigned val, unsigned prev)
 static int encode(uint8_t* dst, const uint32_t* context)
 {
   uint8_t cntrs[258] = {0};
-  uint8_t prevQh[258];
-  uint16_t currH[258];
-  memset(prevQh, ARITH_CODER_QH_SCALE/2, sizeof(prevQh));
+  uint8_t prevH[258];
+  uint16_t currRa[258];
+  memset(prevH, ARITH_CODER_CNT_MAX/2, sizeof(prevH));
 
   const uint64_t MSB_MSK   = uint64_t(255) << 56;
   const uint64_t MIN_RANGE = uint64_t(1) << (33-RANGE_BITS);
@@ -333,25 +380,29 @@ static int encode(uint8_t* dst, const uint32_t* context)
     do {
       unsigned tMid = (tLo*3 + tHi)/4;
       unsigned idx = (tMid < 2)  & prevC0 ? tMid : tMid + 2; // separate statistics for non-MS characters of zero run
-      int hVal = VAL_RANGE/2;
+      int raVal = VAL_RANGE/2;
       int cntr = cntrs[idx];
       if (cntr == 0) {
+        unsigned prevHVal = prevH[idx];
+        prevH[idx] = 0;
+
         unsigned qhVal = *qh++;
-        unsigned prevQhVal = prevQh[idx];
-        prevQh[idx] = qhVal;
+        unsigned prevQhVal = h2qh_tab[prevHVal];
         wrBits = encodeQh(wrBits, qhVal, prevQhVal);
-        currH[idx] = qhVal != ARITH_CODER_QH_SCALE ? qh2h_tab[qhVal] : 0;
+        unsigned raVal = (qhVal==prevQhVal) ? h2r_tab[prevHVal] : qh2r_tab[qhVal];
+        currRa[idx] = raVal;//qhVal != ARITH_CODER_QH_SCALE ? raVal : 0;
       }
       ++cntr;
       if (cntr == ARITH_CODER_CNT_MAX)
         cntr = 0;
       cntrs[idx] = cntr;
-      hVal = currH[idx];
+      raVal = currRa[idx];
 
       unsigned b = c > tMid;
+      prevH[idx] += b;
       wrBits[0] = b;
-      wrBits[1] = hVal;
-      if (hVal != 0)
+      wrBits[1] = raVal;
+      if (raVal != 0)
         wrBits += 2;
       tLo = (b == 0) ? tLo  : tMid + 1;
       tHi = (b == 0) ? tMid : tHi;
@@ -360,9 +411,9 @@ static int encode(uint8_t* dst, const uint32_t* context)
 
     for (uint16_t* rdBits = bitsBuf; rdBits != wrBits; rdBits += 2) {
       unsigned b    = rdBits[0];
-      unsigned hVal = rdBits[1];
-      uint64_t cLo = b == 0 ? 0                : VAL_RANGE - hVal;
-      uint64_t cRa = b == 0 ? VAL_RANGE - hVal : hVal;
+      unsigned raVal = rdBits[1];
+      uint64_t cLo = b == 0 ? 0                 : VAL_RANGE - raVal;
+      uint64_t cRa = b == 0 ? VAL_RANGE - raVal : raVal;
       lo   += range * cLo;
       range = range * cRa;
 

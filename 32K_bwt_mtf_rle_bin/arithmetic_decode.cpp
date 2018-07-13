@@ -8,14 +8,43 @@
 
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 
-static uint16_t qh2h_tab[ARITH_CODER_QH_SCALE+1];
+static uint16_t qh2r_tab[ARITH_CODER_QH_SCALE+1];
+static uint8_t  h2qh_tab[ARITH_CODER_CNT_MAX+1];
+static uint16_t h2r_tab[ARITH_CODER_CNT_MAX+1];
+
+
+// return quantized code of h0/(h0+h1) in range [0..scale]
+static unsigned quantize_histogram_pair(unsigned h0, unsigned h1, unsigned scale)
+{
+  unsigned hTot = h0 + h1;
+  // printf("%u+%u => %.2f\n", h0, h1, (log2(hTot)*hTot-log2(h0)*h0-log2(h1)*h1)/8);
+  double M_PI = 3.1415926535897932384626433832795;
+  unsigned val = round((asin(h0*2.0/hTot - 1.0)/M_PI + 0.5)*scale);
+  if (val < 1)
+    val = 1;
+  else if (val >= scale)
+    val = scale-1;
+  return val;
+}
 
 void arithmetic_decode_init_tables()
 {
-  qh2h_tab[ARITH_CODER_QH_SCALE] = VAL_RANGE;
+  qh2r_tab[ARITH_CODER_QH_SCALE] = VAL_RANGE;
   double M_PI = 3.1415926535897932384626433832795;
   for (int i = 1; i < ARITH_CODER_QH_SCALE; ++i)
-    qh2h_tab[i] = int(round((sin((i*2-ARITH_CODER_QH_SCALE)*(M_PI/2/ARITH_CODER_QH_SCALE))+1.0)*(VAL_RANGE/2)));
+    qh2r_tab[i] = int(round((sin((i*2-ARITH_CODER_QH_SCALE)*(M_PI/2/ARITH_CODER_QH_SCALE))+1.0)*(VAL_RANGE/2)));
+
+  h2qh_tab[ARITH_CODER_CNT_MAX] = ARITH_CODER_QH_SCALE;
+  for (int i = 1; i < ARITH_CODER_CNT_MAX; ++i)
+    h2qh_tab[i] = quantize_histogram_pair(i, ARITH_CODER_CNT_MAX-i, ARITH_CODER_QH_SCALE);
+
+  for (int i = 1; i <= ARITH_CODER_CNT_MAX/2; ++i) {
+    int32_t ra0 = (int32_t(VAL_RANGE)*2*i + ARITH_CODER_CNT_MAX)/(ARITH_CODER_CNT_MAX*2);
+    int32_t ra1 = VAL_RANGE - ra0;
+    h2r_tab[i]                     = ra0;
+    h2r_tab[ARITH_CODER_CNT_MAX-i] = ra1;
+  }
+  h2r_tab[ARITH_CODER_CNT_MAX] = VAL_RANGE;
 }
 
 static int decode(
@@ -26,9 +55,9 @@ static int decode(
   int            srclen)
 {
   uint8_t  cntrs[258] = {0};
-  uint8_t  prevQh[258];
-  uint16_t currH[258];
-  memset(prevQh, ARITH_CODER_QH_SCALE/2, sizeof(prevQh));
+  uint8_t  prevH[258];
+  uint16_t currRa[258];
+  memset(prevH, ARITH_CODER_CNT_MAX/2, sizeof(prevH));
 
   // initialize move-to-front decoder table
   uint8_t mtf_t[256];
@@ -59,7 +88,7 @@ static int decode(
     do {
       unsigned tMid = (tLo*3 + tHi)/4;
       unsigned idx = (tMid < 2)  & prevC0 ? tMid : tMid + 2; // separate statistics for non-MS characters of zero run
-      int hVal = VAL_RANGE/2;
+      int raVal = VAL_RANGE/2;
       enum { QH_DECODE_NONE, QH_DECODE_ZERO, QH_DECODE_SIGN, QH_DECODE_DIFF_1, QH_DECODE_DIFF_N };
       int qhDecodeState = QH_DECODE_NONE;
       unsigned qhDecodeDiff, qhDecodeRa, qhDecodeUp;
@@ -69,7 +98,7 @@ static int decode(
         if (cntr == ARITH_CODER_CNT_MAX)
           cntr = 0;
         cntrs[idx] = cntr;
-        hVal = currH[idx];
+        raVal = currRa[idx];
       } else {
         qhDecodeState = QH_DECODE_ZERO;
       }
@@ -77,13 +106,13 @@ static int decode(
       unsigned b;
       for (;;) {
         b = 0;
-        if (hVal != 0) {
+        if (raVal != 0) {
           b = 1;
-          if (hVal != VAL_RANGE) {
-            b = (value >= range*(VAL_RANGE-hVal));
+          if (raVal != VAL_RANGE) {
+            b = (value >= range*(VAL_RANGE-raVal));
             // keep decoder in sync with encoder
-            uint64_t cLo = b == 0 ? 0                : VAL_RANGE - hVal;
-            uint64_t cHi = b == 0 ? VAL_RANGE - hVal : VAL_RANGE;
+            uint64_t cLo = b == 0 ? 0                 : VAL_RANGE - raVal;
+            uint64_t cHi = b == 0 ? VAL_RANGE - raVal : VAL_RANGE;
             value -= range * cLo;
             range *= (cHi-cLo);  // at this point range is scaled by 2**64 - the same scale as value
             uint64_t nxtRange = range >> RANGE_BITS;
@@ -120,7 +149,8 @@ static int decode(
         if (qhDecodeState == QH_DECODE_NONE)
           break;
 
-        unsigned prevQhVal = prevQh[idx];
+        unsigned prevHVal = prevH[idx];
+        unsigned prevQhVal = h2qh_tab[prevHVal];
         unsigned qhVal = prevQhVal;
         switch (qhDecodeState) {
           case QH_DECODE_ZERO:
@@ -185,11 +215,12 @@ static int decode(
 
         if (qhDecodeState == QH_DECODE_NONE) {
           // printf("%3d %2d qh\n", idx, qhVal);
-          prevQh[idx] = qhVal;
-          currH[idx] = hVal = qh2h_tab[qhVal];
+          currRa[idx] = raVal = (prevQhVal == qhVal) ?  h2r_tab[prevHVal] : qh2r_tab[qhVal];
+          prevH[idx] = 0;
           cntrs[idx] = 1;
         }
       }
+      prevH[idx] += b;
       tLo = (b == 0) ? tLo  : tMid + 1;
       tHi = (b == 0) ? tMid : tHi;
     } while (tLo != tHi);
