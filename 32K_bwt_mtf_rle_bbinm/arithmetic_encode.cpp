@@ -8,6 +8,8 @@
 #include "arithmetic_coder_cfg.h"
 
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
+static const unsigned QQH_SCALE = 15;               // not necessarily the same as ARITH_CODER_QH_SCALE
+static const unsigned MODEL_QH_LEN = 4;
 
 // return quantized code of h0/(h0+h1) in range [0..scale]
 static unsigned quantize_histogram_pair(unsigned h0, unsigned h1, unsigned scale)
@@ -32,10 +34,15 @@ static uint16_t qh2h_tab[ARITH_CODER_QH_SCALE+1];
 static double   log2_tab[ARITH_CODER_CNT_MAX+1];
 static double   entropy_tab[ARITH_CODER_CNT_MAX+1];
 static double   quantized_entropy_tab[ARITH_CODER_CNT_MAX+1];
-static uint16_t qh_c2lo_tab[ARITH_CODER_QH_SCALE+2];
-static double   qh_entropy_tab[ARITH_CODER_QH_SCALE+1];
 static uint8_t  qhMtf0[ARITH_CODER_QH_SCALE+1];
-
+static uint32_t model_qh_tail_tab[ARITH_CODER_QH_SCALE+1];
+static uint32_t model_qh2h_tab[QQH_SCALE] = {
+  0,
+    46927670,   185659716,   410132882,   710536612,
+  1073741824,  1483874706,  1923010482,  2371956814,
+  2811092590,  3221225472,  3584430684,  3884834414,
+  4109307580,  4248039626,
+};
 
 void arithmetic_encode_init_tables()
 {
@@ -66,28 +73,13 @@ void arithmetic_encode_init_tables()
     // printf("%3d %2d %5d %.3f\n", i, h2qh_tab[i], ra, quantized_entropy_tab[i]);
   }
 
-  uint16_t qh_ra_tab[ARITH_CODER_QH_SCALE+1];
-  qh_ra_tab[0] = VAL_RANGE/2;
-  qh_ra_tab[1] = VAL_RANGE/4;
-  uint32_t ra_sum = 0;
-  uint32_t ra = uint32_t(1) << 15;
-  for (int i = 2; i <= ARITH_CODER_QH_SCALE; ++i) {
-    qh_ra_tab[i] = ra;
-    ra_sum += ra;
-    ra -= ra / ARITH_CODER_QH_DECEY;
+  uint64_t val = uint64_t(1) << 32;
+  uint64_t sum = val;
+  for (int i = MODEL_QH_LEN+1; i <= ARITH_CODER_QH_SCALE; ++i) {
+    val -= val / ARITH_CODER_QH_DECEY;
+    sum += val;
+    model_qh_tail_tab[i] = (val << 32)/sum;
   }
-  ra_sum *= 4;
-  for (int i = 2; i < ARITH_CODER_QH_SCALE; ++i)
-    qh_ra_tab[i] = (uint32_t(VAL_RANGE)*qh_ra_tab[i])/ra_sum;
-  uint32_t lo = 0;
-  for (int i = 0; i <= ARITH_CODER_QH_SCALE; ++i) {
-    qh_c2lo_tab[i] = lo;
-    lo += qh_ra_tab[i];
-  }
-  qh_c2lo_tab[ARITH_CODER_QH_SCALE+1] = VAL_RANGE;
-
-  for (int i = 0; i <= ARITH_CODER_QH_SCALE; ++i)
-    qh_entropy_tab[i] = RANGE_BITS - log2(qh_c2lo_tab[i+1]-qh_c2lo_tab[i]);
 
   for (int i = 0; i <= ARITH_CODER_QH_SCALE/2; ++i)
     qhMtf0[i] = ARITH_CODER_QH_SCALE/2 - i;
@@ -100,7 +92,8 @@ struct encode_prm_t {
   unsigned mid0;
   unsigned midFactors[2];
   uint8_t  bisectionTab[256][2];
-  // uint16_t modelEncodeTab[ARITH_CODER_QH_SCALE+1][ARITH_CODER_QH_SCALE+2];
+  uint8_t  modelQh[MODEL_QH_LEN];
+  uint16_t modelC2loTab[ARITH_CODER_QH_SCALE+2];
 };
 
 // Select MidFactor that generates the smallest number of bits
@@ -160,6 +153,70 @@ static int qh_mtf_encode(uint8_t t[], int c)
   return k;
 }
 
+static void build_qh_encode_table(uint16_t c2lo[ARITH_CODER_QH_SCALE+2], const uint8_t modelQh[MODEL_QH_LEN])
+{
+  unsigned ranges[ARITH_CODER_QH_SCALE+1]={0};
+  unsigned remVal = VAL_RANGE;
+  for (int i = 0; i < MODEL_QH_LEN; ++i) {
+    uint32_t qhVal = modelQh[i];
+    if (qhVal != QQH_SCALE) {
+      unsigned ra = (uint64_t(model_qh2h_tab[qhVal]) * remVal + (uint32_t(1)<<31)) >> 32;
+      if (remVal-ra < ARITH_CODER_QH_SCALE-i)
+        ra = remVal - (ARITH_CODER_QH_SCALE-i);
+      ranges[i] = ra;
+      remVal   -= ra;
+    } else {
+      ranges[i] = remVal;
+      remVal = 0;
+      break;
+    }
+  }
+  if (remVal > 0) {
+    for (int i = ARITH_CODER_QH_SCALE; i > MODEL_QH_LEN; --i) {
+      unsigned ra = (uint64_t(model_qh_tail_tab[i]) * remVal + (uint32_t(1)<<31)) >> 32;
+      if (ra == 0) ra = 1;
+      ranges[i] = ra;
+      remVal -= ra;
+    }
+    ranges[MODEL_QH_LEN] = remVal;
+  }
+
+  unsigned acc = 0;
+  for (int i = 0; i < ARITH_CODER_QH_SCALE+1; ++i) {
+    c2lo[i] = acc;
+    acc += ranges[i];
+  }
+  c2lo[ARITH_CODER_QH_SCALE+1] = VAL_RANGE;
+}
+
+// return estimate of model length
+static double prepare_qh_encode(encode_prm_t* prm, const uint32_t histogram[ARITH_CODER_QH_SCALE+1])
+{
+  uint32_t tot = 0;
+  for (int i = 0; i < ARITH_CODER_QH_SCALE+1; ++i)
+    tot += histogram[i];
+
+  memset(prm->modelQh, 0, sizeof(prm->modelQh));
+  for (int i = 0; i < MODEL_QH_LEN && tot != 0; ++i) {
+    uint32_t hVal = histogram[i];
+    prm->modelQh[i] = quantize_histogram_pair(hVal, tot-hVal, QQH_SCALE);
+    tot -= hVal;
+  }
+
+  build_qh_encode_table(prm->modelC2loTab, prm->modelQh);
+
+  double entr = 0;
+  for (int i = 0; i < ARITH_CODER_QH_SCALE+1; ++i) {
+    uint32_t h = histogram[i];
+    if (h > 0) {
+      unsigned ra = prm->modelC2loTab[i+1] - prm->modelC2loTab[i+0];
+      entr += (RANGE_BITS-log2(ra))*h;
+    }
+  }
+
+  return entr;
+}
+
 // return estimate of result length
 static int prepare(encode_prm_t* prm, const uint8_t* src, int srclen, uint32_t srcHistogram[258], double* pInfo)
 {
@@ -195,10 +252,10 @@ static int prepare(encode_prm_t* prm, const uint8_t* src, int srclen, uint32_t s
   double entropy = 0;
   double quantizedEntropy = entropy;
   uint32_t qhOffsets[258], qhOffset = 0;
-  double modelLen = 2*8;
   uint8_t qhMtfTab[258][ARITH_CODER_QH_SCALE+1];
   for (int i = 0; i < 258; ++i)
     memcpy(qhMtfTab[i], qhMtf0, sizeof(qhMtf0));
+  uint32_t qhHistogram[ARITH_CODER_QH_SCALE+1]={0};
   for (int src_i = 0; src_i < srclen; ++src_i) {
     unsigned c = src[src_i];
     if (c == 255) {
@@ -229,9 +286,8 @@ static int prepare(encode_prm_t* prm, const uint8_t* src, int srclen, uint32_t s
         prm->qh[qhOffsets[idx]] = qhVal;
         cntrs[idx][0] = cntrs[idx][1] = 0;
 
-        // estimate model length
         int mtf_k = qh_mtf_encode(qhMtfTab[idx], qhVal);  // mtf encoder
-        modelLen += qh_entropy_tab[mtf_k];
+        ++qhHistogram[mtf_k];
       }
       tMid = prm->bisectionTab[tMid][b];
     } while (tMid != 1);
@@ -256,12 +312,12 @@ static int prepare(encode_prm_t* prm, const uint8_t* src, int srclen, uint32_t s
           - log2(VAL_RANGE-ra0)*(tot-h0);
       }
 
-      // estimate model length
       int mtf_k = qh_mtf_encode(qhMtfTab[idx], qhVal);  // mtf encoder
-      modelLen += qh_entropy_tab[mtf_k];
+      ++qhHistogram[mtf_k];
     }
   }
 
+  double modelLen = 4*8 + prepare_qh_encode(prm, qhHistogram);
   if (pInfo) {
     pInfo[0] = entropy;
     pInfo[1] = modelLen;
@@ -316,11 +372,13 @@ static int encode(uint8_t* dst, encode_prm_t* prm, const uint8_t* src, int srcle
       if (cntr == 0) {
         unsigned qhVal = *qh++;
         int mtf_k = qh_mtf_encode(qhMtfTab[idx], qhVal);  // mtf encoder
-        unsigned cLo = qh_c2lo_tab[mtf_k+0];
-        unsigned cHi = qh_c2lo_tab[mtf_k+1];
+        unsigned cLo = prm->modelC2loTab[mtf_k+0];
+        unsigned cHi = prm->modelC2loTab[mtf_k+1];
+        unsigned cRa = cHi - cLo;
         wrBits[0] = cLo;
-        wrBits[1] = cHi - cLo;
-        wrBits += 2;
+        wrBits[1] = cRa;
+        if (cRa != VAL_RANGE)
+          wrBits += 2;
         currH[idx] = qhVal != ARITH_CODER_QH_SCALE ? qh2h_tab[qhVal] : 0;
       }
       ++cntr;
@@ -397,8 +455,10 @@ int arithmetic_encode(uint8_t* dst, const uint8_t* src, int srclen, uint32_t src
 
   dst[0] = prm.mid0; // [1..254]
   dst[1] = (prm.midFactors[0]-16)*16 + (prm.midFactors[1]-16);
+  dst[2] = prm.modelQh[0]*16 + prm.modelQh[1];
+  dst[3] = prm.modelQh[2]*16 + prm.modelQh[3];
 
-  int reslen = encode(&dst[2], &prm, src, srclen) + 2;
+  int reslen = encode(&dst[4], &prm, src, srclen) + 4;
 
   if (pInfo) {
     double modelLenBits = pInfo[1];
