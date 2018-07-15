@@ -62,6 +62,11 @@ static int decode(
   const uint8_t  bisectionTab[256][2],
   const uint16_t modelC2loTab[ARITH_CODER_QH_SCALE+2])
 {
+  const uint16_t* modelC2loBeg = modelC2loTab;
+  while (modelC2loBeg[1] == 0)
+    ++modelC2loBeg;
+  int modelOffset = modelC2loBeg - modelC2loTab;
+
   uint8_t  cntrs[258] = {0};
   uint16_t currH[258];
   uint8_t qhMtfTab[258][ARITH_CODER_QH_SCALE+1];
@@ -98,7 +103,7 @@ static int decode(
     unsigned c;
     do {
       unsigned idx = tabOffset + tMid;
-      int hVal = VAL_RANGE-modelC2loTab[1];
+      int hVal = VAL_RANGE-modelC2loBeg[1];
       int cntr = cntrs[idx];
       unsigned loadQh = 1;
       if (cntr != 0) {
@@ -124,14 +129,14 @@ static int decode(
               uint64_t pr;
               do {
                 ++b;
-              } while ((pr=modelC2loTab[b]*range-1) < value-1);
+              } while ((pr=modelC2loBeg[b]*range-1) < value-1);
               if (pr > value-1)
                 b -= 1;
               if (b > ARITH_CODER_QH_SCALE) {
                 return -104; // should not happen
               }
-              cLo = modelC2loTab[b];
-              cHi = modelC2loTab[b+1];
+              cLo = modelC2loBeg[b];
+              cHi = modelC2loBeg[b+1];
             }
             value -= range * cLo;
             range *= (cHi-cLo);  // at this point range is scaled by 2**64 - the same scale as value
@@ -169,8 +174,7 @@ static int decode(
         if (loadQh == 0)
           break;
 
-        unsigned qhVal = qh_mtf_decode(qhMtfTab[idx], b); // QH mtf decode
-        // printf("%3d %2d %2d\n", idx, b, qhVal);
+        unsigned qhVal = qh_mtf_decode(qhMtfTab[idx], b+modelOffset); // QH mtf decode
         currH[idx] = hVal = qh2h_tab[qhVal];
         cntrs[idx] = 1;
         loadQh = 0;
