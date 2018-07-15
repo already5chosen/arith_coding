@@ -9,14 +9,42 @@
 
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
 
-static uint16_t qh2h_tab[ARITH_CODER_QH_SCALE+1];
+static uint16_t qh2r_tab[ARITH_CODER_QH_SCALE+1];
+static uint8_t  h2qh_tab[ARITH_CODER_CNT_MAX+1];
+static uint16_t h2r_tab[ARITH_CODER_CNT_MAX+1];
+
+// return quantized code of h0/(h0+h1) in range [0..scale]
+static unsigned quantize_histogram_pair(unsigned h0, unsigned h1, unsigned scale)
+{
+  unsigned hTot = h0 + h1;
+  // printf("%u+%u => %.2f\n", h0, h1, (log2(hTot)*hTot-log2(h0)*h0-log2(h1)*h1)/8);
+  double M_PI = 3.1415926535897932384626433832795;
+  unsigned val = round((asin(h0*2.0/hTot - 1.0)/M_PI + 0.5)*scale);
+  if (val < 1)
+    val = 1;
+  else if (val >= scale)
+    val = scale-1;
+  return val;
+}
 
 void arithmetic_decode_init_tables()
 {
-  qh2h_tab[ARITH_CODER_QH_SCALE] = VAL_RANGE;
+  qh2r_tab[ARITH_CODER_QH_SCALE] = VAL_RANGE;
   double M_PI = 3.1415926535897932384626433832795;
   for (int i = 1; i < ARITH_CODER_QH_SCALE; ++i)
-    qh2h_tab[i] = int(round((sin((i*2-ARITH_CODER_QH_SCALE)*(M_PI/2/ARITH_CODER_QH_SCALE))+1.0)*(VAL_RANGE/2)));
+    qh2r_tab[i] = int(round((sin((i*2-ARITH_CODER_QH_SCALE)*(M_PI/2/ARITH_CODER_QH_SCALE))+1.0)*(VAL_RANGE/2)));
+
+  h2qh_tab[ARITH_CODER_CNT_MAX] = ARITH_CODER_QH_SCALE;
+  for (int i = 1; i < ARITH_CODER_CNT_MAX; ++i)
+    h2qh_tab[i] = quantize_histogram_pair(i, ARITH_CODER_CNT_MAX-i, ARITH_CODER_QH_SCALE);
+
+  for (int i = 1; i <= ARITH_CODER_CNT_MAX/2; ++i) {
+    int32_t ra0 = (int32_t(VAL_RANGE)*2*i + ARITH_CODER_CNT_MAX)/(ARITH_CODER_CNT_MAX*2);
+    int32_t ra1 = VAL_RANGE - ra0;
+    h2r_tab[i]                     = ra0;
+    h2r_tab[ARITH_CODER_CNT_MAX-i] = ra1;
+  }
+  h2r_tab[ARITH_CODER_CNT_MAX] = VAL_RANGE;
 
   arithmetic_coding_common_init_tables();
 }
@@ -47,7 +75,9 @@ static int decode(
   int modelOffset = modelC2loBeg - modelC2loTab;
 
   uint8_t  cntrs[258] = {0};
-  uint16_t currH[258];
+  uint8_t  prevH[258];
+  memset(prevH, ARITH_CODER_CNT_MAX/2, sizeof(prevH));
+  uint16_t currRa[258];
   uint8_t qhMtfTab[258][ARITH_CODER_QH_SCALE+1];
   initialize_qh_mtf_table(qhMtfTab, sizeof(qhMtfTab)/sizeof(qhMtfTab[0]));
 
@@ -81,7 +111,7 @@ static int decode(
     unsigned c;
     do {
       unsigned idx = tabOffset + tMid;
-      int hVal = VAL_RANGE-modelC2loBeg[1];
+      int raVal = VAL_RANGE-modelC2loBeg[1];
       int cntr = cntrs[idx];
       unsigned loadQh = 1;
       if (cntr != 0) {
@@ -89,20 +119,20 @@ static int decode(
         if (cntr == ARITH_CODER_CNT_MAX)
           cntr = 0;
         cntrs[idx] = cntr;
-        hVal = currH[idx];
+        raVal = currRa[idx];
         loadQh = 0;
       }
 
       unsigned b;
       for (;;) {
         b = 0;
-        if (hVal != 0) {
+        if (raVal != 0) {
           b = 1;
-          if (hVal != VAL_RANGE) {
-            b = (value >= range*(VAL_RANGE-hVal));
+          if (raVal != VAL_RANGE) {
+            b = (value >= range*(VAL_RANGE-raVal));
             // keep decoder in sync with encoder
-            uint64_t cLo = b == 0 ? 0                : VAL_RANGE - hVal;
-            uint64_t cHi = b == 0 ? VAL_RANGE - hVal : VAL_RANGE;
+            uint64_t cLo = b == 0 ? 0                : VAL_RANGE - raVal;
+            uint64_t cHi = b == 0 ? VAL_RANGE - raVal : VAL_RANGE;
             if ((loadQh & b) != 0) {
               uint64_t pr;
               do {
@@ -153,10 +183,14 @@ static int decode(
           break;
 
         unsigned qhVal = qh_mtf_decode(qhMtfTab[idx], b+modelOffset); // QH mtf decode
-        currH[idx] = hVal = qh2h_tab[qhVal];
+        unsigned prevHVal  = prevH[idx];
+        unsigned prevQhVal = h2qh_tab[prevHVal];
+        currRa[idx] = raVal = (prevQhVal == qhVal) ?  h2r_tab[prevHVal] : qh2r_tab[qhVal];
+        prevH[idx] = 0;
         cntrs[idx] = 1;
         loadQh = 0;
       }
+      prevH[idx] += b;
       tabOffset = b ? 0 : tabOffset;
       c = tMid + b;
       tMid = bisectionTab[tMid][b];

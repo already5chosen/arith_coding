@@ -30,10 +30,12 @@ static unsigned quantize_histogram_pair(unsigned h0, unsigned h1, unsigned scale
 }
 
 static uint8_t  h2qh_tab[ARITH_CODER_CNT_MAX+1];
-static uint16_t qh2h_tab[ARITH_CODER_QH_SCALE+1];
+static uint16_t h2r_tab[ARITH_CODER_CNT_MAX+1];
+static uint16_t qh2r_tab[ARITH_CODER_QH_SCALE+1];
 static double   log2_tab[ARITH_CODER_CNT_MAX+1];
 static double   entropy_tab[ARITH_CODER_CNT_MAX+1];
 static double   quantized_entropy_tab[ARITH_CODER_CNT_MAX+1];
+static double   h2nbits_tab[ARITH_CODER_CNT_MAX+1];
 
 void arithmetic_encode_init_tables()
 {
@@ -50,18 +52,27 @@ void arithmetic_encode_init_tables()
   for (int i = 1; i < ARITH_CODER_CNT_MAX; ++i)
     h2qh_tab[i] = quantize_histogram_pair(i, ARITH_CODER_CNT_MAX-i, ARITH_CODER_QH_SCALE);
 
-  qh2h_tab[ARITH_CODER_QH_SCALE] = VAL_RANGE;
+  qh2r_tab[ARITH_CODER_QH_SCALE] = VAL_RANGE;
   double M_PI = 3.1415926535897932384626433832795;
   for (int i = 1; i < ARITH_CODER_QH_SCALE; ++i)
-    qh2h_tab[i] = int(round((sin((i*2-ARITH_CODER_QH_SCALE)*(M_PI/2/ARITH_CODER_QH_SCALE))+1.0)*(VAL_RANGE/2)));
+    qh2r_tab[i] = int(round((sin((i*2-ARITH_CODER_QH_SCALE)*(M_PI/2/ARITH_CODER_QH_SCALE))+1.0)*(VAL_RANGE/2)));
 
   for (int i = 1; i < ARITH_CODER_CNT_MAX; ++i) {
-    int32_t ra = qh2h_tab[h2qh_tab[i]];
+    int32_t ra = qh2r_tab[h2qh_tab[i]];
     quantized_entropy_tab[i] =
       RANGE_BITS*ARITH_CODER_CNT_MAX
       - log2(ra)*i
       - log2(VAL_RANGE-ra)*(ARITH_CODER_CNT_MAX-i);
     // printf("%3d %2d %5d %.3f\n", i, h2qh_tab[i], ra, quantized_entropy_tab[i]);
+  }
+
+  for (int i = 1; i <= ARITH_CODER_CNT_MAX/2; ++i) {
+    int32_t ra0 = (int32_t(VAL_RANGE)*2*i + ARITH_CODER_CNT_MAX)/(ARITH_CODER_CNT_MAX*2);
+    int32_t ra1 = VAL_RANGE - ra0;
+    h2r_tab[i]                     = ra0;
+    h2r_tab[ARITH_CODER_CNT_MAX-i] = ra1;
+    h2nbits_tab[i]                     = RANGE_BITS-log2(ra0);
+    h2nbits_tab[ARITH_CODER_CNT_MAX-i] = RANGE_BITS-log2(ra1);
   }
 
   arithmetic_coding_common_init_tables();
@@ -196,6 +207,8 @@ static int prepare(encode_prm_t* prm, const uint8_t* src, int srclen, uint32_t s
   double entropy = 0;
   double quantizedEntropy = entropy;
   uint32_t qhOffsets[258], qhOffset = 0;
+  uint8_t prevH[258];
+  memset(prevH, ARITH_CODER_CNT_MAX/2, sizeof(prevH));
   uint8_t qhMtfTab[258][ARITH_CODER_QH_SCALE+1];
   initialize_qh_mtf_table(qhMtfTab, sizeof(qhMtfTab)/sizeof(qhMtfTab[0]));
   uint32_t qhHistogram[ARITH_CODER_QH_SCALE+1]={0};
@@ -223,11 +236,29 @@ static int prepare(encode_prm_t* prm, const uint8_t* src, int srclen, uint32_t s
       cntrs[idx][1] += b;
       if (cntr0 == ARITH_CODER_CNT_MAX) {
         unsigned hVal = cntrs[idx][1];
-        entropy += entropy_tab[hVal];
-        quantizedEntropy += quantized_entropy_tab[hVal];
-        unsigned qhVal = h2qh_tab[hVal]; // quantized '1'-to-total ratio
-        prm->qh[qhOffsets[idx]] = qhVal;
+        unsigned prevHVal = prevH[idx];
         cntrs[idx][0] = cntrs[idx][1] = 0;
+        prevH[idx] = hVal;
+
+        entropy += entropy_tab[hVal];
+
+        unsigned newQhVal = h2qh_tab[hVal]; // quantized '1'-to-total ratio
+        unsigned oldQhVal = h2qh_tab[prevHVal];
+        double nbits = // estimate # of bits in case we don't change qhVal
+          h2nbits_tab[prevHVal]*hVal +
+          h2nbits_tab[ARITH_CODER_CNT_MAX-prevHVal]*(ARITH_CODER_CNT_MAX-hVal);
+        unsigned qhVal = oldQhVal;
+        if (newQhVal != oldQhVal) {
+          // examine possibility of different qhVal
+          double newNbits = quantized_entropy_tab[hVal];
+          if (nbits == 0 || newNbits+1.0 < nbits) {
+            // a new qh is better
+            qhVal = newQhVal;
+            nbits = newNbits;
+          }
+        }
+        quantizedEntropy += nbits;
+        prm->qh[qhOffsets[idx]] = qhVal;
 
         int mtf_k = qh_mtf_encode(qhMtfTab[idx], qhVal);  // mtf encoder
         ++qhHistogram[mtf_k];
@@ -240,20 +271,40 @@ static int prepare(encode_prm_t* prm, const uint8_t* src, int srclen, uint32_t s
   for (int idx = 0; idx < 258; ++idx) {
     unsigned tot = cntrs[idx][0];
     if (tot != 0) {
-      unsigned h0 = cntrs[idx][1];
-      unsigned qhVal = quantize_histogram_pair(h0, tot-h0, ARITH_CODER_QH_SCALE);
-      prm->qh[qhOffsets[idx]] = qhVal;
+      unsigned hVal = cntrs[idx][1];
       entropy +=
           log2_tab[tot]*tot
-        - log2_tab[h0]*h0
-        - log2_tab[tot-h0]*(tot-h0);
-      if (h0 != 0 && h0 != tot) {
-        int32_t ra0 = qh2h_tab[qhVal];
-        quantizedEntropy +=
-            RANGE_BITS*tot
-          - log2(ra0)*h0
-          - log2(VAL_RANGE-ra0)*(tot-h0);
+        - log2_tab[hVal]*hVal
+        - log2_tab[tot-hVal]*(tot-hVal);
+
+      unsigned prevHVal = prevH[idx];
+      unsigned oldQhVal = h2qh_tab[prevHVal];
+      unsigned qhVal = 0;
+      if (hVal != 0) {
+        qhVal = ARITH_CODER_QH_SCALE;
+        if (hVal != tot) {
+          qhVal = oldQhVal;
+          double nbits = // estimate # of bits in case we don't change qhVal
+            h2nbits_tab[prevHVal]*hVal +
+            h2nbits_tab[ARITH_CODER_CNT_MAX-prevHVal]*(tot-hVal);
+          unsigned newQhVal = quantize_histogram_pair(hVal, tot-hVal, ARITH_CODER_QH_SCALE);
+          if (newQhVal != oldQhVal) {
+            // examine possibility of different qhVal
+            int32_t ra0 = qh2r_tab[newQhVal];
+            double newNbits =
+                RANGE_BITS*tot
+              - log2(ra0)*hVal
+              - log2(VAL_RANGE-ra0)*(tot-hVal);
+            if (nbits == 0 || newNbits+1.0 < nbits) {
+              // a new qh is better
+              qhVal = newQhVal;
+              nbits = newNbits;
+            }
+          }
+          quantizedEntropy += nbits;
+        }
       }
+      prm->qh[qhOffsets[idx]] = qhVal;
 
       int mtf_k = qh_mtf_encode(qhMtfTab[idx], qhVal);  // mtf encoder
       ++qhHistogram[mtf_k];
@@ -281,7 +332,9 @@ static void inc_dst(uint8_t* dst) {
 static int encode(uint8_t* dst, encode_prm_t* prm, const uint8_t* src, int srclen)
 {
   uint8_t cntrs[258] = {0};
-  uint16_t currH[258];
+  uint16_t currRa[258];
+  uint8_t prevH[258];
+  memset(prevH, ARITH_CODER_CNT_MAX/2, sizeof(prevH));
   uint8_t qhMtfTab[258][ARITH_CODER_QH_SCALE+1];
   initialize_qh_mtf_table(qhMtfTab, sizeof(qhMtfTab)/sizeof(qhMtfTab[0]));
 
@@ -312,7 +365,12 @@ static int encode(uint8_t* dst, encode_prm_t* prm, const uint8_t* src, int srcle
       unsigned idx = tabOffset + tMid;
       int cntr = cntrs[idx];
       if (cntr == 0) {
+        unsigned prevHVal = prevH[idx];
+        prevH[idx] = 0;
+
         unsigned qhVal = *qh++;
+        unsigned prevQhVal = h2qh_tab[prevHVal];
+
         int mtf_k = qh_mtf_encode(qhMtfTab[idx], qhVal);  // mtf encoder
         unsigned cLo = prm->modelC2loTab[mtf_k+0];
         unsigned cHi = prm->modelC2loTab[mtf_k+1];
@@ -321,16 +379,18 @@ static int encode(uint8_t* dst, encode_prm_t* prm, const uint8_t* src, int srcle
         wrBits[1] = cRa;
         if (cRa != VAL_RANGE)
           wrBits += 2;
-        currH[idx] = qhVal != ARITH_CODER_QH_SCALE ? qh2h_tab[qhVal] : 0;
+        unsigned raVal = (qhVal==prevQhVal) ? h2r_tab[prevHVal] : qh2r_tab[qhVal];
+        currRa[idx] = raVal;
       }
       ++cntr;
       if (cntr == ARITH_CODER_CNT_MAX)
         cntr = 0;
       cntrs[idx] = cntr;
 
-      unsigned cRa1 = currH[idx];
+      unsigned cRa1 = currRa[idx];
       unsigned cRa0 = VAL_RANGE - cRa1;
       unsigned b = c > tMid;
+      prevH[idx] += b;
       tabOffset = b == 0 ? tabOffset : 0;
       wrBits[0] = b == 0 ? 0         : cRa0;
       wrBits[1] = b == 0 ? cRa0      : cRa1;
