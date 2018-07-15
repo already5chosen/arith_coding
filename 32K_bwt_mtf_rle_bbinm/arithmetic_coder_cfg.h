@@ -1,6 +1,14 @@
+#ifndef INCLUDED_ARITHMETIC_CODER_CFG_H
+#define INCLUDED_ARITHMETIC_CODER_CFG_H
+
 enum {
   RANGE_BITS           = 15,
   ARITH_CODER_CNT_MAX  = 255,
   ARITH_CODER_QH_SCALE = 15,
   ARITH_CODER_QH_DECEY =  8,
+  MODEL_QH_HALFLEN     =  4,
+  MODEL_QH_LEN         = MODEL_QH_HALFLEN*2,
+  QQH_SCALE            = 15,  // not necessarily the same as ARITH_CODER_QH_SCALE
 };
+
+#endif

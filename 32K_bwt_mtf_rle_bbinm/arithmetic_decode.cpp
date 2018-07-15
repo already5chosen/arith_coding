@@ -5,21 +5,11 @@
 
 #include "arithmetic_decode.h"
 #include "arithmetic_coder_cfg.h"
+#include "arithmetic_coding_common.h"
 
 static const unsigned VAL_RANGE = 1u << RANGE_BITS;
-static const unsigned QQH_SCALE = 15;               // not necessarily the same as ARITH_CODER_QH_SCALE
-static const unsigned MODEL_QH_LEN = 4;
 
 static uint16_t qh2h_tab[ARITH_CODER_QH_SCALE+1];
-static uint8_t  qhMtf0[ARITH_CODER_QH_SCALE+1];
-static uint32_t model_qh_tail_tab[ARITH_CODER_QH_SCALE+1];
-static uint32_t model_qh2h_tab[QQH_SCALE] = {
-  0,
-    46927670,   185659716,   410132882,   710536612,
-  1073741824,  1483874706,  1923010482,  2371956814,
-  2811092590,  3221225472,  3584430684,  3884834414,
-  4109307580,  4248039626,
-};
 
 void arithmetic_decode_init_tables()
 {
@@ -28,18 +18,7 @@ void arithmetic_decode_init_tables()
   for (int i = 1; i < ARITH_CODER_QH_SCALE; ++i)
     qh2h_tab[i] = int(round((sin((i*2-ARITH_CODER_QH_SCALE)*(M_PI/2/ARITH_CODER_QH_SCALE))+1.0)*(VAL_RANGE/2)));
 
-  uint64_t val = uint64_t(1) << 32;
-  uint64_t sum = val;
-  for (int i = MODEL_QH_LEN+1; i <= ARITH_CODER_QH_SCALE; ++i) {
-    val -= val / ARITH_CODER_QH_DECEY;
-    sum += val;
-    model_qh_tail_tab[i] = (val << 32)/sum;
-  }
-
-  for (int i = 0; i <= ARITH_CODER_QH_SCALE/2; ++i)
-    qhMtf0[i] = ARITH_CODER_QH_SCALE/2 - i;
-  for (int i = ARITH_CODER_QH_SCALE/2+1; i <= ARITH_CODER_QH_SCALE; ++i)
-    qhMtf0[i] = i;
+  arithmetic_coding_common_init_tables();
 }
 
 static int qh_mtf_decode(uint8_t mtf_t[], int mtfC)
@@ -70,8 +49,7 @@ static int decode(
   uint8_t  cntrs[258] = {0};
   uint16_t currH[258];
   uint8_t qhMtfTab[258][ARITH_CODER_QH_SCALE+1];
-  for (int i = 0; i < 258; ++i)
-    memcpy(qhMtfTab[i], qhMtf0, sizeof(qhMtf0));
+  initialize_qh_mtf_table(qhMtfTab, sizeof(qhMtfTab)/sizeof(qhMtfTab[0]));
 
   // initialize move-to-front decoder table
   uint8_t mtf_t[256];
@@ -229,42 +207,6 @@ static int BuildBisectionTab(uint8_t tab[][2], unsigned lo, unsigned hi, unsigne
   return 1;
 }
 
-static void build_qh_encode_table(uint16_t c2lo[ARITH_CODER_QH_SCALE+2], const uint8_t modelQh[MODEL_QH_LEN])
-{
-  unsigned ranges[ARITH_CODER_QH_SCALE+1]={0};
-  unsigned remVal = VAL_RANGE;
-  for (int i = 0; i < MODEL_QH_LEN; ++i) {
-    uint32_t qhVal = modelQh[i];
-    if (qhVal != QQH_SCALE) {
-      unsigned ra = (uint64_t(model_qh2h_tab[qhVal]) * remVal + (uint32_t(1)<<31)) >> 32;
-      if (remVal-ra < ARITH_CODER_QH_SCALE-i)
-        ra = remVal - (ARITH_CODER_QH_SCALE-i);
-      ranges[i] = ra;
-      remVal   -= ra;
-    } else {
-      ranges[i] = remVal;
-      remVal = 0;
-      break;
-    }
-  }
-  if (remVal > 0) {
-    for (int i = ARITH_CODER_QH_SCALE; i > MODEL_QH_LEN; --i) {
-      unsigned ra = (uint64_t(model_qh_tail_tab[i]) * remVal + (uint32_t(1)<<31)) >> 32;
-      if (ra == 0) ra = 1;
-      ranges[i] = ra;
-      remVal -= ra;
-    }
-    ranges[MODEL_QH_LEN] = remVal;
-  }
-
-  unsigned acc = 0;
-  for (int i = 0; i < ARITH_CODER_QH_SCALE+1; ++i) {
-    c2lo[i] = acc;
-    acc += ranges[i];
-  }
-  c2lo[ARITH_CODER_QH_SCALE+1] = VAL_RANGE;
-}
-
 // Arithmetic decode followed by RLE and MTF decode
 int arithmetic_decode(
   uint8_t*       dst,
@@ -281,7 +223,8 @@ int arithmetic_decode(
     pInfo[3] = 0;
     pInfo[4] = 0;
   }
-  if (srclen < 5)
+  const int srcHdrLen = MODEL_QH_HALFLEN + 2;
+  if (srclen < srcHdrLen+1)
     return -1;
 
   unsigned mid0 = src[0];
@@ -300,14 +243,14 @@ int arithmetic_decode(
   bisectionTab[mid0+1][1] = BuildBisectionTab(bisectionTab, mid0+2, 256, midFactor1);
 
   uint8_t modelQh[MODEL_QH_LEN];
-  modelQh[0] = src[2] / 16;
-  modelQh[1] = src[2] % 16;
-  modelQh[2] = src[3] / 16;
-  modelQh[3] = src[3] % 16;
+  for (int i = 0; i < MODEL_QH_HALFLEN; ++i) {
+    modelQh[i*2+0] = src[i+2] / 16;
+    modelQh[i*2+1] = src[i+2] % 16;
+  }
   uint16_t modelC2loTab[ARITH_CODER_QH_SCALE+2];
   build_qh_encode_table(modelC2loTab, modelQh);
 
   memset(histogram, 0, sizeof(histogram[0])*256);
-  int textlen = decode(dst, dstlen, histogram, &src[4], srclen-4, bisectionTab, modelC2loTab);
+  int textlen = decode(dst, dstlen, histogram, &src[srcHdrLen], srclen-srcHdrLen, bisectionTab, modelC2loTab);
   return textlen;
 }
