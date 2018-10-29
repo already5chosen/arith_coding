@@ -566,6 +566,123 @@ static int ec_GFp_simple_add(const EC_GROUP *group, EC_POINT *r, const EC_POINT 
     return ret;
 }
 
+#if 0
+// derived from ec_GFp_simple_point_get_affine_coordinates()
+// in \openssl-1.1.1\crypto\ec\ecp_smpl.c
+int ec_GFp_simple_point_get_affine_coordinates(const EC_GROUP *group,
+                                               const EC_POINT *point,
+                                               BIGNUM *x, BIGNUM *y,
+                                               BN_CTX *ctx)
+{
+    BN_CTX *new_ctx = NULL;
+    BIGNUM *Z, *Z_1, *Z_2, *Z_3;
+    const BIGNUM *Z_;
+    int ret = 0;
+
+    if (EC_POINT_is_at_infinity(group, point)) {
+        ECerr(EC_F_EC_GFP_SIMPLE_POINT_GET_AFFINE_COORDINATES,
+              EC_R_POINT_AT_INFINITY);
+        return 0;
+    }
+
+    if (ctx == NULL) {
+        ctx = new_ctx = BN_CTX_new();
+        if (ctx == NULL)
+            return 0;
+    }
+
+    BN_CTX_start(ctx);
+    Z = BN_CTX_get(ctx);
+    Z_1 = BN_CTX_get(ctx);
+    Z_2 = BN_CTX_get(ctx);
+    Z_3 = BN_CTX_get(ctx);
+    if (Z_3 == NULL)
+        goto err;
+
+    /* transform  (X, Y, Z)  into  (x, y) := (X/Z^2, Y/Z^3) */
+
+    if (group->meth->field_decode) {
+        if (!group->meth->field_decode(group, Z, point->Z, ctx))
+            goto err;
+        Z_ = Z;
+    } else {
+        Z_ = point->Z;
+    }
+
+    if (BN_is_one(Z_)) {
+        if (group->meth->field_decode) {
+            if (x != NULL) {
+                if (!group->meth->field_decode(group, x, point->X, ctx))
+                    goto err;
+            }
+            if (y != NULL) {
+                if (!group->meth->field_decode(group, y, point->Y, ctx))
+                    goto err;
+            }
+        } else {
+            if (x != NULL) {
+                if (!BN_copy(x, point->X))
+                    goto err;
+            }
+            if (y != NULL) {
+                if (!BN_copy(y, point->Y))
+                    goto err;
+            }
+        }
+    } else {
+        if (!BN_mod_inverse(Z_1, Z_, group->field, ctx)) {
+            ECerr(EC_F_EC_GFP_SIMPLE_POINT_GET_AFFINE_COORDINATES,
+                  ERR_R_BN_LIB);
+            goto err;
+        }
+
+        if (group->meth->field_encode == 0) {
+            /* field_sqr works on standard representation */
+            if (!group->meth->field_sqr(group, Z_2, Z_1, ctx))
+                goto err;
+        } else {
+            if (!BN_mod_sqr(Z_2, Z_1, group->field, ctx))
+                goto err;
+        }
+
+        if (x != NULL) {
+            /*
+             * in the Montgomery case, field_mul will cancel out Montgomery
+             * factor in X:
+             */
+            if (!group->meth->field_mul(group, x, point->X, Z_2, ctx))
+                goto err;
+        }
+
+        if (y != NULL) {
+            if (group->meth->field_encode == 0) {
+                /*
+                 * field_mul works on standard representation
+                 */
+                if (!group->meth->field_mul(group, Z_3, Z_2, Z_1, ctx))
+                    goto err;
+            } else {
+                if (!BN_mod_mul(Z_3, Z_2, Z_1, group->field, ctx))
+                    goto err;
+            }
+
+            /*
+             * in the Montgomery case, field_mul will cancel out Montgomery
+             * factor in Y:
+             */
+            if (!group->meth->field_mul(group, y, point->Y, Z_3, ctx))
+                goto err;
+        }
+    }
+
+    ret = 1;
+
+ err:
+    BN_CTX_end(ctx);
+    BN_CTX_free(new_ctx);
+    return ret;
+}
+#endif
 
 /** Computes r = q1 * m1 + q2 * m2
  *  \param  group  underlying EC_GROUP object
