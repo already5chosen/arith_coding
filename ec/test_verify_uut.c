@@ -195,6 +195,153 @@ int ec_GFp_nist_field_sqr(
 }
 #endif
 
+
+#if 0
+// derived from ec_GFp_simple_dbl()
+// in \openssl-1.1.1\crypto\ec\ecp_smpl.c
+int ec_GFp_simple_dbl(const EC_GROUP *group, EC_POINT *r, const EC_POINT *a,
+                      BN_CTX *ctx)
+{
+    int (*field_mul) (const EC_GROUP *, BIGNUM *, const BIGNUM *,
+                      const BIGNUM *, BN_CTX *);
+    int (*field_sqr) (const EC_GROUP *, BIGNUM *, const BIGNUM *, BN_CTX *);
+    const BIGNUM *p;
+    BN_CTX *new_ctx = NULL;
+    BIGNUM *n0, *n1, *n2, *n3;
+    int ret = 0;
+
+    if (EC_POINT_is_at_infinity(group, a)) {
+        BN_zero(r->Z);
+        r->Z_is_one = 0;
+        return 1;
+    }
+
+    field_mul = group->meth->field_mul;
+    field_sqr = group->meth->field_sqr;
+    p = group->field;
+
+    if (ctx == NULL) {
+        ctx = new_ctx = BN_CTX_new();
+        if (ctx == NULL)
+            return 0;
+    }
+
+    BN_CTX_start(ctx);
+    n0 = BN_CTX_get(ctx);
+    n1 = BN_CTX_get(ctx);
+    n2 = BN_CTX_get(ctx);
+    n3 = BN_CTX_get(ctx);
+    if (n3 == NULL)
+        goto err;
+
+    /*
+     * Note that in this function we must not read components of 'a' once we
+     * have written the corresponding components of 'r'. ('r' might the same
+     * as 'a'.)
+     */
+
+    /* n1 */
+    if (a->Z_is_one) {
+        if (!field_sqr(group, n0, a->X, ctx))
+            goto err;
+        if (!BN_mod_lshift1_quick(n1, n0, p))
+            goto err;
+        if (!BN_mod_add_quick(n0, n0, n1, p))
+            goto err;
+        if (!BN_mod_add_quick(n1, n0, group->a, p))
+            goto err;
+        /* n1 = 3 * X_a^2 + a_curve */
+    } else if (group->a_is_minus3) {
+        if (!field_sqr(group, n1, a->Z, ctx))
+            goto err;
+        if (!BN_mod_add_quick(n0, a->X, n1, p))
+            goto err;
+        if (!BN_mod_sub_quick(n2, a->X, n1, p))
+            goto err;
+        if (!field_mul(group, n1, n0, n2, ctx))
+            goto err;
+        if (!BN_mod_lshift1_quick(n0, n1, p))
+            goto err;
+        if (!BN_mod_add_quick(n1, n0, n1, p))
+            goto err;
+        /*-
+         * n1 = 3 * (X_a + Z_a^2) * (X_a - Z_a^2)
+         *    = 3 * X_a^2 - 3 * Z_a^4
+         */
+    } else {
+        if (!field_sqr(group, n0, a->X, ctx))
+            goto err;
+        if (!BN_mod_lshift1_quick(n1, n0, p))
+            goto err;
+        if (!BN_mod_add_quick(n0, n0, n1, p))
+            goto err;
+        if (!field_sqr(group, n1, a->Z, ctx))
+            goto err;
+        if (!field_sqr(group, n1, n1, ctx))
+            goto err;
+        if (!field_mul(group, n1, n1, group->a, ctx))
+            goto err;
+        if (!BN_mod_add_quick(n1, n1, n0, p))
+            goto err;
+        /* n1 = 3 * X_a^2 + a_curve * Z_a^4 */
+    }
+
+    /* Z_r */
+    if (a->Z_is_one) {
+        if (!BN_copy(n0, a->Y))
+            goto err;
+    } else {
+        if (!field_mul(group, n0, a->Y, a->Z, ctx))
+            goto err;
+    }
+    if (!BN_mod_lshift1_quick(r->Z, n0, p))
+        goto err;
+    r->Z_is_one = 0;
+    /* Z_r = 2 * Y_a * Z_a */
+
+    /* n2 */
+    if (!field_sqr(group, n3, a->Y, ctx))
+        goto err;
+    if (!field_mul(group, n2, a->X, n3, ctx))
+        goto err;
+    if (!BN_mod_lshift_quick(n2, n2, 2, p))
+        goto err;
+    /* n2 = 4 * X_a * Y_a^2 */
+
+    /* X_r */
+    if (!BN_mod_lshift1_quick(n0, n2, p))
+        goto err;
+    if (!field_sqr(group, r->X, n1, ctx))
+        goto err;
+    if (!BN_mod_sub_quick(r->X, r->X, n0, p))
+        goto err;
+    /* X_r = n1^2 - 2 * n2 */
+
+    /* n3 */
+    if (!field_sqr(group, n0, n3, ctx))
+        goto err;
+    if (!BN_mod_lshift_quick(n3, n0, 3, p))
+        goto err;
+    /* n3 = 8 * Y_a^4 */
+
+    /* Y_r */
+    if (!BN_mod_sub_quick(n0, n2, r->X, p))
+        goto err;
+    if (!field_mul(group, n0, n1, n0, ctx))
+        goto err;
+    if (!BN_mod_sub_quick(r->Y, n0, n3, p))
+        goto err;
+    /* Y_r = n1 * (n2 - X_r) - n3 */
+
+    ret = 1;
+
+ err:
+    BN_CTX_end(ctx);
+    BN_CTX_free(new_ctx);
+    return ret;
+}
+#endif
+
 #if 1
 // derived from ec_GFp_simple_add()
 // in \openssl-1.1.1\crypto\ec\ecp_smpl.c
