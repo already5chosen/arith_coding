@@ -289,38 +289,39 @@ static int ec_point_dbl(
             goto err;
         /* n1 = 3 * X_a^2 + a_curve */
   //  } else if (group->a_is_minus3) {
-  //      if (!field_sqr(group, n1, a->Z, ctx))
-  //          goto err;
-  //      if (!BN_mod_add_quick(n0, a->X, n1, p))
-  //          goto err;
-  //      if (!BN_mod_sub_quick(n2, a->X, n1, p))
-  //          goto err;
-  //      if (!field_mul(group, n1, n0, n2, ctx))
-  //          goto err;
-  //      if (!BN_mod_lshift1_quick(n0, n1, p))
-  //          goto err;
-  //      if (!BN_mod_add_quick(n1, n0, n1, p))
-  //          goto err;
-  //      /*-
-  //       * n1 = 3 * (X_a + Z_a^2) * (X_a - Z_a^2)
-  //       *    = 3 * X_a^2 - 3 * Z_a^4
-  //       */
     } else {
-        if (!field_sqr(group, n0, a->X, ctx))
-            goto err;
-        if (!BN_mod_lshift1_quick(n1, n0, p))
-            goto err;
-        if (!BN_mod_add_quick(n0, n0, n1, p))
-            goto err;
         if (!field_sqr(group, n1, a->Z, ctx))
             goto err;
-        if (!field_sqr(group, n1, n1, ctx))
+        if (!BN_mod_add_quick(n0, a->X, n1, p))
             goto err;
-        if (!field_mul(group, n1, n1, st_group_a, ctx))
+        if (!BN_mod_sub_quick(n2, a->X, n1, p))
             goto err;
-        if (!BN_mod_add_quick(n1, n1, n0, p))
+        if (!field_mul(group, n1, n0, n2, ctx))
             goto err;
-        /* n1 = 3 * X_a^2 + a_curve * Z_a^4 */
+        if (!BN_mod_lshift1_quick(n0, n1, p))
+            goto err;
+        if (!BN_mod_add_quick(n1, n0, n1, p))
+            goto err;
+        /*-
+         * n1 = 3 * (X_a + Z_a^2) * (X_a - Z_a^2)
+         *    = 3 * X_a^2 - 3 * Z_a^4
+         */
+  //  } else {
+  //      if (!field_sqr(group, n0, a->X, ctx))
+  //          goto err;
+  //      if (!BN_mod_lshift1_quick(n1, n0, p))
+  //          goto err;
+  //      if (!BN_mod_add_quick(n0, n0, n1, p))
+  //          goto err;
+  //      if (!field_sqr(group, n1, a->Z, ctx))
+  //          goto err;
+  //      if (!field_sqr(group, n1, n1, ctx))
+  //          goto err;
+  //      if (!field_mul(group, n1, n1, st_group_a, ctx))
+  //          goto err;
+  //      if (!BN_mod_add_quick(n1, n1, n0, p))
+  //          goto err;
+  //      /* n1 = 3 * X_a^2 + a_curve * Z_a^4 */
     }
 
     /* Z_r */
