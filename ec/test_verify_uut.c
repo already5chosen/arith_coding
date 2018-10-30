@@ -278,16 +278,16 @@ static int ec_point_dbl(
      */
 
     /* n1 */
-  //  if (a->Z_is_one) {
-  //      if (!field_sqr(group, n0, a->X, ctx))
-  //          goto err;
-  //      if (!BN_mod_lshift1_quick(n1, n0, p))
-  //          goto err;
-  //      if (!BN_mod_add_quick(n0, n0, n1, p))
-  //          goto err;
-  //      if (!BN_mod_add_quick(n1, n0, group->a, p))
-  //          goto err;
-  //      /* n1 = 3 * X_a^2 + a_curve */
+    if (a->Z_is_one) {
+        if (!field_sqr(group, n0, a->X, ctx))
+            goto err;
+        if (!BN_mod_lshift1_quick(n1, n0, p))
+            goto err;
+        if (!BN_mod_add_quick(n0, n0, n1, p))
+            goto err;
+        if (!BN_mod_add_quick(n1, n0, st_group_a, p))
+            goto err;
+        /* n1 = 3 * X_a^2 + a_curve */
   //  } else if (group->a_is_minus3) {
   //      if (!field_sqr(group, n1, a->Z, ctx))
   //          goto err;
@@ -305,7 +305,7 @@ static int ec_point_dbl(
   //       * n1 = 3 * (X_a + Z_a^2) * (X_a - Z_a^2)
   //       *    = 3 * X_a^2 - 3 * Z_a^4
   //       */
-  //  } else {
+    } else {
         if (!field_sqr(group, n0, a->X, ctx))
             goto err;
         if (!BN_mod_lshift1_quick(n1, n0, p))
@@ -321,16 +321,16 @@ static int ec_point_dbl(
         if (!BN_mod_add_quick(n1, n1, n0, p))
             goto err;
         /* n1 = 3 * X_a^2 + a_curve * Z_a^4 */
-  //  }
+    }
 
     /* Z_r */
-  // if (a->Z_is_one) {
-  //     if (!BN_copy(n0, a->Y))
-  //         goto err;
-  // } else {
+    if (a->Z_is_one) {
+        if (!BN_copy(n0, a->Y))
+            goto err;
+    } else {
         if (!field_mul(group, n0, a->Y, a->Z, ctx))
             goto err;
-  //  }
+    }
     if (!BN_mod_lshift1_quick(r->Z, n0, p))
         goto err;
     r->Z_is_one = 0;
@@ -430,14 +430,14 @@ static int ec_point_add(
      */
 
     /* n1, n2 */
-  //  if (b->Z_is_one) {
-  //      if (!BN_copy(n1, a->X))
-  //          goto end;
-  //      if (!BN_copy(n2, a->Y))
-  //          goto end;
-  //      /* n1 = X_a */
-  //      /* n2 = Y_a */
-  //  } else {
+    if (b->Z_is_one) {
+        if (!BN_copy(n1, a->X))
+            goto end;
+        if (!BN_copy(n2, a->Y))
+            goto end;
+        /* n1 = X_a */
+        /* n2 = Y_a */
+    } else {
         if (!field_sqr(group, n0, b->Z, ctx))
             goto end;
         if (!field_mul(group, n1, a->X, n0, ctx))
@@ -449,17 +449,17 @@ static int ec_point_add(
         if (!field_mul(group, n2, a->Y, n0, ctx))
             goto end;
         /* n2 = Y_a * Z_b^3 */
-  //  }
+    }
 
     /* n3, n4 */
-  //  if (a->Z_is_one) {
-  //      if (!BN_copy(n3, b->X))
-  //          goto end;
-  //      if (!BN_copy(n4, b->Y))
-  //          goto end;
-  //      /* n3 = X_b */
-  //      /* n4 = Y_b */
-  //  } else {
+    if (a->Z_is_one) {
+        if (!BN_copy(n3, b->X))
+            goto end;
+        if (!BN_copy(n4, b->Y))
+            goto end;
+        /* n3 = X_b */
+        /* n4 = Y_b */
+    } else {
         if (!field_sqr(group, n0, a->Z, ctx))
             goto end;
         if (!field_mul(group, n3, b->X, n0, ctx))
@@ -471,7 +471,7 @@ static int ec_point_add(
         if (!field_mul(group, n4, b->Y, n0, ctx))
             goto end;
         /* n4 = Y_b * Z_a^3 */
-  //  }
+    }
 
     /* n5, n6 */
     if (!BN_mod_sub_quick(n5, n1, n3, p))
@@ -506,23 +506,23 @@ static int ec_point_add(
     /* 'n8' = n2 + n4 */
 
     /* Z_r */
-  //  if (a->Z_is_one && b->Z_is_one) {
-  //      if (!BN_copy(r->Z, n5))
-  //          goto end;
-  //  } else {
-  //      if (a->Z_is_one) {
-  //          if (!BN_copy(n0, b->Z))
-  //              goto end;
-  //      } else if (b->Z_is_one) {
-  //          if (!BN_copy(n0, a->Z))
-  //              goto end;
-  //      } else {
+    if (a->Z_is_one && b->Z_is_one) {
+        if (!BN_copy(r->Z, n5))
+            goto end;
+    } else {
+        if (a->Z_is_one) {
+            if (!BN_copy(n0, b->Z))
+                goto end;
+        } else if (b->Z_is_one) {
+            if (!BN_copy(n0, a->Z))
+                goto end;
+        } else {
             if (!field_mul(group, n0, a->Z, b->Z, ctx))
                 goto end;
-  //      }
+        }
         if (!field_mul(group, r->Z, n0, n5, ctx))
             goto end;
-  //  }
+    }
     r->Z_is_one = 0;
     /* Z_r = Z_a * Z_b * n5 */
 
