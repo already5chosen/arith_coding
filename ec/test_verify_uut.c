@@ -22,6 +22,7 @@ typedef struct {
   BIGNUM* a;
   // BIGNUM* b; // it seems, as long as we trust public key, parameter b is not used in verification process
   BIGNUM* order;
+  BIGNUM* inv_order;
   ec_point_t generator;
 } ec_group_t;
 
@@ -37,6 +38,10 @@ static const unsigned char generator_order[] = {
   0x31, 0x28, 0xD2, 0xB4,  0xB1, 0xC9, 0x6B, 0x14,  0x36, 0xF8, 0xDE, 0x99,
   0xFF, 0xFF, 0xFF, 0xFF,  0xFF, 0xFF, 0xFF, 0xFF,  0xFF, 0xFF, 0xFF, 0xFF,
 };
+static const unsigned char generator_inv_order[] = {
+  0x2f, 0x28, 0xD2, 0xB4,  0xB1, 0xC9, 0x6B, 0x14,  0x36, 0xF8, 0xDE, 0x99,
+  0xFF, 0xFF, 0xFF, 0xFF,  0xFF, 0xFF, 0xFF, 0xFF,  0xFF, 0xFF, 0xFF, 0xFF,
+};
 
 static const unsigned char generator_x[] = {
   0x12, 0x10, 0xFF, 0x82,  0xFD, 0x0A, 0xFF, 0xF4,  0x00, 0x88, 0xA1, 0x43,
@@ -47,7 +52,7 @@ static const unsigned char generator_y[] = {
   0xed, 0x11, 0x10, 0x63,  0x78, 0xda, 0xc8, 0xff,  0x95, 0x2b, 0x19, 0x07,
 };
 
-static ec_group_t st_group =   { NULL, NULL, NULL, { NULL, NULL, NULL } };
+static ec_group_t st_group =   { NULL, NULL, NULL, NULL, { NULL, NULL, NULL } };
 static ec_point_t st_pub_key = { NULL, NULL, NULL };
 
 static void ec_point_free(ec_point_t* pt)
@@ -84,6 +89,10 @@ void uut_cleanup(void)
     BN_free(st_group.order);
     st_group.order = 0;
   }
+  if (st_group.inv_order) {
+    BN_free(st_group.inv_order);
+    st_group.inv_order = 0;
+  }
   ec_point_free(&st_group.generator);
   ec_point_free(&st_pub_key);
 }
@@ -93,6 +102,7 @@ int uut_init(void) {
   if (!(st_group.a = BN_new())) goto err;
   // if (!(st_group.b = BN_new())) goto err;
   if (!(st_group.order = BN_new())) goto err;
+  if (!(st_group.inv_order = BN_new())) goto err;
 
   if (!(st_group.generator.X = BN_new())) goto err;
   if (!(st_group.generator.Y = BN_new())) goto err;
@@ -105,6 +115,7 @@ int uut_init(void) {
   if (!BN_lebin2bn(generator_p, ECDSA_NBYTES, st_group.field)) goto err;
   if (!BN_lebin2bn(generator_a, ECDSA_NBYTES, st_group.a))     goto err;
   if (!BN_lebin2bn(generator_order, ECDSA_NBYTES, st_group.order)) goto err;
+  if (!BN_lebin2bn(generator_inv_order, ECDSA_NBYTES, st_group.inv_order)) goto err;
 
   if (!BN_lebin2bn(generator_x, ECDSA_NBYTES, st_group.generator.X)) goto err;
   if (!BN_lebin2bn(generator_y, ECDSA_NBYTES, st_group.generator.Y)) goto err;
@@ -148,16 +159,7 @@ static int ec_group_do_inverse_ord(
     if ((e = BN_CTX_get(ctx)) == NULL)
         goto err;
 
-    const BIGNUM *order = group->order;
-    if (!order)
-      goto err;
-
-    if (!BN_set_word(e, 2))
-        goto err;
-    if (!BN_sub(e, order, e))
-        goto err;
-
-    if (!BN_mod_exp(res, x, e, order, ctx))
+    if (!BN_mod_exp(res, x, group->inv_order, group->order, ctx))
         goto err;
 
     ret = 1;
