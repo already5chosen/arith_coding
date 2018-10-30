@@ -1,10 +1,10 @@
-// #include "ecs_locl.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <openssl/ec.h>
-#include <openssl/obj_mac.h>
+#include <openssl/bn.h>
 #include <openssl/err.h>
+
+#include "ecerr.h"
 
 enum {
   ECDSA_NBYTES = 24,
@@ -24,6 +24,28 @@ typedef struct {
   BIGNUM* order;
   ec_point_t generator;
 } ec_group_t;
+
+static const unsigned char generator_p[] = {
+  0xFF, 0xFF, 0xFF, 0xFF,  0xFF, 0xFF, 0xFF, 0xFF,  0xFF, 0xFF, 0xFF, 0xFF,
+  0xFF, 0xFF, 0xFF, 0xFE,  0xFF, 0xFF, 0xFF, 0xFF,  0xFF, 0xFF, 0xFF, 0xFF,
+};
+static const unsigned char generator_a[] = {
+  0xFF, 0xFF, 0xFF, 0xFF,  0xFF, 0xFF, 0xFF, 0xFF,  0xFF, 0xFF, 0xFF, 0xFF,
+  0xFF, 0xFF, 0xFF, 0xFE,  0xFF, 0xFF, 0xFF, 0xFF,  0xFF, 0xFF, 0xFF, 0xFC,
+};
+static const unsigned char generator_order[] = {
+  0xFF, 0xFF, 0xFF, 0xFF,  0xFF, 0xFF, 0xFF, 0xFF,  0xFF, 0xFF, 0xFF, 0xFF,
+  0x99, 0xDE, 0xF8, 0x36,  0x14, 0x6B, 0xC9, 0xB1,  0xB4, 0xD2, 0x28, 0x31
+};
+
+static const unsigned char generator_x[] = {
+  0x18, 0x8D, 0xA8, 0x0E,  0xB0, 0x30, 0x90, 0xF6,  0x7C, 0xBF, 0x20, 0xEB,
+  0x43, 0xA1, 0x88, 0x00,  0xF4, 0xFF, 0x0A, 0xFD,  0x82, 0xFF, 0x10, 0x12,
+};
+static const unsigned char generator_y[] = {
+  0x07, 0x19, 0x2b, 0x95,  0xff, 0xc8, 0xda, 0x78,  0x63, 0x10, 0x11, 0xed,
+  0x6b, 0x24, 0xcd, 0xd5,  0x73, 0xf9, 0x77, 0xa1,  0x1e, 0x79, 0x48, 0x11,
+};
 
 static ec_group_t st_group =   { NULL, NULL, NULL, { NULL, NULL, NULL } };
 static ec_point_t st_pub_key = { NULL, NULL, NULL };
@@ -80,25 +102,16 @@ int uut_init(void) {
   if (!(st_pub_key.Y = BN_new())) goto err;
   if (!(st_pub_key.Z = BN_new())) goto err;
 
-  EC_GROUP* group = EC_GROUP_new_by_curve_name(NID_X9_62_prime192v1);
-  if (group) {
-    if (EC_GROUP_get_order(group, st_group.order, 0)) {
-      if (EC_GROUP_get_curve(group, st_group.field,
-                             st_group.a, NULL, 0)) {
-        const EC_POINT* gen = EC_GROUP_get0_generator(group);
-        if (gen) {
-          if (EC_POINT_get_Jprojective_coordinates_GFp(
-            group, gen, st_group.generator.X,
-            st_group.generator.Y, st_group.generator.Z, NULL)) {
-            st_group.generator.Z_is_one = BN_is_one(st_group.generator.Z);
-            EC_GROUP_free(group);
-            return 1;
-          }
-        }
-      }
-    }
-    EC_GROUP_free(group);
-  }
+  if (!BN_bin2bn(generator_p, ECDSA_NBYTES, st_group.field)) goto err;
+  if (!BN_bin2bn(generator_a, ECDSA_NBYTES, st_group.a))     goto err;
+  if (!BN_bin2bn(generator_order, ECDSA_NBYTES, st_group.order)) goto err;
+
+  if (!BN_bin2bn(generator_x, ECDSA_NBYTES, st_group.generator.X)) goto err;
+  if (!BN_bin2bn(generator_y, ECDSA_NBYTES, st_group.generator.Y)) goto err;
+  if (!BN_one(st_group.generator.Z)) goto err;
+  st_group.generator.Z_is_one = 1;
+
+  return 1;
 
   err:
   uut_cleanup();
