@@ -16,12 +16,17 @@ typedef struct {
   BIGNUM *Z;    // Jacobian projective coordinates: (X, Y, Z) represents (X/Z^2, Y/Z^3) if Z != 0
   int Z_is_one; // enable optimized point arithmetics for special case
 } ec_point_t;
-static EC_GROUP* st_group = NULL;
-static ec_point_t st_group_g = { NULL, NULL, NULL };
+
+typedef struct {
+  BIGNUM* field;
+  BIGNUM* a;
+  // BIGNUM* b; // it seems, as long as we trust public key, parameter b is not used in verification process
+  BIGNUM* order;
+  ec_point_t generator;
+} ec_group_t;
+
+static ec_group_t st_group =   { NULL, NULL, NULL, { NULL, NULL, NULL } };
 static ec_point_t st_pub_key = { NULL, NULL, NULL };
-static BIGNUM*   st_group_p = NULL;
-static BIGNUM*   st_group_a = NULL;
-static BIGNUM*   st_group_b = NULL;
 
 static void ec_point_free(ec_point_t* pt)
 {
@@ -41,54 +46,59 @@ static void ec_point_free(ec_point_t* pt)
 
 void uut_cleanup(void)
 {
-  if (st_group_p) {
-    BN_free(st_group_p);
-    st_group_p = 0;
+  if (st_group.field) {
+    BN_free(st_group.field);
+    st_group.field = 0;
   }
-  if (st_group_a) {
-    BN_free(st_group_a);
-    st_group_a = 0;
+  if (st_group.a) {
+    BN_free(st_group.a);
+    st_group.a = 0;
   }
-  if (st_group_b) {
-    BN_free(st_group_b);
-    st_group_b = 0;
+  // if (st_group.b) {
+    // BN_free(st_group.b);
+    // st_group.b = 0;
+  // }
+  if (st_group.order) {
+    BN_free(st_group.order);
+    st_group.order = 0;
   }
-  if (st_group) {
-    EC_GROUP_free(st_group);
-    st_group = 0;
-  }
-  ec_point_free(&st_group_g);
+  ec_point_free(&st_group.generator);
   ec_point_free(&st_pub_key);
 }
 
 int uut_init(void) {
-  if (!(st_group_p = BN_new())) goto err;
-  if (!(st_group_a = BN_new())) goto err;
-  if (!(st_group_b = BN_new())) goto err;
+  if (!(st_group.field = BN_new())) goto err;
+  if (!(st_group.a = BN_new())) goto err;
+  // if (!(st_group.b = BN_new())) goto err;
+  if (!(st_group.order = BN_new())) goto err;
 
-  if (!(st_group_g.X = BN_new())) goto err;
-  if (!(st_group_g.Y = BN_new())) goto err;
-  if (!(st_group_g.Z = BN_new())) goto err;
+  if (!(st_group.generator.X = BN_new())) goto err;
+  if (!(st_group.generator.Y = BN_new())) goto err;
+  if (!(st_group.generator.Z = BN_new())) goto err;
 
   if (!(st_pub_key.X = BN_new())) goto err;
   if (!(st_pub_key.Y = BN_new())) goto err;
   if (!(st_pub_key.Z = BN_new())) goto err;
 
-  st_group = EC_GROUP_new_by_curve_name(NID_X9_62_prime192v1);
-  if (!st_group)
-    goto err;
-  if (!EC_GROUP_get_curve(st_group, st_group_p,
-                      st_group_a, st_group_b, 0))
-    goto err;
-
-  const EC_POINT* gen = EC_GROUP_get0_generator(st_group);
-  if (!gen) goto err;
-  if (!EC_POINT_get_Jprojective_coordinates_GFp(
-    st_group, gen, st_group_g.X, st_group_g.Y, st_group_g.Z, NULL))
-    goto err;
-  st_group_g.Z_is_one = BN_is_one(st_group_g.Z);
-
-  return 1;
+  EC_GROUP* group = EC_GROUP_new_by_curve_name(NID_X9_62_prime192v1);
+  if (group) {
+    if (EC_GROUP_get_order(group, st_group.order, 0)) {
+      if (EC_GROUP_get_curve(group, st_group.field,
+                             st_group.a, NULL, 0)) {
+        const EC_POINT* gen = EC_GROUP_get0_generator(group);
+        if (gen) {
+          if (EC_POINT_get_Jprojective_coordinates_GFp(
+            group, gen, st_group.generator.X,
+            st_group.generator.Y, st_group.generator.Z, NULL)) {
+            st_group.generator.Z_is_one = BN_is_one(st_group.generator.Z);
+            EC_GROUP_free(group);
+            return 1;
+          }
+        }
+      }
+    }
+    EC_GROUP_free(group);
+  }
 
   err:
   uut_cleanup();
@@ -109,10 +119,10 @@ int uut_set_public_key(unsigned char key[2][24])
 }
 
 static int ec_group_do_inverse_ord(
- const EC_GROUP* group,
- BIGNUM*         res,
- const BIGNUM*   x,
- BN_CTX*         ctx)
+ const ec_group_t* group,
+ BIGNUM*           res,
+ const BIGNUM*     x,
+ BN_CTX*           ctx)
 {
     BIGNUM *e = NULL;
     BN_CTX *new_ctx = NULL;
@@ -125,7 +135,7 @@ static int ec_group_do_inverse_ord(
     if ((e = BN_CTX_get(ctx)) == NULL)
         goto err;
 
-    const BIGNUM *order = EC_GROUP_get0_order(group);
+    const BIGNUM *order = group->order;
     if (!order)
       goto err;
 
@@ -150,11 +160,11 @@ static int ec_group_do_inverse_ord(
 // derived from ec_GFp_nist_field_mul()
 // in \openssl-1.1.1\crypto\ec\ecp_nist.c
 static int ec_GFp_nist_field_mul(
-  const EC_GROUP* group,
-  BIGNUM*         r,
-  const BIGNUM*   a,
-  const BIGNUM*   b,
-  BN_CTX*         ctx)
+  const ec_group_t* group,
+  BIGNUM*           r,
+  const BIGNUM*     a,
+  const BIGNUM*     b,
+  BN_CTX*           ctx)
 {
     int ret = 0;
     BN_CTX *ctx_new = NULL;
@@ -169,7 +179,7 @@ static int ec_GFp_nist_field_mul(
 
     if (!BN_mul(r, a, b, ctx))
         goto err;
-    if (!BN_nist_mod_192(r, r, st_group_p, ctx))
+    if (!BN_nist_mod_192(r, r, group->field, ctx))
         goto err;
 
     ret = 1;
@@ -181,10 +191,10 @@ static int ec_GFp_nist_field_mul(
 // derived from ec_GFp_nist_field_sqr()
 // in \openssl-1.1.1\crypto\ec\ecp_nist.c
 static int ec_GFp_nist_field_sqr(
-  const EC_GROUP* group,
-  BIGNUM*         r,
-  const BIGNUM*   a,
-  BN_CTX*         ctx)
+  const ec_group_t* group,
+  BIGNUM*           r,
+  const BIGNUM*     a,
+  BN_CTX*           ctx)
 {
     int ret = 0;
     BN_CTX *ctx_new = NULL;
@@ -199,7 +209,7 @@ static int ec_GFp_nist_field_sqr(
 
     if (!BN_sqr(r, a, ctx))
         goto err;
-    if (!BN_nist_mod_192(r, r, st_group_p, ctx))
+    if (!BN_nist_mod_192(r, r, group->field, ctx))
         goto err;
 
     ret = 1;
@@ -232,7 +242,7 @@ static int ec_point_copy(
 // derived from ec_GFp_simple_dbl()
 // in \openssl-1.1.1\crypto\ec\ecp_smpl.c
 static int ec_point_dbl(
-  const EC_GROUP*   group,
+  const ec_group_t* group,
   ec_point_t*       r,
   const ec_point_t* a,
   BN_CTX*           ctx)
@@ -243,18 +253,13 @@ static int ec_point_dbl(
       return 1;
     }
 
-    int (*field_mul) (const EC_GROUP *, BIGNUM *, const BIGNUM *,
-                      const BIGNUM *, BN_CTX *);
-    int (*field_sqr) (const EC_GROUP *, BIGNUM *, const BIGNUM *, BN_CTX *);
     const BIGNUM *p;
     BN_CTX *new_ctx = NULL;
     BIGNUM *n0, *n1, *n2, *n3;
     BIGNUM *rX;
     int ret = 0;
 
-    field_mul = ec_GFp_nist_field_mul;
-    field_sqr = ec_GFp_nist_field_sqr;
-    p = st_group_p;
+    p = group->field;
 
     if (ctx == NULL) {
         ctx = new_ctx = BN_CTX_new();
@@ -279,24 +284,24 @@ static int ec_point_dbl(
 
     /* n1 */
     if (a->Z_is_one) {
-        if (!field_sqr(group, n0, a->X, ctx))
+        if (!ec_GFp_nist_field_sqr(group, n0, a->X, ctx))
             goto err;
         if (!BN_mod_lshift1_quick(n1, n0, p))
             goto err;
         if (!BN_mod_add_quick(n0, n0, n1, p))
             goto err;
-        if (!BN_mod_add_quick(n1, n0, st_group_a, p))
+        if (!BN_mod_add_quick(n1, n0, group->a, p))
             goto err;
         /* n1 = 3 * X_a^2 + a_curve */
   //  } else if (group->a_is_minus3) {
     } else {
-        if (!field_sqr(group, n1, a->Z, ctx))
+        if (!ec_GFp_nist_field_sqr(group, n1, a->Z, ctx))
             goto err;
         if (!BN_mod_add_quick(n0, a->X, n1, p))
             goto err;
         if (!BN_mod_sub_quick(n2, a->X, n1, p))
             goto err;
-        if (!field_mul(group, n1, n0, n2, ctx))
+        if (!ec_GFp_nist_field_mul(group, n1, n0, n2, ctx))
             goto err;
         if (!BN_mod_lshift1_quick(n0, n1, p))
             goto err;
@@ -307,17 +312,17 @@ static int ec_point_dbl(
          *    = 3 * X_a^2 - 3 * Z_a^4
          */
   //  } else {
-  //      if (!field_sqr(group, n0, a->X, ctx))
+  //      if (!ec_GFp_nist_field_sqr(group, n0, a->X, ctx))
   //          goto err;
   //      if (!BN_mod_lshift1_quick(n1, n0, p))
   //          goto err;
   //      if (!BN_mod_add_quick(n0, n0, n1, p))
   //          goto err;
-  //      if (!field_sqr(group, n1, a->Z, ctx))
+  //      if (!ec_GFp_nist_field_sqr(group, n1, a->Z, ctx))
   //          goto err;
-  //      if (!field_sqr(group, n1, n1, ctx))
+  //      if (!ec_GFp_nist_field_sqr(group, n1, n1, ctx))
   //          goto err;
-  //      if (!field_mul(group, n1, n1, st_group_a, ctx))
+  //      if (!ec_GFp_nist_field_mul(group, n1, n1, group->a, ctx))
   //          goto err;
   //      if (!BN_mod_add_quick(n1, n1, n0, p))
   //          goto err;
@@ -329,7 +334,7 @@ static int ec_point_dbl(
         if (!BN_copy(n0, a->Y))
             goto err;
     } else {
-        if (!field_mul(group, n0, a->Y, a->Z, ctx))
+        if (!ec_GFp_nist_field_mul(group, n0, a->Y, a->Z, ctx))
             goto err;
     }
     if (!BN_mod_lshift1_quick(r->Z, n0, p))
@@ -338,9 +343,9 @@ static int ec_point_dbl(
     /* Z_r = 2 * Y_a * Z_a */
 
     /* n2 */
-    if (!field_sqr(group, n3, a->Y, ctx))
+    if (!ec_GFp_nist_field_sqr(group, n3, a->Y, ctx))
         goto err;
-    if (!field_mul(group, n2, a->X, n3, ctx))
+    if (!ec_GFp_nist_field_mul(group, n2, a->X, n3, ctx))
         goto err;
     if (!BN_mod_lshift_quick(n2, n2, 2, p))
         goto err;
@@ -349,14 +354,14 @@ static int ec_point_dbl(
     /* X_r */
     if (!BN_mod_lshift1_quick(n0, n2, p))
         goto err;
-    if (!field_sqr(group, rX, n1, ctx))
+    if (!ec_GFp_nist_field_sqr(group, rX, n1, ctx))
         goto err;
     if (!BN_mod_sub_quick(r->X, rX, n0, p))
         goto err;
     /* X_r = n1^2 - 2 * n2 */
 
     /* n3 */
-    if (!field_sqr(group, n0, n3, ctx))
+    if (!ec_GFp_nist_field_sqr(group, n0, n3, ctx))
         goto err;
     if (!BN_mod_lshift_quick(n3, n0, 3, p))
         goto err;
@@ -365,7 +370,7 @@ static int ec_point_dbl(
     /* Y_r */
     if (!BN_mod_sub_quick(n0, n2, r->X, p))
         goto err;
-    if (!field_mul(group, n0, n1, n0, ctx))
+    if (!ec_GFp_nist_field_mul(group, n0, n1, n0, ctx))
         goto err;
     if (!BN_mod_sub_quick(r->Y, n0, n3, p))
         goto err;
@@ -382,7 +387,7 @@ static int ec_point_dbl(
 // derived from ec_GFp_simple_add()
 // in \openssl-1.1.1\crypto\ec\ecp_smpl.c
 static int ec_point_add(
-  const EC_GROUP*   group,
+  const ec_group_t* group,
   ec_point_t*       r,
   const ec_point_t* a,
   const ec_point_t* b,
@@ -395,17 +400,11 @@ static int ec_point_add(
     if (ec_point_is_at_infinity(b))
         return ec_point_copy(r, a);
 
-    int (*field_mul) (const EC_GROUP *, BIGNUM *, const BIGNUM *,
-                      const BIGNUM *, BN_CTX *);
-    int (*field_sqr) (const EC_GROUP *, BIGNUM *, const BIGNUM *, BN_CTX *);
-    const BIGNUM *p;
     BN_CTX *new_ctx = NULL;
     BIGNUM *n0, *n1, *n2, *n3, *n4, *n5, *n6;
     int ret = 0;
 
-    field_mul = ec_GFp_nist_field_mul;
-    field_sqr = ec_GFp_nist_field_sqr;
-    p = st_group_p;
+    const BIGNUM *p = group->field;
 
     if (ctx == NULL) {
         ctx = new_ctx = BN_CTX_new();
@@ -439,15 +438,15 @@ static int ec_point_add(
         /* n1 = X_a */
         /* n2 = Y_a */
     } else {
-        if (!field_sqr(group, n0, b->Z, ctx))
+        if (!ec_GFp_nist_field_sqr(group, n0, b->Z, ctx))
             goto end;
-        if (!field_mul(group, n1, a->X, n0, ctx))
+        if (!ec_GFp_nist_field_mul(group, n1, a->X, n0, ctx))
             goto end;
         /* n1 = X_a * Z_b^2 */
 
-        if (!field_mul(group, n0, n0, b->Z, ctx))
+        if (!ec_GFp_nist_field_mul(group, n0, n0, b->Z, ctx))
             goto end;
-        if (!field_mul(group, n2, a->Y, n0, ctx))
+        if (!ec_GFp_nist_field_mul(group, n2, a->Y, n0, ctx))
             goto end;
         /* n2 = Y_a * Z_b^3 */
     }
@@ -461,15 +460,15 @@ static int ec_point_add(
         /* n3 = X_b */
         /* n4 = Y_b */
     } else {
-        if (!field_sqr(group, n0, a->Z, ctx))
+        if (!ec_GFp_nist_field_sqr(group, n0, a->Z, ctx))
             goto end;
-        if (!field_mul(group, n3, b->X, n0, ctx))
+        if (!ec_GFp_nist_field_mul(group, n3, b->X, n0, ctx))
             goto end;
         /* n3 = X_b * Z_a^2 */
 
-        if (!field_mul(group, n0, n0, a->Z, ctx))
+        if (!ec_GFp_nist_field_mul(group, n0, n0, a->Z, ctx))
             goto end;
-        if (!field_mul(group, n4, b->Y, n0, ctx))
+        if (!ec_GFp_nist_field_mul(group, n4, b->Y, n0, ctx))
             goto end;
         /* n4 = Y_b * Z_a^3 */
     }
@@ -518,21 +517,21 @@ static int ec_point_add(
             if (!BN_copy(n0, a->Z))
                 goto end;
         } else {
-            if (!field_mul(group, n0, a->Z, b->Z, ctx))
+            if (!ec_GFp_nist_field_mul(group, n0, a->Z, b->Z, ctx))
                 goto end;
         }
-        if (!field_mul(group, r->Z, n0, n5, ctx))
+        if (!ec_GFp_nist_field_mul(group, r->Z, n0, n5, ctx))
             goto end;
     }
     r->Z_is_one = 0;
     /* Z_r = Z_a * Z_b * n5 */
 
     /* X_r */
-    if (!field_sqr(group, n0, n6, ctx))
+    if (!ec_GFp_nist_field_sqr(group, n0, n6, ctx))
         goto end;
-    if (!field_sqr(group, n4, n5, ctx))
+    if (!ec_GFp_nist_field_sqr(group, n4, n5, ctx))
         goto end;
-    if (!field_mul(group, n3, n1, n4, ctx))
+    if (!ec_GFp_nist_field_mul(group, n3, n1, n4, ctx))
         goto end;
     if (!BN_mod_sub_quick(r->X, n0, n3, p))
         goto end;
@@ -546,11 +545,11 @@ static int ec_point_add(
     /* n9 = n5^2 * 'n7' - 2 * X_r */
 
     /* Y_r */
-    if (!field_mul(group, n0, n0, n6, ctx))
+    if (!ec_GFp_nist_field_mul(group, n0, n0, n6, ctx))
         goto end;
-    if (!field_mul(group, n5, n4, n5, ctx))
+    if (!ec_GFp_nist_field_mul(group, n5, n4, n5, ctx))
         goto end;               /* now n5 is n5^3 */
-    if (!field_mul(group, n1, n2, n5, ctx))
+    if (!ec_GFp_nist_field_mul(group, n1, n2, n5, ctx))
         goto end;
     if (!BN_mod_sub_quick(n0, n0, n1, p))
         goto end;
@@ -574,7 +573,7 @@ static int ec_point_add(
 // derived from ec_GFp_simple_point_get_affine_coordinates()
 // in \openssl-1.1.1\crypto\ec\ecp_smpl.c
 static int ec_point_get_affine_coordinates(
-  const EC_GROUP*   group,
+  const ec_group_t* group,
   const ec_point_t* point,
   BIGNUM*           x,
   BIGNUM*           y,
@@ -635,7 +634,7 @@ static int ec_point_get_affine_coordinates(
            }
   //      }
     } else {
-        if (!BN_mod_inverse(Z_1, Z_, st_group_p, ctx)) {
+        if (!BN_mod_inverse(Z_1, Z_, group->field, ctx)) {
             ECerr(EC_F_EC_GFP_SIMPLE_POINT_GET_AFFINE_COORDINATES,
                   ERR_R_BN_LIB);
             goto err;
@@ -646,7 +645,7 @@ static int ec_point_get_affine_coordinates(
   //          if (!group->meth->field_sqr(group, Z_2, Z_1, ctx))
   //              goto err;
   //      } else {
-            if (!BN_mod_sqr(Z_2, Z_1, st_group_p, ctx))
+            if (!BN_mod_sqr(Z_2, Z_1, group->field, ctx))
                 goto err;
   //      }
 
@@ -667,7 +666,7 @@ static int ec_point_get_affine_coordinates(
   //              if (!group->meth->field_mul(group, Z_3, Z_2, Z_1, ctx))
   //                  goto err;
   //          } else {
-                if (!BN_mod_mul(Z_3, Z_2, Z_1, st_group_p, ctx))
+                if (!BN_mod_mul(Z_3, Z_2, Z_1, group->field, ctx))
                     goto err;
   //          }
 
@@ -690,7 +689,7 @@ static int ec_point_get_affine_coordinates(
 
 
 /** Computes r = q1 * m1 + q2 * m2
- *  \param  group  underlying EC_GROUP object
+ *  \param  group  underlying ec_group_t object
  *  \param  r      ec_point_t object for result
  *                 (can't be the same as q1 or q2)
  *  \param  q1     ec_point_t object to be multiplied by m1
@@ -701,7 +700,7 @@ static int ec_point_get_affine_coordinates(
  *  \return 1 on success and 0 if an error occurred
  */
 static int ec_point_muladd2(
-  const EC_GROUP*   group,
+  const ec_group_t* group,
   ec_point_t*       r,
   const ec_point_t* q1,
   const BIGNUM*     m1,
@@ -758,7 +757,7 @@ static int ossl_ecdsa_verify_sig(
     BN_CTX *ctx;
     BIGNUM *u1, *u2, *m, *X, *sig_r, *sig_s;
     ec_point_t point = {NULL,NULL,NULL};
-    const EC_GROUP *group   = st_group;
+    const ec_group_t *group   = &st_group;
     const ec_point_t *pub_key = &st_pub_key;
 
     ctx = BN_CTX_new();
@@ -790,7 +789,7 @@ static int ossl_ecdsa_verify_sig(
       goto err;
     }
 
-    const BIGNUM *order = EC_GROUP_get0_order(group);
+    const BIGNUM *order = group->order;
     if (order == NULL) {
         ECerr(EC_F_OSSL_ECDSA_VERIFY_SIG, ERR_R_EC_LIB);
         goto err;
@@ -834,8 +833,8 @@ static int ossl_ecdsa_verify_sig(
 
     // point = generator*u1 + pub_key*u2
     if (!ec_point_muladd2(group, &point,
-      &st_group_g, u1,
-      pub_key,     u2,
+      &group->generator, u1,
+      pub_key,           u2,
       ctx)) {
         ECerr(EC_F_OSSL_ECDSA_VERIFY_SIG, ERR_R_EC_LIB);
         goto err;
