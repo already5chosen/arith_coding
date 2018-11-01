@@ -23,228 +23,285 @@ BN_ucmp
 BN_zero
 */
 
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <openssl/bn.h>
-#include <openssl/err.h>
-
-#include "ecerr.h"
 #include "bn192_lib.h"
 
 enum {
   BNLIB_NBYTES = 24,
 };
 
-static BIGNUM* st_tmp[4]={0};
-
-int bn192_init(void)
-{
-  for (int i = 0; i < sizeof(st_tmp)/sizeof(st_tmp[0]); ++i) {
-    if ((st_tmp[i] = BN_new())==NULL) {
-      bn192_cleanup();
-      return 0;
-    }
-  }
-  return 1;
-}
 
 void bn192_cleanup(void)
 {
-  for (int i = 0; i < sizeof(st_tmp)/sizeof(st_tmp[0]); ++i) {
-    if (st_tmp[i]) {
-      BN_free(st_tmp[i]);
-      st_tmp[i] = 0;
-    }
-  }
 }
 
-int bn192_copy(uint8_t* result, const uint8_t* src)
+void bn192_copy(bn_word_t* result, const bn_word_t* src)
 {
-  memcpy(result, src, BNLIB_NBYTES*sizeof(*result));
-  return 1;
+  memcpy(result, src, sizeof(bn_t));
 }
 
-int bn192_zero(uint8_t* result)
+void bn192_zero(bn_t result)
 {
-  memset(result, 0, BNLIB_NBYTES*sizeof(*result));
-  return 1;
+  memset(result, 0, sizeof(bn_t));
 }
 
-int bn192_one(uint8_t* result)
+void bn192_one(bn_t result)
 {
-  memset(result, 0, BNLIB_NBYTES*sizeof(*result));
+  memset(result, 0, sizeof(bn_t));
   result[0] = 1;
-  return 1;
 }
 
-int bn192_is_odd(const uint8_t* a)
+int bn192_is_odd(const bn_t a)
 {
   return a[0] & 1;
 }
 
-int bn192_is_one(const uint8_t* a)
+int bn192_is_one(const bn_t a)
 {
   if (a[0] != 1)
     return 0; // is not one
-  for (int i = 1; i < BNLIB_NBYTES; ++i)
+  for (int i = 1; i < ECDSA_NWORDS; ++i)
     if (a[i] != 0)
       return 0; // is not one
   return 1; // is one
 }
 
-int bn192_is_zero(const uint8_t* a)
+int bn192_is_zero(const bn_t a)
 {
-  for (int i = 0; i < BNLIB_NBYTES; ++i)
+  for (int i = 0; i < ECDSA_NWORDS; ++i)
     if (a[i] != 0)
       return 0; // is not zero
   return 1; // is zero
 }
 
-int bn192_ucmp(const uint8_t* a, const uint8_t* b)
+int bn192_ucmp(const bn_t a, const bn_t b)
 {
-  for (int i = BNLIB_NBYTES-1; i >= 0; --i) {
-    int av = a[i];
-    int bv = b[i];
+  for (int i = ECDSA_NWORDS-1; i >= 0; --i) {
+    bn_word_t av = a[i];
+    bn_word_t bv = b[i];
     if (av != bv)
       return av < bv ? -1 : 1; // is non equal
   }
   return 0; // is equal
 }
 
-int bn192_add_rshift1(uint8_t* result, const uint8_t* a, const uint8_t* b)
+void bn192_add_rshift1(bn_t result, const bn_t a, const bn_t b)
 {
-  if (!BN_lebin2bn(a, BNLIB_NBYTES, st_tmp[0])) return 0;
-  if (!BN_lebin2bn(b, BNLIB_NBYTES, st_tmp[1])) return 0;
-
-  if (!BN_add    (st_tmp[0], st_tmp[0], st_tmp[1])) return 0;
-  if (!BN_rshift1(st_tmp[0], st_tmp[0]))            return 0;
-
-  return BN_bn2lebinpad(st_tmp[0], result, BNLIB_NBYTES);
+  bn_word_t av = a[0];
+  bn_word_t r = av + b[0];
+  bn_word_t carry = r < av;
+  for (int i = 1; i < ECDSA_NWORDS; ++i) {
+    av = a[i];
+    bn_word_t sum1 = av + b[i];
+    bn_word_t sum2 = sum1 + carry;
+    result[i-1] = (r >> 1) | (sum2 << (BN192LIB_BITS_PER_WORD-1));
+    carry = (sum1 < av) | (sum2 < sum1);
+    r = sum2;
+  }
+  result[ECDSA_NWORDS-1] = (r >> 1) | (carry << (BN192LIB_BITS_PER_WORD-1));
 }
 
-int bn192_mod_add_quick(uint8_t* result, const uint8_t* a, const uint8_t* b, const uint8_t* m)
+// bn192_mod_add_quick
+// result = (a + b) mod m where a < m, b < m, m > 2^191
+void bn192_mod_add_quick(bn_t result, const bn_t a, const bn_t b, const bn_t m)
 {
-  if (!BN_lebin2bn(a, BNLIB_NBYTES, st_tmp[0])) return 0;
-  if (!BN_lebin2bn(b, BNLIB_NBYTES, st_tmp[1])) return 0;
-  if (!BN_lebin2bn(m, BNLIB_NBYTES, st_tmp[2])) return 0;
+  bn_word_t carry  = 0; // carry of a[]+b[]
+  bn_word_t borrow = 0; // borrow of a[]+b[]-m[]
+  bn_t result2; // a[]+b[]-m[]
+  for (int i = 0; i < ECDSA_NWORDS; ++i) {
+    bn_word_t av = a[i];
+    bn_word_t sum1 = av + b[i];
+    bn_word_t sum2 = sum1 + carry;
+    bn_word_t mv = m[i];
+    result[i] = sum2;
+    carry = (sum1 < av) | (sum2 < sum1);
 
-  if (!BN_mod_add_quick(st_tmp[0], st_tmp[0], st_tmp[1], st_tmp[2])) return 0;
-
-  return BN_bn2lebinpad(st_tmp[0], result, BNLIB_NBYTES);
+    bn_word_t diff = sum2 - borrow;
+    borrow = (sum2 < borrow) | (diff < mv);
+    result2[i] = diff - mv;
+  }
+  if (carry || !borrow)
+    memcpy(result, result2, sizeof(bn_t));
 }
 
-int bn192_mod_sub_quick(uint8_t* result, const uint8_t* a, const uint8_t* b, const uint8_t* m)
+// bn192_mod_sub_quick
+// result = (a - b) mod m where a < m, b < m, m > 2^191
+void bn192_mod_sub_quick(bn_t result, const bn_t a, const bn_t b, const bn_t m)
 {
-  if (!BN_lebin2bn(a, BNLIB_NBYTES, st_tmp[0])) return 0;
-  if (!BN_lebin2bn(b, BNLIB_NBYTES, st_tmp[1])) return 0;
-  if (!BN_lebin2bn(m, BNLIB_NBYTES, st_tmp[2])) return 0;
+  bn_word_t borrow = 0; // borrow of a[]-b[]
+  bn_word_t carry  = 0; // carry  of a[]-b[]+m[]
+  bn_t result2; // a[]-b[]+m[]
+  for (int i = 0; i < ECDSA_NWORDS; ++i) {
+    bn_word_t av = a[i];
+    bn_word_t bv = b[i];
+    bn_word_t mv = m[i];
+    bn_word_t dif1 = av - borrow;
+    bn_word_t dif2 = dif1 - bv;
+    borrow = (av < borrow) | (dif1 < bv);
 
-  if (!BN_mod_sub_quick(st_tmp[0], st_tmp[0], st_tmp[1], st_tmp[2])) return 0;
+    bn_word_t sum1 = dif2 + mv;
+    bn_word_t sum2 = sum1 + carry;
+    carry = (sum1 < mv) | (sum2 < sum1);
 
-  return BN_bn2lebinpad(st_tmp[0], result, BNLIB_NBYTES);
+    result[i]  = dif2;
+    result2[i] = sum2;
+  }
+  if (borrow)
+    memcpy(result, result2, sizeof(bn_t));
 }
 
-int bn192_mod_exp(uint8_t* result, const uint8_t* a, const uint8_t* p, const uint8_t* m, BN_CTX *ctx)
+// bn192_mod_inverse - solves (a*x) mod n == 1, where n is a prime number
+//
+// a - number in range [2:n-1]
+// n - prime number in range [2^191:2^192-1].
+// An implementation is efficient when m is close to 2^192
+//
+void bn192_mod_inverse(bn_t result, const bn_t a, const bn_t n)
 {
-  if (!BN_lebin2bn(a, BNLIB_NBYTES, st_tmp[0])) return 0;
-  if (!BN_lebin2bn(p, BNLIB_NBYTES, st_tmp[1])) return 0;
-  if (!BN_lebin2bn(m, BNLIB_NBYTES, st_tmp[2])) return 0;
+  //
+  // An inverse is computed as pow(a, n-2) mod n
+  // They say, it works due to Fermat's Little Theorem.
+  // I don't know if this method is the fastest, but it
+  // certainly is one of the simplest.
+  //
 
-  if (!BN_mod_exp(st_tmp[0], st_tmp[0], st_tmp[1], st_tmp[2], ctx)) return 0;
+  bn_t exp; // exp[] = n[2]-2
+  bn_word_t sub_w = 2;
+  for (int i = 0; i < ECDSA_NWORDS; ++i) {
+    bn_word_t nw = n[i];
+    exp[i] = nw - sub_w;
+    sub_w  = nw < sub_w;
+  }
 
-  return BN_bn2lebinpad(st_tmp[0], result, BNLIB_NBYTES);
+  int nz = 0;
+  bn_t prod;
+  for (int wi = ECDSA_NWORDS-1; wi >= 0; --wi)  {
+    bn_word_t exp_w = exp[wi];
+    for (int bi = 0; bi < BN192LIB_BITS_PER_WORD; ++bi) {
+      if (nz)
+        bn192_nist_mod_192_sqr(prod, prod, n);
+      if ((exp_w >> (BN192LIB_BITS_PER_WORD-1)) & 1) {
+        if (nz)
+          bn192_nist_mod_192_mul(prod, prod, a, n);
+        else
+          memcpy(prod, a, sizeof(bn_t));
+        nz = 1;
+      }
+      exp_w += exp_w;
+    }
+  }
+  memcpy(result, prod, sizeof(bn_t));
 }
 
-int bn192_mod_inverse(uint8_t* result, const uint8_t* a, const uint8_t* n, BN_CTX *ctx)
+// bn192_mod_lshift1_quick
+// result = (a + a) mod m where a < m, m > 2^191
+void bn192_mod_lshift1_quick(bn_t result, const bn_t a, const bn_t m)
 {
-  if (!BN_lebin2bn(a, BNLIB_NBYTES, st_tmp[0])) return 0;
-  if (!BN_lebin2bn(n, BNLIB_NBYTES, st_tmp[1])) return 0;
+  bn_word_t carry  = 0; // carry of a[]+a[]
+  bn_word_t borrow = 0; // borrow of a[]+a[]-m[]
+  bn_t result2; // a[]+a[]-m[]
+  for (int i = 0; i < ECDSA_NWORDS; ++i) {
+    bn_word_t av = a[i];
+    bn_word_t mv = m[i];
+    bn_word_t sum = av + av + carry;
+    carry = av >> (BN192LIB_BITS_PER_WORD-1);
 
-  if (!BN_mod_inverse(st_tmp[0], st_tmp[0], st_tmp[1], ctx)) return 0;
-
-  return BN_bn2lebinpad(st_tmp[0], result, BNLIB_NBYTES);
+    bn_word_t diff = sum - borrow;
+    borrow = (sum < borrow) | (diff < mv);
+    result[i] = sum;
+    result2[i] = diff - mv;
+  }
+  if (carry || !borrow)
+    memcpy(result, result2, sizeof(bn_t));
 }
 
-int bn192_mod_lshift1_quick(uint8_t* result, const uint8_t* a, const uint8_t* m)
+void bn192_mod_lshift_quick(bn_t result, const bn_t a, int n, const bn_t m)
 {
-  if (!BN_lebin2bn(a, BNLIB_NBYTES, st_tmp[0])) return 0;
-  if (!BN_lebin2bn(m, BNLIB_NBYTES, st_tmp[1])) return 0;
-
-  if (!BN_mod_lshift1_quick(st_tmp[0], st_tmp[0], st_tmp[1])) return 0;
-
-  return BN_bn2lebinpad(st_tmp[0], result, BNLIB_NBYTES);
+  while (n > 0) {
+    bn192_mod_lshift1_quick(result, a, m);
+    a = result;
+    --n;
+  }
 }
 
-int bn192_mod_lshift_quick(uint8_t* result, const uint8_t* a, int n, const uint8_t* m)
+void bn192_nist_mod_192(bn_t result, const bn_t a, const bn_t m)
 {
-  if (!BN_lebin2bn(a, BNLIB_NBYTES, st_tmp[0])) return 0;
-  if (!BN_lebin2bn(m, BNLIB_NBYTES, st_tmp[1])) return 0;
-
-  if (!BN_mod_lshift_quick(st_tmp[0], st_tmp[0], n, st_tmp[1])) return 0;
-
-  return BN_bn2lebinpad(st_tmp[0], result, BNLIB_NBYTES);
+  memcpy(result, a, sizeof(bn_t));
+  if (bn192_ucmp(a, m) >= 0) {
+    // subtract
+    bn_word_t borrow = 0;
+    for (int i = 0; i < ECDSA_NWORDS; ++i) {
+      bn_word_t av = a[i];
+      bn_word_t bv = m[i];
+      bn_word_t dif1 = av - borrow;
+      bn_word_t dif2 = dif1 - bv;
+      borrow = (av < borrow) | (dif1 < bv);
+      result[i] = dif2;
+    }
+  }
 }
 
-int bn192_mod_mul(uint8_t* result, const uint8_t* a, const uint8_t* b, const uint8_t* m, BN_CTX *ctx)
+// mulx_core - result = a * b
+static void bn192_mulx_core(bn_word_t result[ECDSA_NWORDS*2], const bn_t a, const bn_t b)
 {
-  if (!BN_lebin2bn(a, BNLIB_NBYTES, st_tmp[0])) return 0;
-  if (!BN_lebin2bn(b, BNLIB_NBYTES, st_tmp[1])) return 0;
-  if (!BN_lebin2bn(m, BNLIB_NBYTES, st_tmp[2])) return 0;
-
-  if (!BN_mod_mul(st_tmp[0], st_tmp[0], st_tmp[1], st_tmp[2], ctx)) return 0;
-
-  return BN_bn2lebinpad(st_tmp[0], result, BNLIB_NBYTES);
+  uint64_t mxc = 0;
+  for (int ri = 0; ri < ECDSA_NWORDS*2-1; ++ri) {
+    int ai_beg = 0;
+    int bi_beg = ri;
+    if (bi_beg >= ECDSA_NWORDS) {
+      bi_beg = ECDSA_NWORDS-1;
+      ai_beg = ri - bi_beg;
+    }
+    uint64_t acc_l = mxc;
+    uint64_t acc_h = 0;
+    for (int ai = ai_beg, bi = bi_beg; ai <= bi_beg; ++ai, --bi) {
+      uint64_t mx = (uint64_t)a[ai] * b[bi];
+      acc_l += (uint32_t)mx;
+      acc_h += (uint32_t)(mx>>32);
+    }
+    result[ri] = (uint32_t)acc_l;
+    mxc = acc_h + (uint32_t)(acc_l>>32);
+  }
+  result[ECDSA_NWORDS*2-1] = (uint32_t)mxc;
 }
 
-int bn192_mod_sqr(uint8_t* result, const uint8_t* a, const uint8_t* m, BN_CTX *ctx)
+// bn192_nist_mod_192_mul
+// result = (a * b) mod m where a < m, b < m, m > 2^191
+// An implementation is efficient when m is close to 2^192
+void bn192_nist_mod_192_mul(bn_t result, const bn_t a, const bn_t b, const bn_t m)
 {
-  if (!BN_lebin2bn(a, BNLIB_NBYTES, st_tmp[0])) return 0;
-  if (!BN_lebin2bn(m, BNLIB_NBYTES, st_tmp[1])) return 0;
+  bn_word_t aXb[ECDSA_NWORDS*2]; // buffer for a[]*b[];
+  bn192_mulx_core(aXb, a, b);    // multiply
+  while (!bn192_is_zero(&aXb[ECDSA_NWORDS])) {
+    bn_word_t dXm[ECDSA_NWORDS*2]; // buffer for aXb_h[]*m[];
+    // multiply and subtract
+    bn192_mulx_core(dXm, &aXb[ECDSA_NWORDS], m);
+    bn_word_t borrow = 0;
+    for (int i = 0; i < ECDSA_NWORDS*2; ++i) {
+      bn_word_t av = aXb[i];
+      bn_word_t bv = dXm[i];
+      bn_word_t dif1 = av - borrow;
+      bn_word_t dif2 = dif1 - bv;
+      borrow = (av < borrow) | (dif1 < bv);
+      aXb[i] = dif2;
+    }
+  }
 
-  if (!BN_mod_sqr(st_tmp[0], st_tmp[0], st_tmp[1], ctx)) return 0;
-
-  return BN_bn2lebinpad(st_tmp[0], result, BNLIB_NBYTES);
+  // copy and conditionally last subtract
+  bn192_nist_mod_192(result, aXb, m);
 }
 
-int bn192_nist_mod_192_mul(uint8_t* result, const uint8_t* a, const uint8_t* b, const uint8_t* m, BN_CTX *ctx)
+void bn192_nist_mod_192_sqr(bn_t result, const bn_t a, const bn_t m)
 {
-  if (!BN_lebin2bn(a, BNLIB_NBYTES, st_tmp[0])) return 0;
-  if (!BN_lebin2bn(b, BNLIB_NBYTES, st_tmp[1])) return 0;
-  if (!BN_lebin2bn(m, BNLIB_NBYTES, st_tmp[2])) return 0;
-
-  if (!BN_mul         (st_tmp[0], st_tmp[0], st_tmp[1], ctx)) return 0;
-  if (!BN_nist_mod_192(st_tmp[0], st_tmp[0], st_tmp[2], ctx)) return 0;
-
-  return BN_bn2lebinpad(st_tmp[0], result, BNLIB_NBYTES);
+  bn192_nist_mod_192_mul(result, a, a, m);
 }
 
-int bn192_nist_mod_192_sqr(uint8_t* result, const uint8_t* a, const uint8_t* m, BN_CTX *ctx)
+void bn192_rshift1(bn_t result, const bn_t a)
 {
-  if (!BN_lebin2bn(a, BNLIB_NBYTES, st_tmp[0])) return 0;
-  if (!BN_lebin2bn(m, BNLIB_NBYTES, st_tmp[1])) return 0;
-
-  if (!BN_sqr         (st_tmp[0], st_tmp[0],            ctx)) return 0;
-  if (!BN_nist_mod_192(st_tmp[0], st_tmp[0], st_tmp[1], ctx)) return 0;
-
-  return BN_bn2lebinpad(st_tmp[0], result, BNLIB_NBYTES);
-}
-
-int bn192_nnmod(uint8_t* result, const uint8_t* m, const uint8_t* d, BN_CTX *ctx)
-{
-  if (!BN_lebin2bn(m, BNLIB_NBYTES, st_tmp[0])) return 0;
-  if (!BN_lebin2bn(d, BNLIB_NBYTES, st_tmp[1])) return 0;
-
-  if (!BN_nnmod(st_tmp[0], st_tmp[0], st_tmp[1], ctx)) return 0;
-
-  return BN_bn2lebinpad(st_tmp[0], result, BNLIB_NBYTES);
-}
-
-int bn192_rshift1(uint8_t* result, const uint8_t* a)
-{
-  if (!BN_lebin2bn(a, BNLIB_NBYTES, st_tmp[0])) return 0;
-
-  if (!BN_rshift1(st_tmp[0], st_tmp[0]))        return 0;
-
-  return BN_bn2lebinpad(st_tmp[0], result, BNLIB_NBYTES);
+  bn_word_t msb = 0;
+  for (int i = ECDSA_NWORDS-1; i >= 0; --i) {
+    bn_word_t av = a[i];
+    result[i] = (av >> 1) | msb;
+    msb = av << (BN192LIB_BITS_PER_WORD-1);
+  }
 }
