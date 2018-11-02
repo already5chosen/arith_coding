@@ -1,0 +1,307 @@
+/*
+ Replacement for following BN_xxx functions
+
+BN_add
+BN_copy
+BN_is_odd
+BN_is_one
+BN_is_zero
+BN_mod_add_quick
+BN_mod_exp
+BN_mod_inverse
+BN_mod_lshift1_quick
+BN_mod_lshift_quick
+BN_mod_mul
+BN_mod_sqr
+BN_mod_sub_quick
+BN_mul
+BN_nist_mod_192
+BN_nnmod
+BN_rshift1
+BN_sqr
+BN_ucmp
+BN_zero
+*/
+
+#include <string.h>
+#include "bn192_lib.h"
+
+enum {
+  BNLIB_NBYTES = 24,
+};
+
+
+void bn192_cleanup(void)
+{
+}
+
+void bn192_copy(bn_word_t* result, const bn_word_t* src)
+{
+  memcpy(result, src, sizeof(bn_t));
+}
+
+void bn192_zero(bn_t result)
+{
+  memset(result, 0, sizeof(bn_t));
+}
+
+void bn192_one(bn_t result)
+{
+  memset(result, 0, sizeof(bn_t));
+  result[0] = 1;
+}
+
+int bn192_is_odd(const bn_t a)
+{
+  return a[0] & 1;
+}
+
+int bn192_is_one(const bn_t a)
+{
+  if (a[0] != 1)
+    return 0; // is not one
+  for (int i = 1; i < ECDSA_NWORDS; ++i)
+    if (a[i] != 0)
+      return 0; // is not one
+  return 1; // is one
+}
+
+int bn192_is_zero(const bn_t a)
+{
+  for (int i = 0; i < ECDSA_NWORDS; ++i)
+    if (a[i] != 0)
+      return 0; // is not zero
+  return 1; // is zero
+}
+
+int bn192_ucmp(const bn_t a, const bn_t b)
+{
+  for (int i = ECDSA_NWORDS-1; i >= 0; --i) {
+    bn_word_t av = a[i];
+    bn_word_t bv = b[i];
+    if (av != bv)
+      return av < bv ? -1 : 1; // is non equal
+  }
+  return 0; // is equal
+}
+
+void bn192_add_rshift1(bn_t result, const bn_t a, const bn_t b)
+{
+  bn_word_t av = a[0];
+  bn_word_t r = av + b[0];
+  bn_word_t carry = r < av;
+  for (int i = 1; i < ECDSA_NWORDS; ++i) {
+    av = a[i];
+    bn_word_t sum1 = av + b[i];
+    bn_word_t sum2 = sum1 + carry;
+    result[i-1] = (r >> 1) | (sum2 << (BN192LIB_BITS_PER_WORD-1));
+    carry = (sum1 < av) | (sum2 < sum1);
+    r = sum2;
+  }
+  result[ECDSA_NWORDS-1] = (r >> 1) | (carry << (BN192LIB_BITS_PER_WORD-1));
+}
+
+// bn192_mod_add_quick
+// result = (a + b) mod m where a < m, b < m, m > 2^191
+void bn192_mod_add_quick(bn_t result, const bn_t a, const bn_t b, const bn_t m)
+{
+  bn_word_t carry  = 0; // carry of a[]+b[]
+  bn_word_t borrow = 0; // borrow of a[]+b[]-m[]
+  bn_t result2; // a[]+b[]-m[]
+  for (int i = 0; i < ECDSA_NWORDS; ++i) {
+    bn_word_t av = a[i];
+    bn_word_t sum1 = av + b[i];
+    bn_word_t sum2 = sum1 + carry;
+    bn_word_t mv = m[i];
+    result[i] = sum2;
+    carry = (sum1 < av) | (sum2 < sum1);
+
+    bn_word_t diff = sum2 - borrow;
+    borrow = (sum2 < borrow) | (diff < mv);
+    result2[i] = diff - mv;
+  }
+  if (carry || !borrow)
+    memcpy(result, result2, sizeof(bn_t));
+}
+
+// bn192_mod_sub_quick
+// result = (a - b) mod m where a < m, b < m, m > 2^191
+void bn192_mod_sub_quick(bn_t result, const bn_t a, const bn_t b, const bn_t m)
+{
+  bn_word_t borrow = 0; // borrow of a[]-b[]
+  bn_word_t carry  = 0; // carry  of a[]-b[]+m[]
+  bn_t result2; // a[]-b[]+m[]
+  for (int i = 0; i < ECDSA_NWORDS; ++i) {
+    bn_word_t av = a[i];
+    bn_word_t bv = b[i];
+    bn_word_t mv = m[i];
+    bn_word_t dif1 = av - borrow;
+    bn_word_t dif2 = dif1 - bv;
+    borrow = (av < borrow) | (dif1 < bv);
+
+    bn_word_t sum1 = dif2 + mv;
+    bn_word_t sum2 = sum1 + carry;
+    carry = (sum1 < mv) | (sum2 < sum1);
+
+    result[i]  = dif2;
+    result2[i] = sum2;
+  }
+  if (borrow)
+    memcpy(result, result2, sizeof(bn_t));
+}
+
+// bn192_mod_inverse - solves (a*x) mod n == 1, where n is a prime number
+//
+// a - number in range [2:n-1]
+// n - prime number in range [2^191:2^192-1].
+// An implementation is efficient when m is close to 2^192
+//
+void bn192_mod_inverse(bn_t result, const bn_t a, const bn_t n)
+{
+  //
+  // An inverse is computed as pow(a, n-2) mod n
+  // They say, it works due to Fermat's Little Theorem.
+  // I don't know if this method is the fastest, but it
+  // certainly is one of the simplest.
+  //
+
+  bn_t exp; // exp[] = n[2]-2
+  bn_word_t sub_w = 2;
+  for (int i = 0; i < ECDSA_NWORDS; ++i) {
+    bn_word_t nw = n[i];
+    exp[i] = nw - sub_w;
+    sub_w  = nw < sub_w;
+  }
+
+  int nz = 0;
+  bn_t prod;
+  for (int wi = ECDSA_NWORDS-1; wi >= 0; --wi)  {
+    bn_word_t exp_w = exp[wi];
+    for (int bi = 0; bi < BN192LIB_BITS_PER_WORD; ++bi) {
+      if (nz)
+        bn192_nist_mod_192_sqr(prod, prod, n);
+      if ((exp_w >> (BN192LIB_BITS_PER_WORD-1)) & 1) {
+        if (nz)
+          bn192_nist_mod_192_mul(prod, prod, a, n);
+        else
+          memcpy(prod, a, sizeof(bn_t));
+        nz = 1;
+      }
+      exp_w += exp_w;
+    }
+  }
+  memcpy(result, prod, sizeof(bn_t));
+}
+
+// bn192_mod_lshift1_quick
+// result = (a + a) mod m where a < m, m > 2^191
+void bn192_mod_lshift1_quick(bn_t result, const bn_t a, const bn_t m)
+{
+  bn_word_t carry  = 0; // carry of a[]+a[]
+  bn_word_t borrow = 0; // borrow of a[]+a[]-m[]
+  bn_t result2; // a[]+a[]-m[]
+  for (int i = 0; i < ECDSA_NWORDS; ++i) {
+    bn_word_t av = a[i];
+    bn_word_t mv = m[i];
+    bn_word_t sum = av + av + carry;
+    carry = av >> (BN192LIB_BITS_PER_WORD-1);
+
+    bn_word_t diff = sum - borrow;
+    borrow = (sum < borrow) | (diff < mv);
+    result[i] = sum;
+    result2[i] = diff - mv;
+  }
+  if (carry || !borrow)
+    memcpy(result, result2, sizeof(bn_t));
+}
+
+void bn192_mod_lshift_quick(bn_t result, const bn_t a, int n, const bn_t m)
+{
+  while (n > 0) {
+    bn192_mod_lshift1_quick(result, a, m);
+    a = result;
+    --n;
+  }
+}
+
+void bn192_nist_mod_192(bn_t result, const bn_t a, const bn_t m)
+{
+  memcpy(result, a, sizeof(bn_t));
+  if (bn192_ucmp(a, m) >= 0) {
+    // subtract
+    bn_word_t borrow = 0;
+    for (int i = 0; i < ECDSA_NWORDS; ++i) {
+      bn_word_t av = a[i];
+      bn_word_t bv = m[i];
+      bn_word_t dif1 = av - borrow;
+      bn_word_t dif2 = dif1 - bv;
+      borrow = (av < borrow) | (dif1 < bv);
+      result[i] = dif2;
+    }
+  }
+}
+
+// mulx_core - result = a * b
+static void bn192_mulx_core(bn_word_t result[ECDSA_NWORDS*2], const bn_t a, const bn_t b)
+{
+  bn_doubleword_t mxc = 0;
+  for (int ri = 0; ri < ECDSA_NWORDS*2-1; ++ri) {
+    int ai_beg = 0;
+    int bi_beg = ri;
+    if (bi_beg >= ECDSA_NWORDS) {
+      bi_beg = ECDSA_NWORDS-1;
+      ai_beg = ri - bi_beg;
+    }
+    bn_doubleword_t acc_l = mxc;
+    bn_doubleword_t acc_h = 0;
+    for (int ai = ai_beg, bi = bi_beg; ai <= bi_beg; ++ai, --bi) {
+      bn_doubleword_t mx = (bn_doubleword_t)a[ai] * b[bi];
+      acc_l += (bn_word_t)mx;
+      acc_h += (bn_word_t)(mx>>(BN192LIB_BYTES_PER_WORD*8));
+    }
+    result[ri] = (bn_word_t)acc_l;
+    mxc = acc_h + (bn_word_t)(acc_l>>(BN192LIB_BYTES_PER_WORD*8));
+  }
+  result[ECDSA_NWORDS*2-1] = (bn_word_t)mxc;
+}
+
+// bn192_nist_mod_192_mul
+// result = (a * b) mod m where a < m, b < m, m > 2^191
+// An implementation is efficient when m is close to 2^192
+void bn192_nist_mod_192_mul(bn_t result, const bn_t a, const bn_t b, const bn_t m)
+{
+  bn_word_t aXb[ECDSA_NWORDS*2]; // buffer for a[]*b[];
+  bn192_mulx_core(aXb, a, b);    // multiply
+  while (!bn192_is_zero(&aXb[ECDSA_NWORDS])) {
+    bn_word_t dXm[ECDSA_NWORDS*2]; // buffer for aXb_h[]*m[];
+    // multiply and subtract
+    bn192_mulx_core(dXm, &aXb[ECDSA_NWORDS], m);
+    bn_word_t borrow = 0;
+    for (int i = 0; i < ECDSA_NWORDS*2; ++i) {
+      bn_word_t av = aXb[i];
+      bn_word_t bv = dXm[i];
+      bn_word_t dif1 = av - borrow;
+      bn_word_t dif2 = dif1 - bv;
+      borrow = (av < borrow) | (dif1 < bv);
+      aXb[i] = dif2;
+    }
+  }
+
+  // copy and conditionally last subtract
+  bn192_nist_mod_192(result, aXb, m);
+}
+
+void bn192_nist_mod_192_sqr(bn_t result, const bn_t a, const bn_t m)
+{
+  bn192_nist_mod_192_mul(result, a, a, m);
+}
+
+void bn192_rshift1(bn_t result, const bn_t a)
+{
+  bn_word_t msb = 0;
+  for (int i = ECDSA_NWORDS-1; i >= 0; --i) {
+    bn_word_t av = a[i];
+    result[i] = (av >> 1) | msb;
+    msb = av << (BN192LIB_BITS_PER_WORD-1);
+  }
+}
