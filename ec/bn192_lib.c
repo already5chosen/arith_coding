@@ -241,6 +241,89 @@ void bn192_nist_mod_192(bn_t result, const bn_t a, const bn_t m)
   }
 }
 
+#ifdef NONCONV_MULTIPLY
+
+// mulw_core - multiply bn_t number by word
+// result - a * b
+static inline void bn192_mulw_core(bn_word_t result[ECDSA_NWORDS+1], const bn_t a, bn_word_t b)
+{
+  uint64_t mx = (uint64_t)a[0] * b;
+  result[0] = (bn_word_t)mx;
+  bn_word_t mh =  (uint32_t)(mx>>32);
+  for (int i = 1; i < ECDSA_NWORDS; ++i) {
+    mx = (uint64_t)a[i] * b + mh;
+    result[i] = (bn_word_t)mx;
+    mh = (uint32_t)(mx>>32);
+  }
+  result[ECDSA_NWORDS] = mh;
+}
+
+// add_core
+// result = result + a
+// return - carry out
+static inline bn_word_t bn192_add_core(bn_t result, const bn_t a)
+{
+  uint64_t sum = result[0];
+  sum += a[0];
+  result[0] = (bn_word_t)sum;
+  bn_word_t carry = (uint32_t)(sum>>32);
+  for (int i = 1; i < ECDSA_NWORDS; ++i) {
+    sum = result[i];
+    sum += a[i];
+    sum += carry;
+    result[i] = (bn_word_t)sum;
+    carry = (uint32_t)(sum>>32);
+  }
+  return carry;
+}
+
+// sub_core
+// result = result - a
+// return - borrow out
+static inline bn_word_t bn192_sub_core(bn_t result, const bn_t a)
+{
+  uint64_t dif = result[0];
+  dif -= a[0];
+  result[0] = (bn_word_t)dif;
+  bn_word_t borrow = (uint32_t)(dif>>32) & 1;
+  for (int i = 1; i < ECDSA_NWORDS; ++i) {
+    dif = result[i];
+    dif -= a[i];
+    dif -= borrow;
+    result[i] = (bn_word_t)dif;
+    borrow = (uint32_t)(dif>>32) & 1;
+  }
+  return borrow;
+}
+
+// bn192_nist_mod_192_mul
+// result = (a * b) mod m where a < m, b < m, m > 2^191
+// An implementation is efficient when m is close to 2^192
+void bn192_nist_mod_192_mul(bn_t result, const bn_t a, const bn_t b, const bn_t m)
+{
+  bn_word_t acc[ECDSA_NWORDS*2] = {0};
+  for (int i = ECDSA_NWORDS-1; i >= 0; --i) {
+    bn_word_t mx[ECDSA_NWORDS+1];
+    bn192_mulw_core(mx, a, b[i]);
+    acc[i] = mx[0];
+    bn_word_t carry = bn192_add_core(&acc[i+1], &mx[1]);
+    while (carry)
+      carry -= bn192_sub_core(&acc[i+1], m);
+    bn_word_t msw = acc[i+ECDSA_NWORDS];
+    if (msw > 1) {
+      bn192_mulw_core(mx, m, msw);
+      msw -= mx[ECDSA_NWORDS];
+      msw -= bn192_sub_core(&acc[i], mx);
+    }
+    while (msw)
+      msw -= bn192_sub_core(&acc[i], m);
+  }
+  // copy and conditionally last subtract
+  bn192_nist_mod_192(result, acc, m);
+}
+
+#else
+
 // mulx_core - result = a * b
 static void bn192_mulx_core(bn_word_t result[ECDSA_NWORDS*2], const bn_t a, const bn_t b)
 {
@@ -290,6 +373,7 @@ void bn192_nist_mod_192_mul(bn_t result, const bn_t a, const bn_t b, const bn_t 
   // copy and conditionally last subtract
   bn192_nist_mod_192(result, aXb, m);
 }
+#endif
 
 void bn192_nist_mod_192_sqr(bn_t result, const bn_t a, const bn_t m)
 {
