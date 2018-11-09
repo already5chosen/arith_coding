@@ -361,11 +361,13 @@ void bn192_nist_mod_192_mul(bn_t result, const bn_t a, const bn_t b, const bn_t 
 #else
 
 // mulx_core - result = a * b
-static void bn192_mulx_core(bn_word_t result[ECDSA_NWORDS*2], const bn_t a, const bn_t b)
-{
 #ifdef NO_MULX
-  uint32_t mxc = 0;
-  for (int ri = 0; ri < ECDSA_NWORDS*4-1; ++ri) {
+static void bn192_mulx_core(uint16_t result[ECDSA_NWORDS*4], const uint16_t a[ECDSA_NWORDS*2], const uint16_t b[ECDSA_NWORDS*2])
+{
+  uint32_t mxc = (uint32_t)a[0] * b[0];
+  result[0] = (uint16_t)mxc;
+  mxc >>= 16;
+  for (int ri = 1; ri < ECDSA_NWORDS*4-1; ++ri) {
     int ai_beg = 0;
     int bi_beg = ri;
     if (bi_beg >= ECDSA_NWORDS*2) {
@@ -375,15 +377,18 @@ static void bn192_mulx_core(bn_word_t result[ECDSA_NWORDS*2], const bn_t a, cons
     uint32_t acc_l = mxc;
     uint32_t acc_h = 0;
     for (int ai = ai_beg, bi = bi_beg; ai <= bi_beg; ++ai, --bi) {
-      uint32_t mx = (uint32_t)((const uint16_t*)a)[ai] * ((const uint16_t*)b)[bi];
-      acc_l += mx & 0xFFFF;
-      acc_h += mx >> 16;
+      uint32_t mx = (uint32_t)a[ai] * b[bi];
+      acc_l += mx;
+      acc_h += mx > acc_l;
     }
-    ((uint16_t*)result)[ri] = (uint16_t)acc_l;
-    mxc = acc_h + (acc_l>>16);
+    result[ri] = (uint16_t)acc_l;
+    mxc = (acc_h << 16) + (acc_l>>16);
   }
-  ((uint16_t*)result)[ECDSA_NWORDS*4-1] = (uint16_t)mxc;
+  result[ECDSA_NWORDS*4-1] = (uint16_t)mxc;
+}
 #else
+static void bn192_mulx_core(bn_word_t result[ECDSA_NWORDS*2], const bn_t a, const bn_t b)
+{
   uint64_t mxc = 0;
   for (int ri = 0; ri < ECDSA_NWORDS*2-1; ++ri) {
     int ai_beg = 0;
@@ -403,14 +408,39 @@ static void bn192_mulx_core(bn_word_t result[ECDSA_NWORDS*2], const bn_t a, cons
     mxc = acc_h + (uint32_t)(acc_l>>32);
   }
   result[ECDSA_NWORDS*2-1] = (uint32_t)mxc;
-#endif
 }
+#endif
 
 // bn192_nist_mod_192_mul
 // result = (a * b) mod m where a < m, b < m, m > 2^191
 // An implementation is efficient when m is close to 2^192
 void bn192_nist_mod_192_mul(bn_t result, const bn_t a, const bn_t b, const bn_t m)
 {
+#ifdef NO_MULX
+  typedef union {
+    uint32_t b32[ECDSA_NWORDS*2];
+    uint16_t b16[ECDSA_NWORDS*4];
+  } mulx_result_t;
+  mulx_result_t aXb; // buffer for a[]*b[];
+  bn192_mulx_core(aXb.b16, (const uint16_t*)a, (const uint16_t*)b);  // multiply
+  while (!bn192_is_zero(&aXb.b32[ECDSA_NWORDS])) {
+    mulx_result_t dXm; // buffer for aXb_h[]*m[];
+    // multiply and subtract
+    bn192_mulx_core(dXm.b16, &aXb.b16[ECDSA_NWORDS*2], (const uint16_t*)m);
+    bn_word_t borrow = 0;
+    for (int i = 0; i < ECDSA_NWORDS*2; ++i) {
+      bn_word_t av = aXb.b32[i];
+      bn_word_t bv = dXm.b32[i];
+      bn_word_t dif1 = av - borrow;
+      bn_word_t dif2 = dif1 - bv;
+      borrow = (av < borrow) | (dif1 < bv);
+      aXb.b32[i] = dif2;
+    }
+  }
+
+  // copy and conditionally last subtract
+  bn192_nist_mod_192(result, aXb.b32, m);
+#else
   bn_word_t aXb[ECDSA_NWORDS*2]; // buffer for a[]*b[];
   bn192_mulx_core(aXb, a, b);    // multiply
   while (!bn192_is_zero(&aXb[ECDSA_NWORDS])) {
@@ -430,6 +460,7 @@ void bn192_nist_mod_192_mul(bn_t result, const bn_t a, const bn_t b, const bn_t 
 
   // copy and conditionally last subtract
   bn192_nist_mod_192(result, aXb, m);
+#endif
 }
 #endif
 
