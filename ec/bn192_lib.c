@@ -247,6 +247,41 @@ void bn192_nist_mod_192(bn_t result, const bn_t a, const bn_t m)
 // result - a * b
 static inline void bn192_mulw_core(bn_word_t result[ECDSA_NWORDS+1], const bn_t a, bn_word_t b)
 {
+#ifdef NO_MULX
+  uint32_t ax = a[0];
+  uint32_t bh = b >> 16;
+  uint32_t bl = b & 0xFFFF;
+  uint32_t ml = ax * b;
+  uint32_t ah = ax >> 16;
+  uint32_t al = ax & 0xFFFF;
+  uint32_t mh = ah * bh;
+  result[0] = ml;
+  uint32_t ahXbl = ah * bl;
+  uint32_t alXbh = al * bh;
+  mh += ahXbl >> 16;
+  mh += alXbh >> 16;
+  uint32_t hl = (ahXbl & 0xFFFF) + (alXbh & 0xFFFF);
+  mh += hl >> 16;
+  mh += (hl << 16) > ml;
+  for (int i = 1; i < ECDSA_NWORDS; ++i) {
+    ax = a[i];
+    ml = ax * b;
+    ah = ax >> 16;
+    al = ax & 0xFFFF;
+    uint32_t mhi = ah * bh;
+    ahXbl = ah * bl;
+    alXbh = al * bh;
+    mhi += ahXbl >> 16;
+    mhi += alXbh >> 16;
+    hl = (ahXbl & 0xFFFF) + (alXbh & 0xFFFF);
+    mhi += hl >> 16;
+    mhi += (hl << 16) > ml;
+    ml += mh;
+    result[i] = ml;
+    mh = mhi + (mh > ml);
+  }
+  result[ECDSA_NWORDS] = mh;
+#else
   uint64_t mx = (uint64_t)a[0] * b;
   result[0] = (bn_word_t)mx;
   bn_word_t mh =  (uint32_t)(mx>>32);
@@ -256,6 +291,7 @@ static inline void bn192_mulw_core(bn_word_t result[ECDSA_NWORDS+1], const bn_t 
     mh = (uint32_t)(mx>>32);
   }
   result[ECDSA_NWORDS] = mh;
+#endif
 }
 
 // add_core
@@ -327,6 +363,27 @@ void bn192_nist_mod_192_mul(bn_t result, const bn_t a, const bn_t b, const bn_t 
 // mulx_core - result = a * b
 static void bn192_mulx_core(bn_word_t result[ECDSA_NWORDS*2], const bn_t a, const bn_t b)
 {
+#ifdef NO_MULX
+  uint32_t mxc = 0;
+  for (int ri = 0; ri < ECDSA_NWORDS*4-1; ++ri) {
+    int ai_beg = 0;
+    int bi_beg = ri;
+    if (bi_beg >= ECDSA_NWORDS*2) {
+      bi_beg = ECDSA_NWORDS*2-1;
+      ai_beg = ri - bi_beg;
+    }
+    uint32_t acc_l = mxc;
+    uint32_t acc_h = 0;
+    for (int ai = ai_beg, bi = bi_beg; ai <= bi_beg; ++ai, --bi) {
+      uint32_t mx = (uint32_t)((const uint16_t*)a)[ai] * ((const uint16_t*)b)[bi];
+      acc_l += mx & 0xFFFF;
+      acc_h += mx >> 16;
+    }
+    ((uint16_t*)result)[ri] = (uint16_t)acc_l;
+    mxc = acc_h + (acc_l>>16);
+  }
+  ((uint16_t*)result)[ECDSA_NWORDS*4-1] = (uint16_t)mxc;
+#else
   uint64_t mxc = 0;
   for (int ri = 0; ri < ECDSA_NWORDS*2-1; ++ri) {
     int ai_beg = 0;
@@ -346,6 +403,7 @@ static void bn192_mulx_core(bn_word_t result[ECDSA_NWORDS*2], const bn_t a, cons
     mxc = acc_h + (uint32_t)(acc_l>>32);
   }
   result[ECDSA_NWORDS*2-1] = (uint32_t)mxc;
+#endif
 }
 
 // bn192_nist_mod_192_mul
