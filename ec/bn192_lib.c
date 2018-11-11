@@ -241,13 +241,152 @@ void bn192_nist_mod_192(bn_t result, const bn_t a, const bn_t m)
   }
 }
 
-#ifdef NONCONV_MULTIPLY
+#ifndef MULTIPLICATION_ALGO
+  #define MULTIPLICATION_ALGO 0
+#endif
 
+// Multiplication Algorithm variants
+// MULTIPLICATION_ALGO  a*b           modulo reduction  Use mulx  Use mul
+// 0                    convolution   convolution       Yes       Yes
+// 1                    convolution   word-by-word      Yes       Yes
+// 2 - N/A
+// 3                    word-by-word  word-by-word      Yes       Yes
+// 4                    convolution   convolution       No        Yes
+// 5                    convolution   word-by-word      No        Yes
+// 6 - N/A
+// 7                    word-by-word  word-by-word      No        Yes
+// 8 - N/A
+// 9 - N/A
+// 10 - N/A
+// 11                   bit-by-bit    bit-by-bit        No        No
+
+
+#if (MULTIPLICATION_ALGO & 2)==0
+// mulx_core - result = a * b
+static void bn192_mulx_core(bn_word_t result[ECDSA_NWORDS*2], const bn_t a, const bn_t b)
+{
+  uint64_t mxc = 0;
+  for (int ai_beg_inc = 0; ai_beg_inc < 2; ++ai_beg_inc) {
+    int ri     = ai_beg_inc==0 ? 0              : ECDSA_NWORDS-1;
+    int ri_end = ai_beg_inc==0 ? ECDSA_NWORDS-1 : ECDSA_NWORDS*2-1;
+    for (int ai_beg = 0; ri < ri_end; ai_beg += ai_beg_inc, ++ri) {
+#if (MULTIPLICATION_ALGO & 4)==0
+      uint64_t acc_l = mxc;
+      uint64_t acc_h = 0;
+      for (int ai = ai_beg; ai <= ri - ai_beg; ++ai) {
+        uint64_t mx = (uint64_t)a[ai] * b[ri-ai];
+        acc_l += (uint32_t)mx;
+        acc_h += (uint32_t)(mx>>32);
+      }
+      result[ri] = (uint32_t)acc_l;
+      mxc = acc_h + (uint32_t)(acc_l>>32);
+#else
+      uint32_t acc_l = (uint32_t)mxc;
+      uint64_t acc_h = (uint32_t)(mxc >> 32);
+      uint64_t acc_m = 0;
+      for (int ai = ai_beg; ai <= ri - ai_beg; ++ai) {
+        uint32_t ax = a[ai];
+        uint32_t bx = b[ri-ai];
+        uint32_t ah = ax >> 16, al = ax & 0xFFFF;
+        uint32_t bh = bx >> 16, bl = bx & 0xFFFF;
+        uint32_t ll = al * bl;
+        uint32_t hh = ah * bh;
+        uint32_t lh = al * bh;
+        uint32_t hl = ah * bl;
+        acc_l += ll;
+        hh += (acc_l < ll); // no carry out from hh, because hh can't be UINT32_MAX
+        acc_h += hh;
+        acc_m += lh;
+        acc_m += hl;
+      }
+      acc_m = (acc_m << 16) + acc_l;
+      result[ri] = (uint32_t)acc_m;
+      mxc = acc_h + (uint32_t)(acc_m>>32);
+#endif
+    }
+  }
+  result[ECDSA_NWORDS*2-1] = (uint32_t)mxc;
+}
+#endif
+
+#if (MULTIPLICATION_ALGO & 1)==1 && MULTIPLICATION_ALGO < 8
+// bn192_mulsubw_core - multiply bn_t number by word and subtract product
+//                      from accumulator
+// acc = acc - a * b
+// return MS word of accumulator
+static inline bn_word_t bn192_mulsubw_core(bn_word_t acc[ECDSA_NWORDS+1], const bn_t a, bn_word_t b)
+{
+  uint32_t mh = 0;
+#if (MULTIPLICATION_ALGO & 4)==0
+  for (int i = 0; i < ECDSA_NWORDS; ++i) {
+    uint64_t mx = (uint64_t)a[i] * b + mh; // at most UINT32_MAX << 32
+    uint32_t accw = acc[i];
+    acc[i] = accw - (uint32_t)mx;
+    mh = (uint32_t)(mx>>32) + (accw < (uint32_t)mx); // no carry out because when MS word of mx=UINT32_MAX then LS word of mx = 0
+  }
+#else
+  uint32_t bh = b >> 16;
+  uint32_t bl = b & 0xFFFF;
+  for (int i = 0; i < ECDSA_NWORDS; ++i) {
+    uint32_t ax = a[i];
+    uint32_t ll = ax * b;
+    uint32_t ah = ax >> 16;
+    uint32_t al = ax & 0xFFFF;
+    uint32_t hh = ah * bh;
+    uint32_t hl = ah * bl;
+    uint32_t lh = al * bh;
+    uint32_t ml = mh + ll;
+    hh += (ml < ll);
+    hl += lh;
+    hh += (hl < lh) << 16;
+    hh += hl >> 16;
+    hh += (hl << 16) > ll;
+    uint32_t accw = acc[i];
+    acc[i] = accw - ml;
+    mh = hh + (accw < ml); // no carry out because when hh=UINT32_MAX then ml = 0
+  }
+#endif
+  return acc[ECDSA_NWORDS] - mh;
+}
+#endif
+
+#if (MULTIPLICATION_ALGO & 1)==1
+// sub_core
+// result = result - a
+// return - borrow out
+static inline bn_word_t bn192_sub_core(bn_t result, const bn_t a)
+{
+  uint64_t dif = result[0];
+  dif -= a[0];
+  result[0] = (bn_word_t)dif;
+  bn_word_t borrow = (uint32_t)(dif>>32) & 1;
+  for (int i = 1; i < ECDSA_NWORDS; ++i) {
+    dif = result[i];
+    dif -= a[i];
+    dif -= borrow;
+    result[i] = (bn_word_t)dif;
+    borrow = (uint32_t)(dif>>32) & 1;
+  }
+  return borrow;
+}
+#endif
+
+#if (MULTIPLICATION_ALGO & 3)==3 && MULTIPLICATION_ALGO < 8
 // mulw_core - multiply bn_t number by word
 // result - a * b
 static inline void bn192_mulw_core(bn_word_t result[ECDSA_NWORDS+1], const bn_t a, bn_word_t b)
 {
-#ifdef NO_MULX
+#if (MULTIPLICATION_ALGO & 4)==0
+  uint64_t mx = (uint64_t)a[0] * b;
+  result[0] = (bn_word_t)mx;
+  bn_word_t mh =  (uint32_t)(mx>>32);
+  for (int i = 1; i < ECDSA_NWORDS; ++i) {
+    mx = (uint64_t)a[i] * b + mh;
+    result[i] = (bn_word_t)mx;
+    mh = (uint32_t)(mx>>32);
+  }
+  result[ECDSA_NWORDS] = mh;
+#else
   uint32_t ax = a[0];
   uint32_t bh = b >> 16;
   uint32_t bl = b & 0xFFFF;
@@ -281,20 +420,12 @@ static inline void bn192_mulw_core(bn_word_t result[ECDSA_NWORDS+1], const bn_t 
     mh = mhi + (mh > ml);
   }
   result[ECDSA_NWORDS] = mh;
-#else
-  uint64_t mx = (uint64_t)a[0] * b;
-  result[0] = (bn_word_t)mx;
-  bn_word_t mh =  (uint32_t)(mx>>32);
-  for (int i = 1; i < ECDSA_NWORDS; ++i) {
-    mx = (uint64_t)a[i] * b + mh;
-    result[i] = (bn_word_t)mx;
-    mh = (uint32_t)(mx>>32);
-  }
-  result[ECDSA_NWORDS] = mh;
 #endif
 }
+#endif
 
-// add_core
+#if (MULTIPLICATION_ALGO & 3)==3
+// bn192_add_core
 // result = result + a
 // return - carry out
 static inline bn_word_t bn192_add_core(bn_t result, const bn_t a)
@@ -312,102 +443,22 @@ static inline bn_word_t bn192_add_core(bn_t result, const bn_t a)
   }
   return carry;
 }
+#endif
 
-// sub_core
-// result = result - a
-// return - borrow out
-static inline bn_word_t bn192_sub_core(bn_t result, const bn_t a)
+#if MULTIPLICATION_ALGO==11
+// bn192_dbl_core
+// acc += acc
+// return - carry out
+static inline bn_word_t bn192_dbl_core(bn_t acc)
 {
-  uint64_t dif = result[0];
-  dif -= a[0];
-  result[0] = (bn_word_t)dif;
-  bn_word_t borrow = (uint32_t)(dif>>32) & 1;
-  for (int i = 1; i < ECDSA_NWORDS; ++i) {
-    dif = result[i];
-    dif -= a[i];
-    dif -= borrow;
-    result[i] = (bn_word_t)dif;
-    borrow = (uint32_t)(dif>>32) & 1;
+  bn_word_t carry = 0;
+  for (int i = 0; i < ECDSA_NWORDS; ++i) {
+    bn_word_t w = acc[i];
+    bn_word_t w2 = w + w;
+    acc[i] = w2 + carry;
+    carry = w2 < w;
   }
-  return borrow;
-}
-
-// bn192_nist_mod_192_mul
-// result = (a * b) mod m where a < m, b < m, m > 2^191
-// An implementation is efficient when m is close to 2^192
-void bn192_nist_mod_192_mul(bn_t result, const bn_t a, const bn_t b, const bn_t m)
-{
-  bn_word_t acc[ECDSA_NWORDS*2] = {0};
-  for (int i = ECDSA_NWORDS-1; i >= 0; --i) {
-    bn_word_t mx[ECDSA_NWORDS+1];
-    bn192_mulw_core(mx, a, b[i]);
-    acc[i] = mx[0];
-    bn_word_t carry = bn192_add_core(&acc[i+1], &mx[1]);
-    while (carry)
-      carry -= bn192_sub_core(&acc[i+1], m);
-    bn_word_t msw = acc[i+ECDSA_NWORDS];
-    if (msw > 1) {
-      bn192_mulw_core(mx, m, msw);
-      msw -= mx[ECDSA_NWORDS];
-      msw -= bn192_sub_core(&acc[i], mx);
-    }
-    while (msw)
-      msw -= bn192_sub_core(&acc[i], m);
-  }
-  // copy and conditionally last subtract
-  bn192_nist_mod_192(result, acc, m);
-}
-
-#else
-
-// mulx_core - result = a * b
-#ifdef NO_MULX
-static void bn192_mulx_core(uint16_t result[ECDSA_NWORDS*4], const uint16_t a[ECDSA_NWORDS*2], const uint16_t b[ECDSA_NWORDS*2])
-{
-  uint32_t mxc = (uint32_t)a[0] * b[0];
-  result[0] = (uint16_t)mxc;
-  mxc >>= 16;
-  for (int ri = 1; ri < ECDSA_NWORDS*4-1; ++ri) {
-    int ai_beg = 0;
-    int bi_beg = ri;
-    if (bi_beg >= ECDSA_NWORDS*2) {
-      bi_beg = ECDSA_NWORDS*2-1;
-      ai_beg = ri - bi_beg;
-    }
-    uint32_t acc_l = mxc;
-    uint32_t acc_h = 0;
-    for (int ai = ai_beg, bi = bi_beg; ai <= bi_beg; ++ai, --bi) {
-      uint32_t mx = (uint32_t)a[ai] * b[bi];
-      acc_l += mx;
-      acc_h += mx > acc_l;
-    }
-    result[ri] = (uint16_t)acc_l;
-    mxc = (acc_h << 16) + (acc_l>>16);
-  }
-  result[ECDSA_NWORDS*4-1] = (uint16_t)mxc;
-}
-#else
-static void bn192_mulx_core(bn_word_t result[ECDSA_NWORDS*2], const bn_t a, const bn_t b)
-{
-  uint64_t mxc = 0;
-  for (int ri = 0; ri < ECDSA_NWORDS*2-1; ++ri) {
-    int ai_beg = 0;
-    int bi_beg = ri;
-    if (bi_beg >= ECDSA_NWORDS) {
-      bi_beg = ECDSA_NWORDS-1;
-      ai_beg = ri - bi_beg;
-    }
-    uint64_t acc_l = mxc;
-    uint64_t acc_h = 0;
-    for (int ai = ai_beg, bi = bi_beg; ai <= bi_beg; ++ai, --bi) {
-      uint64_t mx = (uint64_t)a[ai] * b[bi];
-      acc_l += (uint32_t)mx;
-      acc_h += (uint32_t)(mx>>32);
-    }
-    result[ri] = (uint32_t)acc_l;
-    mxc = acc_h + (uint32_t)(acc_l>>32);
-  }
-  result[ECDSA_NWORDS*2-1] = (uint32_t)mxc;
+  return carry;
 }
 #endif
 
@@ -416,31 +467,28 @@ static void bn192_mulx_core(bn_word_t result[ECDSA_NWORDS*2], const bn_t a, cons
 // An implementation is efficient when m is close to 2^192
 void bn192_nist_mod_192_mul(bn_t result, const bn_t a, const bn_t b, const bn_t m)
 {
-#ifdef NO_MULX
-  typedef union {
-    uint32_t b32[ECDSA_NWORDS*2];
-    uint16_t b16[ECDSA_NWORDS*4];
-  } mulx_result_t;
-  mulx_result_t aXb; // buffer for a[]*b[];
-  bn192_mulx_core(aXb.b16, (const uint16_t*)a, (const uint16_t*)b);  // multiply
-  while (!bn192_is_zero(&aXb.b32[ECDSA_NWORDS])) {
-    mulx_result_t dXm; // buffer for aXb_h[]*m[];
-    // multiply and subtract
-    bn192_mulx_core(dXm.b16, &aXb.b16[ECDSA_NWORDS*2], (const uint16_t*)m);
-    bn_word_t borrow = 0;
-    for (int i = 0; i < ECDSA_NWORDS*2; ++i) {
-      bn_word_t av = aXb.b32[i];
-      bn_word_t bv = dXm.b32[i];
-      bn_word_t dif1 = av - borrow;
-      bn_word_t dif2 = dif1 - bv;
-      borrow = (av < borrow) | (dif1 < bv);
-      aXb.b32[i] = dif2;
+#if MULTIPLICATION_ALGO==11
+  bn_t acc = {0};
+  for (int i = ECDSA_NWORDS-1; i >= 0; --i) {
+    bn_word_t bw = b[i];
+    for (int bi = 0; bi < BN192LIB_BITS_PER_WORD; ++bi) {
+      bn_word_t carry = bn192_dbl_core(acc); // acc *= 2;
+      while (carry)
+        carry -= bn192_sub_core(acc, m);
+      if (bw & (1u << 31)) {
+        carry = bn192_add_core(acc, a);
+        while (carry)
+          carry -= bn192_sub_core(acc, m);
+      }
+      bw += bw;
     }
   }
-
   // copy and conditionally last subtract
-  bn192_nist_mod_192(result, aXb.b32, m);
+  bn192_nist_mod_192(result, acc, m);
+
 #else
+
+#if (MULTIPLICATION_ALGO & 3)==0
   bn_word_t aXb[ECDSA_NWORDS*2]; // buffer for a[]*b[];
   bn192_mulx_core(aXb, a, b);    // multiply
   while (!bn192_is_zero(&aXb[ECDSA_NWORDS])) {
@@ -457,12 +505,45 @@ void bn192_nist_mod_192_mul(bn_t result, const bn_t a, const bn_t b, const bn_t 
       aXb[i] = dif2;
     }
   }
-
   // copy and conditionally last subtract
   bn192_nist_mod_192(result, aXb, m);
 #endif
-}
+
+#if (MULTIPLICATION_ALGO & 3)==1
+  bn_word_t acc[ECDSA_NWORDS*2]; // buffer for a[]*b[];
+  bn192_mulx_core(acc, a, b);    // multiply
+  for (int i = ECDSA_NWORDS-1; i >= 0; --i) {
+    bn_word_t msw = acc[ECDSA_NWORDS+i];
+    if (msw > 1)
+      msw = bn192_mulsubw_core(&acc[i], m, msw);
+    while (msw != 0)
+      msw -= bn192_sub_core(&acc[i], m);
+  }
+  // copy and conditionally last subtract
+  bn192_nist_mod_192(result, acc, m);
 #endif
+
+#if (MULTIPLICATION_ALGO & 3)==3
+  bn_word_t acc[ECDSA_NWORDS*2] = {0};
+  for (int i = ECDSA_NWORDS-1; i >= 0; --i) {
+    bn_word_t mx[ECDSA_NWORDS+1];
+    bn192_mulw_core(mx, a, b[i]);
+    acc[i] = mx[0];
+    bn_word_t carry = bn192_add_core(&acc[i+1], &mx[1]);
+    while (carry)
+      carry -= bn192_sub_core(&acc[i+1], m);
+    bn_word_t msw = acc[ECDSA_NWORDS+i];
+    if (msw > 1)
+      msw = bn192_mulsubw_core(&acc[i], m, msw);
+    while (msw != 0)
+      msw -= bn192_sub_core(&acc[i], m);
+  }
+  // copy and conditionally last subtract
+  bn192_nist_mod_192(result, acc, m);
+#endif
+
+#endif
+}
 
 void bn192_nist_mod_192_sqr(bn_t result, const bn_t a, const bn_t m)
 {
