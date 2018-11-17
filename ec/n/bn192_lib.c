@@ -85,20 +85,36 @@ int bn192_ucmp(const bn_t a, const bn_t b)
   return 0; // is equal
 }
 
-void bn192_add_rshift1(bn_t result, const bn_t a, const bn_t b)
+
+void bn192_add_rshift1_n(bn_t result, const bn_t asrc, const bn_ofn_t b_n)
 {
-  bn_word_t av = a[0];
-  bn_word_t r = av + b[0];
-  bn_word_t carry = r < av;
-  for (int i = 1; i < ECDSA_NWORDS; ++i) {
-    av = a[i];
-    bn_word_t sum1 = av + b[i];
-    bn_word_t sum2 = sum1 + carry;
-    result[i-1] = (r >> 1) | (sum2 << (BN192LIB_BITS_PER_WORD-1));
-    carry = (sum1 < av) | (sum2 < sum1);
-    r = sum2;
+  bn_word_t a = asrc[0];
+  bn_word_t b = b_n[0];
+  bn_word_t r = a - b;
+  bn_word_t borrow = a < b;
+  r ^= (r & 1);
+  for (int i = 1; i < ECDSA_OFn_NWORDS; ++i) {
+    a = asrc[i];
+    b = b_n[i];
+    bn_word_t dif1 = a - borrow;
+    bn_word_t dif = dif1 - b;
+    borrow = (a < borrow) | (dif1 < b);
+    bn_word_t lsb = dif & 1;
+    r |= lsb;
+    result[i-1] = (r >> 1) | (r << (BN192LIB_BITS_PER_WORD-1));
+    r = dif ^ lsb;
   }
-  result[ECDSA_NWORDS-1] = (r >> 1) | (carry << (BN192LIB_BITS_PER_WORD-1));
+  for (int i = ECDSA_OFn_NWORDS; i < ECDSA_NWORDS; ++i) {
+    a = asrc[i];
+    bn_word_t dif = a - borrow;
+    borrow = (a < borrow);
+    bn_word_t lsb = dif & 1;
+    r |= lsb;
+    result[i-1] = (r >> 1) | (r << (BN192LIB_BITS_PER_WORD-1));
+    r = dif ^ lsb;
+  }
+  r |= borrow ^ 1;
+  result[ECDSA_NWORDS-1] = (r >> 1) | (r << (BN192LIB_BITS_PER_WORD-1));
 }
 
 // bn192_mod_add_quick

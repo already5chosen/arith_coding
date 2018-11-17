@@ -286,7 +286,7 @@ static void ec_point_add(
     bn192_nist_mod_192_mul_n(n1, n2, n5, group->field_n);
     bn192_mod_sub_quick(n0, n0, n1, group->field);
     if (bn192_is_odd(n0)) {
-      bn192_add_rshift1(r->Y, n0, group->field);
+      bn192_add_rshift1_n(r->Y, n0, group->field_n);
     } else {
       /* now  0 <= n0 < 2*p,  and n0 is even */
       bn192_rshift1(r->Y, n0);
