@@ -114,7 +114,7 @@ static void ec_point_dbl(
     } else {
         bn192_nist_mod_192_sqr_n(n1, a->Z, group->field_n);
         bn192_mod_add_quick_n(n0, a->X, n1, group->field_n);
-        bn192_mod_sub_quick(n2, a->X, n1, group->field);
+        bn192_mod_sub_quick_n(n2, a->X, n1, group->field_n);
         bn192_nist_mod_192_mul_n(n1, n0, n2, group->field_n);
         bn192_mod_lshift1_quick(n0, n1, group->field);
         bn192_mod_add_quick_n(n1, n0, n1, group->field_n);
@@ -152,7 +152,7 @@ static void ec_point_dbl(
     /* X_r */
     bn192_mod_lshift1_quick(n0, n2, group->field);
     bn192_nist_mod_192_sqr_n(rX, n1, group->field_n);
-    bn192_mod_sub_quick(r->X, rX, n0, group->field);
+    bn192_mod_sub_quick_n(r->X, rX, n0, group->field_n);
     /* X_r = n1^2 - 2 * n2 */
 
     /* n3 */
@@ -161,9 +161,9 @@ static void ec_point_dbl(
     /* n3 = 8 * Y_a^4 */
 
     /* Y_r */
-    bn192_mod_sub_quick(n0, n2, r->X, group->field);
+    bn192_mod_sub_quick_n(n0, n2, r->X, group->field_n);
     bn192_nist_mod_192_mul_n(n0, n1, n0, group->field_n);
-    bn192_mod_sub_quick(r->Y, n0, n3, group->field);
+    bn192_mod_sub_quick_n(r->Y, n0, n3, group->field_n);
     /* Y_r = n1 * (n2 - X_r) - n3 */
 }
 
@@ -229,8 +229,8 @@ static void ec_point_add(
     }
 
     /* n5, n6 */
-    bn192_mod_sub_quick(n5, n1, n3, group->field);
-    bn192_mod_sub_quick(n6, n2, n4, group->field);
+    bn192_mod_sub_quick_n(n5, n1, n3, group->field_n);
+    bn192_mod_sub_quick_n(n6, n2, n4, group->field_n);
     /* n5 = n1 - n3 */
     /* n6 = n2 - n4 */
 
@@ -272,19 +272,19 @@ static void ec_point_add(
     bn192_nist_mod_192_sqr_n(n0, n6, group->field_n);
     bn192_nist_mod_192_sqr_n(n4, n5, group->field_n);
     bn192_nist_mod_192_mul_n(n3, n1, n4, group->field_n);
-    bn192_mod_sub_quick(r->X, n0, n3, group->field);
+    bn192_mod_sub_quick_n(r->X, n0, n3, group->field_n);
     /* X_r = n6^2 - n5^2 * 'n7' */
 
     /* 'n9' */
     bn192_mod_lshift1_quick(n0, r->X, group->field);
-    bn192_mod_sub_quick(n0, n3, n0, group->field);
+    bn192_mod_sub_quick_n(n0, n3, n0, group->field_n);
     /* n9 = n5^2 * 'n7' - 2 * X_r */
 
     /* Y_r */
     bn192_nist_mod_192_mul_n(n0, n0, n6, group->field_n);
     bn192_nist_mod_192_mul_n(n5, n4, n5, group->field_n);
     bn192_nist_mod_192_mul_n(n1, n2, n5, group->field_n);
-    bn192_mod_sub_quick(n0, n0, n1, group->field);
+    bn192_mod_sub_quick_n(n0, n0, n1, group->field_n);
     if (bn192_is_odd(n0)) {
       bn192_add_rshift1_n(r->Y, n0, group->field_n);
     } else {

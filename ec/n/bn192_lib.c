@@ -118,7 +118,7 @@ void bn192_add_rshift1_n(bn_t result, const bn_t asrc, const bn_ofn_t b_n)
 }
 
 // bn192_mod_add_quick_n
-// result = (a + b) mod m where m=2^192-m_n, a < m, b < m, 0 < m_n < 0 2^96
+// result = (a + b) mod m where m=2^192-m_n, a < m, b < m, 0 < m_n < 2^96
 void bn192_mod_add_quick_n(bn_t result, const bn_t a, const bn_t b, const bn_ofn_t m_n)
 {
   bn_word_t carry1 = 0; // carry of a[]+b[]
@@ -151,29 +151,42 @@ void bn192_mod_add_quick_n(bn_t result, const bn_t a, const bn_t b, const bn_ofn
     memcpy(result, result2, sizeof(bn_t));
 }
 
-// bn192_mod_sub_quick
-// result = (a - b) mod m where a < m, b < m, m > 2^191
-void bn192_mod_sub_quick(bn_t result, const bn_t a, const bn_t b, const bn_t m)
+// bn192_mod_sub_quick_n
+// result = (a - b) mod m where m=2^192-m_n, a < m, b < m, 0 < m_n < 2^96
+void bn192_mod_sub_quick_n(bn_t result, const bn_t a, const bn_t b, const bn_ofn_t m_n)
 {
-  bn_word_t borrow = 0; // borrow of a[]-b[]
-  bn_word_t carry  = 0; // carry  of a[]-b[]+m[]
+  bn_word_t borrow1 = 0; // borrow of a[]-b[]
+  bn_word_t borrow2 = 0; // borrow of a[]-b[]-m_n[]
   bn_t result2; // a[]-b[]+m[]
-  for (int i = 0; i < ECDSA_NWORDS; ++i) {
+  for (int i = 0; i < ECDSA_OFn_NWORDS; ++i) {
     bn_word_t av = a[i];
     bn_word_t bv = b[i];
-    bn_word_t mv = m[i];
-    bn_word_t dif1 = av - borrow;
+    bn_word_t mv = m_n[i];
+    bn_word_t dif1 = av - borrow1;
     bn_word_t dif2 = dif1 - bv;
-    borrow = (av < borrow) | (dif1 < bv);
+    borrow1 = (av < borrow1) | (dif1 < bv);
 
-    bn_word_t sum1 = dif2 + mv;
-    bn_word_t sum2 = sum1 + carry;
-    carry = (sum1 < mv) | (sum2 < sum1);
+    bn_word_t dif3 = dif2 - borrow2;
+    bn_word_t dif4 = dif3 - mv;
+    borrow2 = (dif2 < borrow2) | (dif3 < mv);
 
     result[i]  = dif2;
-    result2[i] = sum2;
+    result2[i] = dif4;
   }
-  if (borrow)
+  for (int i = ECDSA_OFn_NWORDS; i < ECDSA_NWORDS; ++i) {
+    bn_word_t av = a[i];
+    bn_word_t bv = b[i];
+    bn_word_t dif1 = av - borrow1;
+    bn_word_t dif2 = dif1 - bv;
+    borrow1 = (av < borrow1) | (dif1 < bv);
+
+    bn_word_t dif3 = dif2 - borrow2;
+    borrow2 = (dif2 < borrow2);
+
+    result[i]  = dif2;
+    result2[i] = dif3;
+  }
+  if (borrow1)
     memcpy(result, result2, sizeof(bn_t));
 }
 
