@@ -389,22 +389,26 @@ static void ec_point_muladd2(
   const ec_point_t* q2,
   const bn_t        m2)
 {
-  const bn_word_t* m_oct[2] = {m1, m2};
   const ec_point_t* q[2] = { q1, q2 };
   int nz = 0;
-  for (int bit_i = ECDSA_NBITS-1; bit_i >= 0; --bit_i) {
-    if (nz)
-      ec_point_dbl(group, r, r);
+  for (int word_i = ECDSA_NWORDS-1; word_i >= 0; --word_i) {
+    bn_word_t mwa[2] = {m1[word_i], m2[word_i]};
+    for (int bit_i = BN192LIB_BITS_PER_WORD-1; bit_i >= 0; --bit_i) {
+      if (nz)
+        ec_point_dbl(group, r, r);
 
-    for (int k = 0; k < 2; ++k) {
-      if ((m_oct[k][bit_i/BN192LIB_BITS_PER_WORD] >> (bit_i%BN192LIB_BITS_PER_WORD)) & 1) {
-        // bit is set
-        if (nz) {
-          ec_point_add(group, r, r, q[k]);
-        } else {
-          *r = *q[k];
+      for (int k = 0; k < 2; ++k) {
+        bn_word_t mw = mwa[k];
+        mwa[k] = mw + mw;
+        if ((mw >> (BN192LIB_BITS_PER_WORD-1)) & 1) {
+          // bit is set
+          if (nz) {
+            ec_point_add(group, r, r, q[k]);
+          } else {
+            *r = *q[k];
+          }
+          nz = 1;
         }
-        nz = 1;
       }
     }
   }
