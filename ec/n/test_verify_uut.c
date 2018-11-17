@@ -107,17 +107,17 @@ static void ec_point_dbl(
     if (a->Z_is_one) {
         bn192_nist_mod_192_sqr_n(n0, a->X, group->field_n);
         bn192_mod_lshift1_quick(n1, n0, group->field);
-        bn192_mod_add_quick(n0, n0, n1, group->field);
-        bn192_mod_add_quick(n1, n0, group->a, group->field);
+        bn192_mod_add_quick_n(n0, n0, n1, group->field_n);
+        bn192_mod_add_quick_n(n1, n0, group->a, group->field_n);
         /* n1 = 3 * X_a^2 + a_curve */
   //  } else if (group->a_is_minus3) {
     } else {
         bn192_nist_mod_192_sqr_n(n1, a->Z, group->field_n);
-        bn192_mod_add_quick(n0, a->X, n1, group->field);
+        bn192_mod_add_quick_n(n0, a->X, n1, group->field_n);
         bn192_mod_sub_quick(n2, a->X, n1, group->field);
         bn192_nist_mod_192_mul_n(n1, n0, n2, group->field_n);
         bn192_mod_lshift1_quick(n0, n1, group->field);
-        bn192_mod_add_quick(n1, n0, n1, group->field);
+        bn192_mod_add_quick_n(n1, n0, n1, group->field_n);
         /*-
          * n1 = 3 * (X_a + Z_a^2) * (X_a - Z_a^2)
          *    = 3 * X_a^2 - 3 * Z_a^4
@@ -247,8 +247,8 @@ static void ec_point_add(
     }
 
     /* 'n7', 'n8' */
-    bn192_mod_add_quick(n1, n1, n3, group->field);
-    bn192_mod_add_quick(n2, n2, n4, group->field);
+    bn192_mod_add_quick_n(n1, n1, n3, group->field_n);
+    bn192_mod_add_quick_n(n2, n2, n4, group->field_n);
     /* 'n7' = n1 + n3 */
     /* 'n8' = n2 + n4 */
 

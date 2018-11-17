@@ -117,26 +117,37 @@ void bn192_add_rshift1_n(bn_t result, const bn_t asrc, const bn_ofn_t b_n)
   result[ECDSA_NWORDS-1] = (r >> 1) | (r << (BN192LIB_BITS_PER_WORD-1));
 }
 
-// bn192_mod_add_quick
-// result = (a + b) mod m where a < m, b < m, m > 2^191
-void bn192_mod_add_quick(bn_t result, const bn_t a, const bn_t b, const bn_t m)
+// bn192_mod_add_quick_n
+// result = (a + b) mod m where m=2^192-m_n, a < m, b < m, 0 < m_n < 0 2^96
+void bn192_mod_add_quick_n(bn_t result, const bn_t a, const bn_t b, const bn_ofn_t m_n)
 {
-  bn_word_t carry  = 0; // carry of a[]+b[]
-  bn_word_t borrow = 0; // borrow of a[]+b[]-m[]
-  bn_t result2; // a[]+b[]-m[]
-  for (int i = 0; i < ECDSA_NWORDS; ++i) {
+  bn_word_t carry1 = 0; // carry of a[]+b[]
+  bn_word_t carry2 = 0; // carry of a[]+b[]+m_n[]
+  bn_t result2; // a[]+b[]+m_n[]
+  for (int i = 0; i < ECDSA_OFn_NWORDS; ++i) {
     bn_word_t av = a[i];
-    bn_word_t sum1 = av + b[i];
-    bn_word_t sum2 = sum1 + carry;
-    bn_word_t mv = m[i];
+    bn_word_t sum1 = av + carry1;
+    bn_word_t sum2 = sum1 + b[i];
     result[i] = sum2;
-    carry = (sum1 < av) | (sum2 < sum1);
+    carry1 = (sum1 < av) | (sum2 < sum1);
 
-    bn_word_t diff = sum2 - borrow;
-    borrow = (sum2 < borrow) | (diff < mv);
-    result2[i] = diff - mv;
+    bn_word_t sum3 = sum2 + carry2;
+    bn_word_t sum4 = sum3 + m_n[i];
+    result2[i] = sum4;
+    carry2 = (sum3 < sum2) | (sum4 < sum3);
   }
-  if (carry || !borrow)
+  for (int i = ECDSA_OFn_NWORDS; i < ECDSA_NWORDS; ++i) {
+    bn_word_t av = a[i];
+    bn_word_t sum1 = av + carry1;
+    bn_word_t sum2 = sum1 + b[i];
+    result[i] = sum2;
+    carry1 = (sum1 < av) | (sum2 < sum1);
+
+    bn_word_t sum3 = sum2 + carry2;
+    result2[i] = sum3;
+    carry2 = (sum3 < sum2);
+  }
+  if (carry1 || carry2)
     memcpy(result, result2, sizeof(bn_t));
 }
 

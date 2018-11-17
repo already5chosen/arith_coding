@@ -48,7 +48,7 @@ void bn192_zero(bn_t result);
 void bn192_one(bn_t result);
 
 void bn192_add_rshift1_n(bn_t result, const bn_t a, const bn_ofn_t b_n);
-void bn192_mod_add_quick(bn_t result, const bn_t a, const bn_t b, const bn_t m);
+void bn192_mod_add_quick_n(bn_t result, const bn_t a, const bn_t b, const bn_ofn_t m_n);
 void bn192_mod_sub_quick(bn_t result, const bn_t a, const bn_t b, const bn_t m);
 void bn192_mod_inverse_n(bn_t result, const bn_t a, const bn_ofn_t n_n);
 void bn192_mod_lshift1_quick(bn_t result, const bn_t a, const bn_t m);
