@@ -341,7 +341,7 @@ static int ec_point_get_affine_coordinates(
            }
   //      }
     } else {
-        bn192_mod_inverse(Z_1, Z_, group->field);
+        bn192_mod_inverse_n(Z_1, Z_, group->field_n);
   //      if (group->meth->field_encode == 0) {
   //          /* field_sqr works on standard representation */
   //          if (!group->meth->field_sqr(group, Z_2, Z_1))
@@ -440,7 +440,7 @@ static int ossl_ecdsa_verify_sig(
 
     // calculate tmp1 = inv(S) mod order
     bn_t u2;
-    bn192_mod_inverse(u2, sig_s, group->order);
+    bn192_mod_inverse_n(u2, sig_s, group->order_n);
 
     //
     // There is no need to truncate digest,
