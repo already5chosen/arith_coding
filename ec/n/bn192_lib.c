@@ -26,6 +26,10 @@ BN_zero
 #include <string.h>
 #include "bn192_lib.h"
 
+static void bn192_nist_mod_192    (bn_t result, const bn_t a, const bn_t m);
+static void bn192_nist_mod_192_mul(bn_t result, const bn_t a, const bn_t b, const bn_t m);
+static void bn192_nist_mod_192_sqr(bn_t result, const bn_t a, const bn_t m);
+
 enum {
   BNLIB_NBYTES = 24,
 };
@@ -224,7 +228,7 @@ void bn192_mod_lshift_quick(bn_t result, const bn_t a, int n, const bn_t m)
   }
 }
 
-void bn192_nist_mod_192(bn_t result, const bn_t a, const bn_t m)
+static void bn192_nist_mod_192(bn_t result, const bn_t a, const bn_t m)
 {
   memcpy(result, a, sizeof(bn_t));
   if (bn192_ucmp(a, m) >= 0) {
@@ -465,7 +469,7 @@ static inline bn_word_t bn192_dbl_core(bn_t acc)
 // bn192_nist_mod_192_mul
 // result = (a * b) mod m where a < m, b < m, m > 2^191
 // An implementation is efficient when m is close to 2^192
-void bn192_nist_mod_192_mul(bn_t result, const bn_t a, const bn_t b, const bn_t m)
+static void bn192_nist_mod_192_mul(bn_t result, const bn_t a, const bn_t b, const bn_t m)
 {
 #if MULTIPLICATION_ALGO==11
   bn_t acc = {0};
@@ -545,9 +549,149 @@ void bn192_nist_mod_192_mul(bn_t result, const bn_t a, const bn_t b, const bn_t 
 #endif
 }
 
-void bn192_nist_mod_192_sqr(bn_t result, const bn_t a, const bn_t m)
+static void bn192_nist_mod_192_sqr(bn_t result, const bn_t a, const bn_t m)
 {
   bn192_nist_mod_192_mul(result, a, a, m);
+}
+
+
+#if (MULTIPLICATION_ALGO & 1)==1
+// bn192_sub_n_core
+// acc = acc - (2^192-asrc)
+// return - borrow out
+static inline bn_word_t bn192_sub_n_core(bn_t acc, const bn_ofn_t asrc)
+{
+  bn_word_t a = asrc[0];
+  bn_word_t r = acc[0] + a;
+  acc[0] = r;
+  bn_word_t carry = r < a;
+  for (int i = 1; i < ECDSA_OFn_NWORDS; ++i) {
+    a = asrc[i];
+    bn_word_t sum1 = acc[i] + carry;
+    bn_word_t sum2 = sum1 + a;
+    acc[i] = sum2;
+    carry  = (sum1 < carry) | (sum2 < a);
+  }
+  for (int i = ECDSA_OFn_NWORDS; i < ECDSA_NWORDS; ++i) {
+    uint32_t r = acc[i] + carry;
+    acc[i] = r;
+    carry = (r < carry);
+  }
+  return carry ^ 1;
+}
+#endif
+
+#if (MULTIPLICATION_ALGO & 1)==1 && MULTIPLICATION_ALGO < 8
+// bn192_mulsubw_n_core - multiply bn_t number = (2^192-a) by word and subtract product
+//                        from accumulator
+// acc = acc - (2^192-a) * b
+// return MS word of accumulator
+static inline bn_word_t bn192_mulsubw_n_core(bn_word_t acc[ECDSA_NWORDS+1], const bn_t a, bn_word_t b)
+{
+  uint32_t mh = 0;
+#if (MULTIPLICATION_ALGO & 4)==0
+  for (int i = 0; i < ECDSA_OFn_NWORDS; ++i) {
+    uint64_t mx = (uint64_t)a[i] * b + mh; // at most UINT32_MAX << 32
+    uint32_t accw = acc[i] + (uint32_t)mx;
+    acc[i] = accw;
+    mh = (uint32_t)(mx>>32) + (accw < (uint32_t)mx); // no carry out because when MS word of mx=UINT32_MAX then LS word of mx = 0
+  }
+  for (int i = ECDSA_OFn_NWORDS; i < ECDSA_NWORDS; ++i) {
+    uint32_t accw = acc[i] + mh;
+    acc[i] = accw;
+    mh = (accw < mh); // carry out
+  }
+  mh = b - mh;
+#else
+  uint32_t bh = b >> 16;
+  uint32_t bl = b & 0xFFFF;
+  for (int i = 0; i < ECDSA_NWORDS; ++i) {
+    uint32_t ax = a[i];
+    uint32_t ll = ax * b;
+    uint32_t ah = ax >> 16;
+    uint32_t al = ax & 0xFFFF;
+    uint32_t hh = ah * bh;
+    uint32_t hl = ah * bl;
+    uint32_t lh = al * bh;
+    uint32_t ml = mh + ll;
+    hh += (ml < ll);
+    hl += lh;
+    hh += (hl < lh) << 16;
+    hh += hl >> 16;
+    hh += (hl << 16) > ll;
+    uint32_t accw = acc[i];
+    acc[i] = accw - ml;
+    mh = hh + (accw < ml); // no carry out because when hh=UINT32_MAX then ml = 0
+  }
+#endif
+  return acc[ECDSA_NWORDS] - mh;
+}
+#endif
+
+// bn192_nist_mod_192_mul
+// result = (a * b) mod (2^192-m) where a < (2^192-m), b < (2^192-m), m < 2^96
+void bn192_nist_mod_192_mul_n(bn_t result, const bn_t a, const bn_t b, const bn_ofn_t m_n)
+{
+#if MULTIPLICATION_ALGO==11
+  bn_t acc = {0};
+  for (int i = ECDSA_NWORDS-1; i >= 0; --i) {
+    bn_word_t bw = b[i];
+    for (int bi = 0; bi < BN192LIB_BITS_PER_WORD; ++bi) {
+      bn_word_t carry = bn192_dbl_core(acc); // acc *= 2;
+      while (carry)
+        carry -= bn192_sub_core(acc, m);
+      if (bw & (1u << 31)) {
+        carry = bn192_add_core(acc, a);
+        while (carry)
+          carry -= bn192_sub_core(acc, m);
+      }
+      bw += bw;
+    }
+  }
+  // copy and conditionally last subtract
+  bn192_nist_mod_192(result, acc, m);
+
+#else
+
+#if (MULTIPLICATION_ALGO & 3)==1
+  bn_word_t acc[ECDSA_NWORDS*2]; // buffer for a[]*b[];
+  bn192_mulx_core(acc, a, b);    // multiply
+  for (int i = ECDSA_NWORDS-1; i >= 0; --i) {
+    bn_word_t msw = acc[ECDSA_NWORDS+i];
+    if (msw > 1)
+      msw = bn192_mulsubw_n_core(&acc[i], m_n, msw);
+    while (msw != 0)
+      msw -= bn192_sub_n_core(&acc[i], m_n);
+  }
+  // copy and conditionally last subtract
+  bn192_nist_mod_192_n(result, acc, m_n);
+#endif
+
+#if (MULTIPLICATION_ALGO & 3)==3
+  bn_word_t acc[ECDSA_NWORDS*2] = {0};
+  for (int i = ECDSA_NWORDS-1; i >= 0; --i) {
+    bn_word_t mx[ECDSA_NWORDS+1];
+    bn192_mulw_core(mx, a, b[i]);
+    acc[i] = mx[0];
+    bn_word_t carry = bn192_add_core(&acc[i+1], &mx[1]);
+    while (carry)
+      carry -= bn192_sub_core(&acc[i+1], m);
+    bn_word_t msw = acc[ECDSA_NWORDS+i];
+    if (msw > 1)
+      msw = bn192_mulsubw_core(&acc[i], m, msw);
+    while (msw != 0)
+      msw -= bn192_sub_core(&acc[i], m);
+  }
+  // copy and conditionally last subtract
+  bn192_nist_mod_192(result, acc, m);
+#endif
+
+#endif
+}
+
+void bn192_nist_mod_192_sqr_n(bn_t result, const bn_t a, const bn_ofn_t m_n)
+{
+  bn192_nist_mod_192_mul_n(result, a, a, m_n);
 }
 
 void bn192_rshift1(bn_t result, const bn_t a)
@@ -558,4 +702,17 @@ void bn192_rshift1(bn_t result, const bn_t a)
     result[i] = (av >> 1) | msb;
     msb = av << (BN192LIB_BITS_PER_WORD-1);
   }
+}
+
+void bn192_nist_mod_192_n(bn_t result, const bn_t a, const bn_ofn_t m_n)
+{
+  if (a[ECDSA_NWORDS-1] == (bn_word_t)-1) {
+    bn_t tmp;
+    memcpy(tmp, a, sizeof(bn_t));
+    if (!bn192_sub_n_core(tmp, m_n)) {
+      memcpy(result, tmp, sizeof(bn_t));
+      return;
+    }
+  }
+  memcpy(result, a, sizeof(bn_t));
 }

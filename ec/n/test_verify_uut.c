@@ -15,9 +15,11 @@ typedef struct {
 
 typedef struct {
   bn_t field;
+  bn_ofn_t field_n;
   bn_t a;
   // bn_t b; // it seems, as long as we trust public key, parameter b is not used in verification process
   bn_t order;
+  bn_ofn_t order_n;
   ec_point_t generator;
 } ec_group_t;
 
@@ -26,6 +28,9 @@ static ec_group_t st_group = {
   0xFFFFFFFF,  0xFFFFFFFF,  0xFFFFFFFE,
   0xFFFFFFFF,  0xFFFFFFFF,  0xFFFFFFFF,
  },
+ { // -p
+  0-0xFFFFFFFF,  ~0xFFFFFFFF,  ~0xFFFFFFFE,
+ },
  { // a
   0xFFFFFFFC,  0xFFFFFFFF,  0xFFFFFFFE,
   0xFFFFFFFF,  0xFFFFFFFF,  0xFFFFFFFF,
@@ -33,6 +38,9 @@ static ec_group_t st_group = {
  { // order
   0xB4D22831,  0x146BC9B1,  0x99DEF836,
   0xFFFFFFFF,  0xFFFFFFFF,  0xFFFFFFFF,
+ },
+ { // -order
+  0-0xB4D22831,  ~0x146BC9B1,  ~0x99DEF836,
  },
   // generator
  {
@@ -97,17 +105,17 @@ static void ec_point_dbl(
 
     /* n1 */
     if (a->Z_is_one) {
-        bn192_nist_mod_192_sqr(n0, a->X, group->field);
+        bn192_nist_mod_192_sqr_n(n0, a->X, group->field_n);
         bn192_mod_lshift1_quick(n1, n0, group->field);
         bn192_mod_add_quick(n0, n0, n1, group->field);
         bn192_mod_add_quick(n1, n0, group->a, group->field);
         /* n1 = 3 * X_a^2 + a_curve */
   //  } else if (group->a_is_minus3) {
     } else {
-        bn192_nist_mod_192_sqr(n1, a->Z, group->field);
+        bn192_nist_mod_192_sqr_n(n1, a->Z, group->field_n);
         bn192_mod_add_quick(n0, a->X, n1, group->field);
         bn192_mod_sub_quick(n2, a->X, n1, group->field);
-        bn192_nist_mod_192_mul(n1, n0, n2, group->field);
+        bn192_nist_mod_192_mul_n(n1, n0, n2, group->field_n);
         bn192_mod_lshift1_quick(n0, n1, group->field);
         bn192_mod_add_quick(n1, n0, n1, group->field);
         /*-
@@ -129,32 +137,32 @@ static void ec_point_dbl(
     if (a->Z_is_one) {
         bn192_copy(n0, a->Y);
     } else {
-        bn192_nist_mod_192_mul(n0, a->Y, a->Z, group->field);
+        bn192_nist_mod_192_mul_n(n0, a->Y, a->Z, group->field_n);
     }
     bn192_mod_lshift1_quick(r->Z, n0, group->field);
     r->Z_is_one = 0;
     /* Z_r = 2 * Y_a * Z_a */
 
     /* n2 */
-    bn192_nist_mod_192_sqr(n3, a->Y, group->field);
-    bn192_nist_mod_192_mul(n2, a->X, n3, group->field);
+    bn192_nist_mod_192_sqr_n(n3, a->Y, group->field_n);
+    bn192_nist_mod_192_mul_n(n2, a->X, n3, group->field_n);
     bn192_mod_lshift_quick(n2, n2, 2, group->field);
     /* n2 = 4 * X_a * Y_a^2 */
 
     /* X_r */
     bn192_mod_lshift1_quick(n0, n2, group->field);
-    bn192_nist_mod_192_sqr(rX, n1, group->field);
+    bn192_nist_mod_192_sqr_n(rX, n1, group->field_n);
     bn192_mod_sub_quick(r->X, rX, n0, group->field);
     /* X_r = n1^2 - 2 * n2 */
 
     /* n3 */
-    bn192_nist_mod_192_sqr(n0, n3, group->field);
+    bn192_nist_mod_192_sqr_n(n0, n3, group->field_n);
     bn192_mod_lshift_quick(n3, n0, 3, group->field);
     /* n3 = 8 * Y_a^4 */
 
     /* Y_r */
     bn192_mod_sub_quick(n0, n2, r->X, group->field);
-    bn192_nist_mod_192_mul(n0, n1, n0, group->field);
+    bn192_nist_mod_192_mul_n(n0, n1, n0, group->field_n);
     bn192_mod_sub_quick(r->Y, n0, n3, group->field);
     /* Y_r = n1 * (n2 - X_r) - n3 */
 }
@@ -195,12 +203,12 @@ static void ec_point_add(
         /* n1 = X_a */
         /* n2 = Y_a */
     } else {
-        bn192_nist_mod_192_sqr(n0, b->Z, group->field);
-        bn192_nist_mod_192_mul(n1, a->X, n0, group->field);
+        bn192_nist_mod_192_sqr_n(n0, b->Z, group->field_n);
+        bn192_nist_mod_192_mul_n(n1, a->X, n0, group->field_n);
         /* n1 = X_a * Z_b^2 */
 
-        bn192_nist_mod_192_mul(n0, n0, b->Z, group->field);
-        bn192_nist_mod_192_mul(n2, a->Y, n0, group->field);
+        bn192_nist_mod_192_mul_n(n0, n0, b->Z, group->field_n);
+        bn192_nist_mod_192_mul_n(n2, a->Y, n0, group->field_n);
         /* n2 = Y_a * Z_b^3 */
     }
 
@@ -211,12 +219,12 @@ static void ec_point_add(
         /* n3 = X_b */
         /* n4 = Y_b */
     } else {
-        bn192_nist_mod_192_sqr(n0, a->Z, group->field);
-        bn192_nist_mod_192_mul(n3, b->X, n0, group->field);
+        bn192_nist_mod_192_sqr_n(n0, a->Z, group->field_n);
+        bn192_nist_mod_192_mul_n(n3, b->X, n0, group->field_n);
         /* n3 = X_b * Z_a^2 */
 
-        bn192_nist_mod_192_mul(n0, n0, a->Z, group->field);
-        bn192_nist_mod_192_mul(n4, b->Y, n0, group->field);
+        bn192_nist_mod_192_mul_n(n0, n0, a->Z, group->field_n);
+        bn192_nist_mod_192_mul_n(n4, b->Y, n0, group->field_n);
         /* n4 = Y_b * Z_a^3 */
     }
 
@@ -253,17 +261,17 @@ static void ec_point_add(
         } else if (b->Z_is_one) {
             bn192_copy(n0, a->Z);
         } else {
-            bn192_nist_mod_192_mul(n0, a->Z, b->Z, group->field);
+            bn192_nist_mod_192_mul_n(n0, a->Z, b->Z, group->field_n);
         }
-        bn192_nist_mod_192_mul(r->Z, n0, n5, group->field);
+        bn192_nist_mod_192_mul_n(r->Z, n0, n5, group->field_n);
     }
     r->Z_is_one = 0;
     /* Z_r = Z_a * Z_b * n5 */
 
     /* X_r */
-    bn192_nist_mod_192_sqr(n0, n6, group->field);
-    bn192_nist_mod_192_sqr(n4, n5, group->field);
-    bn192_nist_mod_192_mul(n3, n1, n4, group->field);
+    bn192_nist_mod_192_sqr_n(n0, n6, group->field_n);
+    bn192_nist_mod_192_sqr_n(n4, n5, group->field_n);
+    bn192_nist_mod_192_mul_n(n3, n1, n4, group->field_n);
     bn192_mod_sub_quick(r->X, n0, n3, group->field);
     /* X_r = n6^2 - n5^2 * 'n7' */
 
@@ -273,9 +281,9 @@ static void ec_point_add(
     /* n9 = n5^2 * 'n7' - 2 * X_r */
 
     /* Y_r */
-    bn192_nist_mod_192_mul(n0, n0, n6, group->field);
-    bn192_nist_mod_192_mul(n5, n4, n5, group->field);
-    bn192_nist_mod_192_mul(n1, n2, n5, group->field);
+    bn192_nist_mod_192_mul_n(n0, n0, n6, group->field_n);
+    bn192_nist_mod_192_mul_n(n5, n4, n5, group->field_n);
+    bn192_nist_mod_192_mul_n(n1, n2, n5, group->field_n);
     bn192_mod_sub_quick(n0, n0, n1, group->field);
     if (bn192_is_odd(n0)) {
       bn192_add_rshift1(r->Y, n0, group->field);
@@ -339,7 +347,7 @@ static int ec_point_get_affine_coordinates(
   //          if (!group->meth->field_sqr(group, Z_2, Z_1))
   //              goto err;
   //      } else {
-            bn192_nist_mod_192_sqr(Z_2, Z_1, group->field);
+            bn192_nist_mod_192_sqr_n(Z_2, Z_1, group->field_n);
   //      }
 
         if (x != NULL) {
@@ -347,7 +355,7 @@ static int ec_point_get_affine_coordinates(
              * in the Montgomery case, field_mul will cancel out Montgomery
              * factor in X:
              */
-            bn192_nist_mod_192_mul(x, point->X, Z_2, group->field);
+            bn192_nist_mod_192_mul_n(x, point->X, Z_2, group->field_n);
         }
 
         if (y != NULL) {
@@ -358,14 +366,14 @@ static int ec_point_get_affine_coordinates(
   //              if (!group->meth->field_mul(group, Z_3, Z_2, Z_1))
   //                  goto err;
   //          } else {
-                bn192_nist_mod_192_mul(Z_3, Z_2, Z_1, group->field);
+                bn192_nist_mod_192_mul_n(Z_3, Z_2, Z_1, group->field_n);
   //          }
 
             /*
              * in the Montgomery case, field_mul will cancel out Montgomery
              * factor in Y:
              */
-            bn192_nist_mod_192_mul(y, point->Y, Z_3, group->field);
+            bn192_nist_mod_192_mul_n(y, point->Y, Z_3, group->field_n);
         }
     }
     return 1;
@@ -442,9 +450,9 @@ static int ossl_ecdsa_verify_sig(
 
     // u1 = digest * tmp mod order
     bn_t u1;
-    bn192_nist_mod_192_mul(u1, digest, u2, order);
+    bn192_nist_mod_192_mul_n(u1, digest, u2, group->order_n);
     // u2 = r * w mod q
-    bn192_nist_mod_192_mul(u2, sig_r, u2, order);
+    bn192_nist_mod_192_mul_n(u2, sig_r, u2, group->order_n);
 
     // point = generator*u1 + pub_key*u2
     ec_point_t point;
@@ -458,7 +466,7 @@ static int ossl_ecdsa_verify_sig(
         return -1; // internal error (point==Inf, it shouldn't happen)
     }
 
-    bn192_nist_mod_192(u1, X, order);
+    bn192_nist_mod_192_n(u1, X, group->order_n);
     /*  if the signature is correct u1 is equal to sig_r */
     return (bn192_ucmp(u1, sig_r) == 0);
 }

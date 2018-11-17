@@ -53,11 +53,9 @@ void bn192_mod_sub_quick(bn_t result, const bn_t a, const bn_t b, const bn_t m);
 void bn192_mod_inverse(bn_t result, const bn_t a, const bn_t n);
 void bn192_mod_lshift1_quick(bn_t result, const bn_t a, const bn_t m);
 void bn192_mod_lshift_quick(bn_t result, const bn_t a, int n, const bn_t m);
-void bn192_nist_mod_192    (bn_t result, const bn_t a, const bn_t m);
-void bn192_nist_mod_192_mul(bn_t result, const bn_t a, const bn_t b, const bn_t m);
-void bn192_nist_mod_192_sqr(bn_t result, const bn_t a, const bn_t m);
-void bn192_nist_mod_192_mul_n(bn_t result, const bn_t a, const bn_t b, const bn_ofn_t m);
-void bn192_nist_mod_192_sqr_n(bn_t result, const bn_t a, const bn_ofn_t m);
+void bn192_nist_mod_192_n    (bn_t result, const bn_t a, const bn_ofn_t m_n);
+void bn192_nist_mod_192_mul_n(bn_t result, const bn_t a, const bn_t b, const bn_ofn_t m_n);
+void bn192_nist_mod_192_sqr_n(bn_t result, const bn_t a, const bn_ofn_t m_n);
 void bn192_rshift1(bn_t result, const bn_t a);
 
 #endif
