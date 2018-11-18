@@ -456,16 +456,10 @@ static inline bn_word_t bn192_mulsubw_n_core(bn_word_t acc[ECDSA_NWORDS+1], cons
     acc[i] = accw;
     mh = (uint32_t)(mx>>32) + (accw < (uint32_t)mx); // no carry out because when MS word of mx=UINT32_MAX then LS word of mx = 0
   }
-  for (int i = ECDSA_OFn_NWORDS; i < ECDSA_NWORDS; ++i) {
-    uint32_t accw = acc[i] + mh;
-    acc[i] = accw;
-    mh = (accw < mh); // carry out
-  }
-  mh = b - mh;
 #else
   uint32_t bh = b >> 16;
   uint32_t bl = b & 0xFFFF;
-  for (int i = 0; i < ECDSA_NWORDS; ++i) {
+  for (int i = 0; i < ECDSA_OFn_NWORDS; ++i) {
     uint32_t ax = a[i];
     uint32_t ll = ax * b;
     uint32_t ah = ax >> 16;
@@ -479,11 +473,17 @@ static inline bn_word_t bn192_mulsubw_n_core(bn_word_t acc[ECDSA_NWORDS+1], cons
     hh += (hl < lh) << 16;
     hh += hl >> 16;
     hh += (hl << 16) > ll;
-    uint32_t accw = acc[i];
-    acc[i] = accw - ml;
+    uint32_t accw = acc[i] + ml;
+    acc[i] = accw;
     mh = hh + (accw < ml); // no carry out because when hh=UINT32_MAX then ml = 0
   }
 #endif
+  for (int i = ECDSA_OFn_NWORDS; i < ECDSA_NWORDS; ++i) {
+    uint32_t accw = acc[i] + mh;
+    acc[i] = accw;
+    mh = (accw < mh); // carry out
+  }
+  mh = b - mh;
   return acc[ECDSA_NWORDS] - mh;
 }
 #endif
