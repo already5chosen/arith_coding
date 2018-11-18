@@ -535,15 +535,15 @@ void bn192_nist_mod_192_mul_n(bn_t result, const bn_t a, const bn_t b, const bn_
     acc[i] = mx[0];
     bn_word_t carry = bn192_add_core(&acc[i+1], &mx[1]);
     while (carry)
-      carry -= bn192_sub_core(&acc[i+1], m);
+      carry -= bn192_sub_n_core(&acc[i+1], m_n);
     bn_word_t msw = acc[ECDSA_NWORDS+i];
     if (msw > 1)
-      msw = bn192_mulsubw_core(&acc[i], m, msw);
+      msw = bn192_mulsubw_n_core(&acc[i], m_n, msw);
     while (msw != 0)
-      msw -= bn192_sub_core(&acc[i], m);
+      msw -= bn192_sub_n_core(&acc[i], m_n);
   }
   // copy and conditionally last subtract
-  bn192_nist_mod_192(result, acc, m);
+  bn192_nist_mod_192_n(result, acc, m_n);
 #endif
 
 #endif
