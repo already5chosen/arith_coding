@@ -499,17 +499,17 @@ void bn192_nist_mod_192_mul_n(bn_t result, const bn_t a, const bn_t b, const bn_
     for (int bi = 0; bi < BN192LIB_BITS_PER_WORD; ++bi) {
       bn_word_t carry = bn192_dbl_core(acc); // acc *= 2;
       while (carry)
-        carry -= bn192_sub_core(acc, m);
+        carry -= bn192_sub_n_core(acc, m_n);
       if (bw & (1u << 31)) {
         carry = bn192_add_core(acc, a);
         while (carry)
-          carry -= bn192_sub_core(acc, m);
+          carry -= bn192_sub_n_core(acc, m_n);
       }
       bw += bw;
     }
   }
   // copy and conditionally last subtract
-  bn192_nist_mod_192(result, acc, m);
+  bn192_nist_mod_192_n(result, acc, m_n);
 
 #else
 
