@@ -155,39 +155,32 @@ void bn192_mod_add_quick_n(bn_t result, const bn_t a, const bn_t b, const bn_ofn
 // result = (a - b) mod m where m=2^192-m_n, a < m, b < m, 0 < m_n < 2^96
 void bn192_mod_sub_quick_n(bn_t result, const bn_t a, const bn_t b, const bn_ofn_t m_n)
 {
-  bn_word_t borrow1 = 0; // borrow of a[]-b[]
-  bn_word_t borrow2 = 0; // borrow of a[]-b[]-m_n[]
-  bn_t result2; // a[]-b[]+m[]
-  for (int i = 0; i < ECDSA_OFn_NWORDS; ++i) {
+  bn_word_t borrow = 0; // borrow of a[]-b[]
+  for (int i = 0; i < ECDSA_NWORDS; ++i) {
     bn_word_t av = a[i];
     bn_word_t bv = b[i];
-    bn_word_t mv = m_n[i];
-    bn_word_t dif1 = av - borrow1;
-    bn_word_t dif2 = dif1 - bv;
-    borrow1 = (av < borrow1) | (dif1 < bv);
-
-    bn_word_t dif3 = dif2 - borrow2;
-    bn_word_t dif4 = dif3 - mv;
-    borrow2 = (dif2 < borrow2) | (dif3 < mv);
-
-    result[i]  = dif2;
-    result2[i] = dif4;
+    bn_word_t dif = av - borrow;
+    result[i] = dif - bv;
+    borrow = (av < borrow) | (dif < bv);
   }
-  for (int i = ECDSA_OFn_NWORDS; i < ECDSA_NWORDS; ++i) {
-    bn_word_t av = a[i];
-    bn_word_t bv = b[i];
-    bn_word_t dif1 = av - borrow1;
-    bn_word_t dif2 = dif1 - bv;
-    borrow1 = (av < borrow1) | (dif1 < bv);
-
-    bn_word_t dif3 = dif2 - borrow2;
-    borrow2 = (dif2 < borrow2);
-
-    result[i]  = dif2;
-    result2[i] = dif3;
+  if (borrow) {
+    borrow = 0;
+    for (int i = 0; i < ECDSA_OFn_NWORDS; ++i) {
+      bn_word_t rv = result[i];
+      bn_word_t mv = m_n[i];
+      bn_word_t dif = rv - borrow;
+      result[i] = dif - mv;
+      borrow = (rv < borrow) | (dif < mv);
+    }
+    if (borrow) {
+      for (int i = ECDSA_OFn_NWORDS; result[i] == 0; ++i) {
+        bn_word_t rv = result[i];
+        result[i] = rv -1;
+        if (rv)
+          break;
+      }
+    }
   }
-  if (borrow1)
-    memcpy(result, result2, sizeof(bn_t));
 }
 
 // bn192_mod_inverse_n - solves (a*x) mod n == 1, where n is a prime number
