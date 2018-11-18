@@ -14,29 +14,19 @@ typedef struct {
 } ec_point_t;
 
 typedef struct {
-  bn_t field;
   bn_ofn_t field_n;
   bn_t a;
   // bn_t b; // it seems, as long as we trust public key, parameter b is not used in verification process
-  bn_t order;
   bn_ofn_t order_n;
   ec_point_t generator;
 } ec_group_t;
 
 static ec_group_t st_group = {
- { // p
-  0xFFFFFFFF,  0xFFFFFFFF,  0xFFFFFFFE,
-  0xFFFFFFFF,  0xFFFFFFFF,  0xFFFFFFFF,
- },
  { // -p
   0-0xFFFFFFFF,  ~0xFFFFFFFF,  ~0xFFFFFFFE,
  },
  { // a
   0xFFFFFFFC,  0xFFFFFFFF,  0xFFFFFFFE,
-  0xFFFFFFFF,  0xFFFFFFFF,  0xFFFFFFFF,
- },
- { // order
-  0xB4D22831,  0x146BC9B1,  0x99DEF836,
   0xFFFFFFFF,  0xFFFFFFFF,  0xFFFFFFFF,
  },
  { // -order
