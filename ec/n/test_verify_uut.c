@@ -106,7 +106,7 @@ static void ec_point_dbl(
     /* n1 */
     if (a->Z_is_one) {
         bn192_nist_mod_192_sqr_n(n0, a->X, group->field_n);
-        bn192_mod_lshift1_quick(n1, n0, group->field);
+        bn192_mod_lshift1_quick_n(n1, n0, group->field_n);
         bn192_mod_add_quick_n(n0, n0, n1, group->field_n);
         bn192_mod_add_quick_n(n1, n0, group->a, group->field_n);
         /* n1 = 3 * X_a^2 + a_curve */
@@ -116,7 +116,7 @@ static void ec_point_dbl(
         bn192_mod_add_quick_n(n0, a->X, n1, group->field_n);
         bn192_mod_sub_quick_n(n2, a->X, n1, group->field_n);
         bn192_nist_mod_192_mul_n(n1, n0, n2, group->field_n);
-        bn192_mod_lshift1_quick(n0, n1, group->field);
+        bn192_mod_lshift1_quick_n(n0, n1, group->field_n);
         bn192_mod_add_quick_n(n1, n0, n1, group->field_n);
         /*-
          * n1 = 3 * (X_a + Z_a^2) * (X_a - Z_a^2)
@@ -139,25 +139,25 @@ static void ec_point_dbl(
     } else {
         bn192_nist_mod_192_mul_n(n0, a->Y, a->Z, group->field_n);
     }
-    bn192_mod_lshift1_quick(r->Z, n0, group->field);
+    bn192_mod_lshift1_quick_n(r->Z, n0, group->field_n);
     r->Z_is_one = 0;
     /* Z_r = 2 * Y_a * Z_a */
 
     /* n2 */
     bn192_nist_mod_192_sqr_n(n3, a->Y, group->field_n);
     bn192_nist_mod_192_mul_n(n2, a->X, n3, group->field_n);
-    bn192_mod_lshift_quick(n2, n2, 2, group->field);
+    bn192_mod_lshift_quick_n(n2, n2, 2, group->field_n);
     /* n2 = 4 * X_a * Y_a^2 */
 
     /* X_r */
-    bn192_mod_lshift1_quick(n0, n2, group->field);
+    bn192_mod_lshift1_quick_n(n0, n2, group->field_n);
     bn192_nist_mod_192_sqr_n(rX, n1, group->field_n);
     bn192_mod_sub_quick_n(r->X, rX, n0, group->field_n);
     /* X_r = n1^2 - 2 * n2 */
 
     /* n3 */
     bn192_nist_mod_192_sqr_n(n0, n3, group->field_n);
-    bn192_mod_lshift_quick(n3, n0, 3, group->field);
+    bn192_mod_lshift_quick_n(n3, n0, 3, group->field_n);
     /* n3 = 8 * Y_a^4 */
 
     /* Y_r */
@@ -276,7 +276,7 @@ static void ec_point_add(
     /* X_r = n6^2 - n5^2 * 'n7' */
 
     /* 'n9' */
-    bn192_mod_lshift1_quick(n0, r->X, group->field);
+    bn192_mod_lshift1_quick_n(n0, r->X, group->field_n);
     bn192_mod_sub_quick_n(n0, n3, n0, group->field_n);
     /* n9 = n5^2 * 'n7' - 2 * X_r */
 
@@ -430,10 +430,9 @@ static int ossl_ecdsa_verify_sig(
 {
     const ec_group_t* group   = &st_group;
     const ec_point_t* pub_key = &st_pub_key;
-    const bn_word_t* order = group->order;
 
-    if (bn192_is_zero(sig_r) || bn192_ucmp(sig_r, order) >= 0 ||
-        bn192_is_zero(sig_s) || bn192_ucmp(sig_s, order) >= 0)
+    if (bn192_is_zero(sig_r) || bn192_is_ge_n(sig_r, group->order_n) ||
+        bn192_is_zero(sig_s) || bn192_is_ge_n(sig_s, group->order_n))
     {
         return 0;                /* signature is invalid */
     }

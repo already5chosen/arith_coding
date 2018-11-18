@@ -85,6 +85,20 @@ int bn192_ucmp(const bn_t a, const bn_t b)
   return 0; // is equal
 }
 
+// return 1 when a+b_n >= 2^192 otherwise return 0
+int bn192_is_ge_n(const bn_t a, const bn_ofn_t b_n)
+{
+  for (int i = ECDSA_NWORDS-1; i >= ECDSA_OFn_NWORDS; --i)
+    if (a[i] != (bn_word_t)-1)
+      return 0;
+  bn_word_t carry = 0;
+  for (int i = 0; i < ECDSA_OFn_NWORDS; ++i) {
+    bn_word_t sum1 = a[i]   + carry;
+    bn_word_t sum2 = b_n[i] + sum1;
+    carry = (sum1 < carry) | (sum2 < sum1);
+  }
+  return carry;
+}
 
 void bn192_add_rshift1_n(bn_t result, const bn_t asrc, const bn_ofn_t b_n)
 {
@@ -227,32 +241,17 @@ void bn192_mod_inverse_n(bn_t result, const bn_t a, const bn_ofn_t n_n)
 
 
 
-// bn192_mod_lshift1_quick
-// result = (a + a) mod m where a < m, m > 2^191
-void bn192_mod_lshift1_quick(bn_t result, const bn_t a, const bn_t m)
+// bn192_mod_lshift1_quick_n
+// result = (a + a) mod m, where a < m, m = 2^192-m_n, m_n < 2^96
+void bn192_mod_lshift1_quick_n(bn_t result, const bn_t a, const bn_ofn_t m_n)
 {
-  bn_word_t carry  = 0; // carry of a[]+a[]
-  bn_word_t borrow = 0; // borrow of a[]+a[]-m[]
-  bn_t result2; // a[]+a[]-m[]
-  for (int i = 0; i < ECDSA_NWORDS; ++i) {
-    bn_word_t av = a[i];
-    bn_word_t mv = m[i];
-    bn_word_t sum = av + av + carry;
-    carry = av >> (BN192LIB_BITS_PER_WORD-1);
-
-    bn_word_t diff = sum - borrow;
-    borrow = (sum < borrow) | (diff < mv);
-    result[i] = sum;
-    result2[i] = diff - mv;
-  }
-  if (carry || !borrow)
-    memcpy(result, result2, sizeof(bn_t));
+  bn192_mod_add_quick_n(result, a, a, m_n);
 }
 
-void bn192_mod_lshift_quick(bn_t result, const bn_t a, int n, const bn_t m)
+void bn192_mod_lshift_quick_n(bn_t result, const bn_t a, int n, const bn_ofn_t m_n)
 {
   while (n > 0) {
-    bn192_mod_lshift1_quick(result, a, m);
+    bn192_mod_lshift1_quick_n(result, a, m_n);
     a = result;
     --n;
   }
