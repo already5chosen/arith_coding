@@ -333,7 +333,7 @@ void bn192_mulw_core(bn_word_t result[ECDSA_NWORDS+1], const bn_t a, bn_word_t b
     mh = (uint32_t)(mx>>32);
   }
   result[ECDSA_NWORDS] = mh;
-#elsif  (MULTIPLICATION_ALGO & 12)==4
+#elif  (MULTIPLICATION_ALGO & 12)==4
   // mul, no mulx
   uint32_t ax = a[0];
   uint32_t bh = b >> 16;

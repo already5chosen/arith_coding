@@ -104,10 +104,21 @@ static int allocate_bn(BIGNUM **buf, int buflen) {
   return 1;
 }
 
-int main(void)
+int main(int argz, char** argv)
 {
-  const int nKeys    = 100;
-  const int nDigests = 100;
+  int nKeys    = 100;
+  int nDigests = 100;
+  if (argz > 1) {
+    int val = strtol(argv[1], 0, 0);
+    if (val > 0)
+      nKeys = val;
+    if (argz > 2) {
+      val = strtol(argv[2], 0, 0);
+      if (val > 0)
+        nDigests = val;
+    }
+  }
+
   BN_CTX* ctx = BN_CTX_new();
   if (!ctx) {
     fprintf(stderr, "BN_CTX_new() fail.\n");
