@@ -131,6 +131,30 @@ void bn192_add_rshift1_n(bn_t result, const bn_t asrc, const bn_ofn_t b_n)
   result[ECDSA_NWORDS-1] = (r >> 1) | (r << (BN192LIB_BITS_PER_WORD-1));
 }
 
+// bn192_sub_n_core
+// acc = acc - (2^192-asrc)
+// return - borrow out
+static bn_word_t bn192_sub_n_core(bn_t acc, const bn_ofn_t asrc)
+{
+  bn_word_t a = asrc[0];
+  bn_word_t r = acc[0] + a;
+  acc[0] = r;
+  bn_word_t carry = r < a;
+  for (int i = 1; i < ECDSA_OFn_NWORDS; ++i) {
+    a = asrc[i];
+    bn_word_t sum1 = acc[i] + carry;
+    bn_word_t sum2 = sum1 + a;
+    acc[i] = sum2;
+    carry  = (sum1 < carry) | (sum2 < a);
+  }
+  for (int i = ECDSA_OFn_NWORDS; i < ECDSA_NWORDS; ++i) {
+    uint32_t r = acc[i] + carry;
+    acc[i] = r;
+    carry = (r < carry);
+  }
+  return carry ^ 1;
+}
+
 // bn192_mod_add_quick_n
 // result = (a + b) mod m where m=2^192-m_n, a < m, b < m, 0 < m_n < 2^96
 void bn192_mod_add_quick_n(bn_t result, const bn_t a, const bn_t b, const bn_ofn_t m_n)
@@ -144,23 +168,8 @@ void bn192_mod_add_quick_n(bn_t result, const bn_t a, const bn_t b, const bn_ofn
   }
   if (!carry)
     carry = bn192_is_ge_n(result, m_n);
-  if (carry) {
-    carry = 0; // carry of result[]+m_n[]
-    for (int i = 0; i < ECDSA_OFn_NWORDS; ++i) {
-      bn_word_t sum1 = result[i] + carry;
-      bn_word_t sum2 = m_n[i] + sum1;
-      result[i] = sum2;
-      carry = (sum1 < carry) | (sum2 < sum1);
-    }
-    if (carry) {
-      for (int i = ECDSA_OFn_NWORDS;  ; ++i) {
-        bn_word_t rv = result[i] + 1;
-        result[i] = rv;
-        if (rv != 0)
-          break;
-      }
-    }
-  }
+  if (carry)
+    bn192_sub_n_core(result, m_n);
 }
 
 // bn192_mod_sub_quick_n
@@ -449,36 +458,6 @@ void bn192_mulw_core(bn_word_t result[ECDSA_NWORDS+1], const bn_t a, bn_word_t b
 }
 #endif
 
-#if (MULTIPLICATION_ALGO & 1)==1
-// bn192_sub_n_core
-// acc = acc - (2^192-asrc)
-// return - borrow out
-static
-#if MULTIPLICATION_ALGO!=15
-inline
-#endif
-bn_word_t bn192_sub_n_core(bn_t acc, const bn_ofn_t asrc)
-{
-  bn_word_t a = asrc[0];
-  bn_word_t r = acc[0] + a;
-  acc[0] = r;
-  bn_word_t carry = r < a;
-  for (int i = 1; i < ECDSA_OFn_NWORDS; ++i) {
-    a = asrc[i];
-    bn_word_t sum1 = acc[i] + carry;
-    bn_word_t sum2 = sum1 + a;
-    acc[i] = sum2;
-    carry  = (sum1 < carry) | (sum2 < a);
-  }
-  for (int i = ECDSA_OFn_NWORDS; i < ECDSA_NWORDS; ++i) {
-    uint32_t r = acc[i] + carry;
-    acc[i] = r;
-    carry = (r < carry);
-  }
-  return carry ^ 1;
-}
-#endif
-
 #if (MULTIPLICATION_ALGO & 1)==1 && (MULTIPLICATION_ALGO & 12)!=8
 // bn192_mulsubw_n_core - multiply bn_t number = (2^192-a_n) by word and subtract product
 //                        from accumulator
@@ -639,7 +618,7 @@ void bn192_nist_mod_192_mul_n(bn_t result, const bn_t a, const bn_t b, const bn_
 #else
 
 #if (MULTIPLICATION_ALGO & 3)==0
- #error "MULTIPLICATION_ALGO % 4 == 3 is not supported"
+ #error "MULTIPLICATION_ALGO % 4 == 0 is not supported"
 #endif
 
 #if (MULTIPLICATION_ALGO & 3)==2
