@@ -260,7 +260,7 @@ void bn192_nist_mod_192(bn_t result, const bn_t a, const bn_t m)
 // 10 - N/A
 // 11                   bit-by-bit    bit-by-bit        No        No
 // 12 - N/A
-// 13 - N/A
+// 13                   convolution   word-by-word      No        No
 // 14 - N/A
 // 15                   word-by-word  word-by-word      No        No
 
@@ -269,6 +269,88 @@ void bn192_nist_mod_192(bn_t result, const bn_t a, const bn_t m)
 // mulx_core - result = a * b
 static void bn192_mulx_core(bn_word_t result[ECDSA_NWORDS*2], const bn_t a, const bn_t b)
 {
+#if (MULTIPLICATION_ALGO & 12)==12
+  uint32_t acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0, acc4 = 0, acc5 = 0;
+  for (int ri = 0;;) {
+    int aiBeg = ri < ECDSA_NWORDS ? 0 : ri - ECDSA_NWORDS + 2;
+    do {
+      uint32_t acc6, acc7, acc8, acc9;
+      if (ri != ECDSA_NWORDS*2-2) {
+        int ai = aiBeg;
+        int bi = ri - ai;
+        int ni = bi - ai + 1;
+        acc6 = acc7 = acc8 = acc9 = 0;
+        do {
+          uint32_t aw0 = a[ai+0];
+          uint32_t aw1 = a[ai+1];
+          uint32_t bw  = b[bi];
+          uint32_t a0 = aw0 & 0xFFFF;
+          uint32_t a2 = aw0 >> 16;
+          uint32_t a4 = aw1 & 0xFFFF;
+          uint32_t a6 = aw1 >> 16;
+          int bit_i = 8;
+          goto loop_entry;
+          do {
+            a0 += a0;
+            a2 += a2;
+            a4 += a4;
+            a6 += a6;
+            loop_entry:
+            if (bw & 1) {
+              acc0 += a0;
+              acc2 += a2;
+              acc4 += a4;
+              acc6 += a6;
+            }
+            if (bw & (1u << 8)) {
+              acc1 += a0;
+              acc3 += a2;
+              acc5 += a4;
+              acc7 += a6;
+            }
+            if (bw & (1u << 16)) {
+              acc2 += a0;
+              acc4 += a2;
+              acc6 += a4;
+              acc8 += a6;
+            }
+            if (bw & (1u << 24)) {
+              acc3 += a0;
+              acc5 += a2;
+              acc7 += a4;
+              acc9 += a6;
+            }
+            bw >>= 1;
+            --bit_i;
+          } while (bit_i != 0);
+
+          ai += 2;
+          bi -= 2;
+          ni -= 2;
+        } while (ni > 0);
+      }
+
+      acc4 += acc1 >> 24; acc1 <<=  8; acc0 += acc1; acc4 += acc0 < acc1;
+      acc4 += acc2 >> 16; acc2 <<= 16; acc0 += acc2; acc4 += acc0 < acc2;
+      acc4 += acc3 >>  8; acc3 <<= 24; acc0 += acc3; acc4 += acc0 < acc3;
+
+      result[ri] = acc0;
+      if (ri == ECDSA_NWORDS*2-2)
+        goto done;
+
+      acc0 = acc4;
+      acc1 = acc5;
+      acc2 = acc6;
+      acc3 = acc7;
+      acc4 = acc8;
+      acc5 = acc9;
+
+      ++ri;
+    } while (ri & 1);
+  }
+  done:
+  result[ECDSA_NWORDS*2-1] = acc4 + (acc5 << 8);
+#else
   uint64_t mxc = 0;
   for (int ai_beg_inc = 0; ai_beg_inc < 2; ++ai_beg_inc) {
     int ri     = ai_beg_inc==0 ? 0              : ECDSA_NWORDS-1;
@@ -310,14 +392,15 @@ static void bn192_mulx_core(bn_word_t result[ECDSA_NWORDS*2], const bn_t a, cons
     }
   }
   result[ECDSA_NWORDS*2-1] = (uint32_t)mxc;
+#endif
 }
 #endif
 
-#if (MULTIPLICATION_ALGO & 3)==3 && (MULTIPLICATION_ALGO & 12)!=8
+#if ((MULTIPLICATION_ALGO & 3)==3 && (MULTIPLICATION_ALGO & 12)!=8) || (MULTIPLICATION_ALGO==13)
 // mulw_core - multiply bn_t number by word
 // result - a * b
 static
-#if MULTIPLICATION_ALGO!=15
+#if (MULTIPLICATION_ALGO & 12) != 12
 inline
 #endif
 void bn192_mulw_core(bn_word_t result[ECDSA_NWORDS+1], const bn_t a, bn_word_t b)
